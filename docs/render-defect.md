@@ -1,86 +1,66 @@
-# Render defect: every 3-D draw is edges only
+# Render defect: characters drew as spikes — solved
 
 Recorded 2026-10-20 from driven runs of `out/build/linux-release/FuzionFrenzy`.
+Superseded the earlier reading of this defect as "every 3-D draw is edges only"; that
+description came from character-select frames where the only 3-D on screen was skinned
+characters, and those were the broken thing, not the fill mode.
 
-## What is on screen
+## What was on screen
 
-Everything the title draws in 2-D is right, and everything it draws in 3-D is an outline.
+Characters rendered as a fan of thin spikes radiating from one point: the shapes were
+positioned correctly in the frame and the 2-D art, text and HUD around them were right.
+`out/shots/before_55s_zoom.png` is the character-select roster in that state;
+`out/shots/fx_55s_zoom.png` is the same screen after the fix.
 
-| Frame | What renders | What is wrong |
+A fan of spikes converging on one point is the signature of a vertex that should have been
+placed by a bone transform and instead got the zero matrix: every vertex whose bone is
+missing collapses to the origin, and the triangles joining it to the vertices that did
+transform stretch out as slivers.
+
+## Two readings ruled out first
+
+- **Fill mode.** `vulkan.cpp` picks `VK_POLYGON_MODE_LINE` only when the pipeline key's
+  `fill` is `0x1B01` (`D3DFILL_WIREFRAME`). A probe at present time logged
+  `g_state.rs[kRsFillMode]` as `0x1B02` (`D3DFILL_SOLID`), and a probe over the first 24
+  pipelines the title built showed `fill=1B02` on every one. Nothing asked for wireframe.
+- **Draw topology.** The same pipeline probe showed `topo=2` (triangles) on 20 of 24
+  pipelines. The geometry was being drawn as triangles.
+
+## Cause
+
+A vertex-constant upload on the NV2A is
+
+    [0x41EA4, register + 96]  then  [(dwords << 18) | 0xB80, data...]
+
+and the load register the data lands in **advances by one per four dwords written**, across
+as many packets as the upload needs. One packet carries at most the 32 dwords of methods
+`0xB80..0xBFC`, which is eight registers.
+
+`Walk` in `sdk/runtime/xdk/d3d8.cpp` required the `0x41EA4` header on every constant packet.
+A world transform is four registers, fits one packet, and survived. A skinning palette is
+tens of registers, so it arrived as several packets of which only the first followed a
+`0x41EA4`; every continuation fell through to the generic method path, which logs the method
+once and discards the values. Characters therefore kept only the first eight registers of
+their palette and every other bone stayed at the zero matrix.
+
+The walker now tracks the load register as device state, exactly as the hardware does.
+
+## Evidence it is fixed
+
+| Measure | Before | After |
 | --- | --- | --- |
-| `out/shots/boot1_25s.png` (character select) | text, portrait discs, names | all six portraits except one are black hollow silhouettes on live coloured discs |
-| `out/shots/gameplay1_40s.png` (roster) | text, discs | character silhouettes are black hollow outlines |
-| `out/shots/gameplay1_55s.png` (player confirm) | text, portraits, player names | the 3-D weapons above the names are stretched line-fan outlines in wrong shapes, with no fill |
-| `out/shots/gameplay1_70s.png` (Stage I, Military Base, round one) | banner art | the arena is a full wireframe around one flat-shaded sand platform; the four player characters are not visible |
-| `out/shots/front_00049.png` (guest front buffer) | Microsoft logo | correct |
+| Packets `Walk` discarded, Military Base arena | 33 | 1 (method `0x1710`, a single unrelated one-value packet) |
+| Character select | spikes from a point | fully skinned, textured figures |
 
-So: vertex positions, matrices and indices are right (the silhouettes are the right shapes in the
-right places), 2-D and texture art are right, and **triangle fill is missing**. The defect is not in
-the guest - its own front buffer (the Microsoft logo frame above) is complete - so it is in the host
-path between the guest's draws and the swapchain.
+`out/shots/fx_55s_zoom.png` and `out/shots/pass_55s_zoom.png` show Jet, Geena and Samson
+rendering correctly; `out/shots/deep_90s.png` shows a solid, textured arena in play.
 
-## Classification
+## Still open: a white arena floor
 
-Two known SDK defect classes were ruled out with code evidence by a static audit
-(`docs/d3d8-rest-symbols.md` covers the surrounding names):
-
-- Vertex attribute locations numbered by guest register: fixed in this SDK
-  (`sdk/runtime/gpu/vulkan.cpp:1187-1194`, `attrs[na].location = na`).
-- The 2-D sprite UV-rect clamp acting on 3-D draws: it acts on 2-D quads only.
-
-The audit's leading suspect for the **characters specifically** is the one D3D entry that is
-deliberately not replaced: the 3925 `D3DDevice_SetVertexShaderConstant` (`0x1F84A0`, stdcall,
-`(Register+300)*16` mirror, +96 hardware bias), through the chain
-
-```
-guest SetVertexShaderConstant body -> ScratchPush/MakeSpace
-  -> Walk() -> StoreVsConstants -> g_state.vsc[192]
-```
-
-Skinning palettes are uploaded there (`SetVertexShaderConstant(-96, …)` -> c0-c56, and `(-36, …)` ->
-c60+; the audit found the palette upload at `sub_3CED0`). The host touches only c58/c59 (viewport
-pair), c97/c98 (fold) and c121 (2-D centre), so nothing else in the SDK competes for those slots.
-`Walk`'s generic path does `break` on `(head & 0xA0030003)`, which can silently drop everything after
-one unexpected dword; its "Walk drops method" diagnostic is `LOGI` and therefore release-silent.
-
-## Measurements taken, and what they exclude
-
-- A verbose intro run logs **no** "Walk drops" lines, and only 8 texture-stage, 8 Present and 3
-  BlockOnResource `d3d:` lines. That excludes the drop hypothesis for the intro, but the intro is not
-  where the defect shows: it is visible on the character select and in the arena, which have not been
-  run under the verbose build yet.
-- The intro and menu are **one draw and one clear per frame**, plus a 1.17 MB texture upload per
-  frame, which is the Bink movie frame being uploaded each present.
-- Perf on the same run: 25-30 fps at 40 ms per frame, of which the host accounts for about
-  1.5 ms (draw 1.2, present 0.23). **The renderer is not the frame-rate problem** at these draw
-  counts. Three unsynchronised ~60 Hz clocks pace this port (host `fps_cap`, the simulated vertical
-  blank, and the compositor's FIFO present), so part of "low fps" is the title running at its own
-  capped rate.
-
-## The next measurement, before any fix
-
-`sdk/runtime/gpu/vulkan.cpp:1621` reads
-
-```cpp
-k.fill = s.rs[kRsFillMode];
-```
-
-`kRsFillMode` is the **canonical (XDK 5849) index 139**; in XDK 3925 the same state is index **119**
-(`RenderState_FillMode = 119` in `sdk/xdk/3925/layout.toml`). The remap in
-`sdk/runtime/xdk/d3d8.cpp` translates the writers it knows about. If anything still writes the guest
-or host render-state array at a 3925-derived index, the host reads the wrong slot and the Vulkan
-polygon mode becomes `VK_POLYGON_MODE_LINE` - which is exactly "correct vertices, edges only, every
-3-D draw, 2-D unaffected", and would also explain why one platform is flat-shaded while everything
-around it is not.
-
-That is a hypothesis. It must be measured, not edited:
-
-1. Run the verbose build far enough to reach the arena
-   (`FUZION_AUTOSTART=1 tools/shot_run.sh arena1 out/build/linux-verbose 70`) and read the `perf:`
-   line for the in-arena draw count.
-2. Log `s.rs[kRsFillMode]` and the resolved `k.fill` once per present from `vulkan.cpp` and compare
-   with the guest's own `D3D_RenderState[119]`.
-3. If they disagree, find the writer. If they agree, the fill hypothesis is dead and the next
-   candidate is the draw-topology interpretation of the push stream on Vulkan.
-
-No code has been changed on this evidence yet.
+Separately, one arena's floor shades to flat `(255,255,255)` while every object standing on
+it textures and shades correctly — `out/shots/speed_125s.png`, where 313,545 of 320,000
+pixels sampled in the middle of the frame are pure white. It is **not** caused by the
+renderer's per-draw reuse caches: scanning eight gameplay frames with every cache disabled
+gave a worst case of 2.5% pure white against 2.1% with them all enabled. Stage-0 textures
+bind cleanly in that scene (`undescribable 0` over a 200 s run), so it is not a missing
+texture falling back to white. Not yet root-caused.

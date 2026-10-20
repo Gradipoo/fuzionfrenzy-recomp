@@ -1,5 +1,6 @@
 #include <atomic>
 #include <chrono>
+#include <cmath>
 #include <mutex>
 #include <cstdlib>
 #include <cstring>
@@ -14,14 +15,19 @@
 
 namespace {
 
-// Opt-in self-test (FUZION_AUTOSTART): a scripted pad on port 0, repeating a 10 s
-// cycle from ~2 s after the first poll: Start (wButtons 0x0010) held 0-0.5 s,
-// D-pad Up (wButtons 0x0001) held 3-3.5 s, then A (analog[0] = 0xFF, the Xbox
-// pressure byte, not a wButtons bit) held 5-5.5 s, all released between. A
-// title commonly ignores presses through its intro movies and for a while
-// after them, so the cycle repeats: a Start lands whenever the title is
-// responsive and an A whenever a menu is. Only ever ORs bits/bytes in,
-// never clears a real press. Unset: no-op, pad untouched.
+// Opt-in self-test (FUZION_AUTOSTART): a scripted pad on port 0. For the first
+// FUZION_AUTOSTART_PLAY_MS (default 75 s, about how long the intro movie and the
+// menus take) it repeats a 10 s cycle from ~2 s after the first poll: Start
+// (wButtons 0x0010) held 0-0.5 s, D-pad Up (wButtons 0x0001) held 3-3.5 s, then A
+// (analog[0] = 0xFF, the Xbox pressure byte, not a wButtons bit) held 5-5.5 s, all
+// released between. A title commonly ignores presses through its intro movies and
+// for a while after them, so the cycle repeats: a Start lands whenever the title is
+// responsive and an A whenever a menu is.
+// After that it plays: the left stick walks a slow circle and A is tapped every 2 s,
+// and Start is never pressed again. Pressing Start on the cycle forever pauses and
+// unpauses the minigame every 10 s, which both stops the game playing and makes a
+// frame rate measured over that window the pause screen's, not the arena's.
+// Only ever ORs bits/bytes in, never clears a real press. Unset: no-op, pad untouched.
 // Step mode (FUZION_STEP=<path>): each new token written to that file is a burst
 // of timed pulses generated here, on the game's own poll clock: NAME or NAMExN
 // (START, A, B, X, Y, BACK, UP, DOWN, LEFT, RIGHT, LSUP, LSDOWN, LSLEFT,
@@ -113,6 +119,24 @@ void AutostartPad(int port, input::Pad& pad) {
         return;
     }
     const int64_t elapsed = now - first_ms.load(std::memory_order_relaxed);
+    static const int64_t play_after = [] {
+        const char* v = std::getenv("FUZION_AUTOSTART_PLAY_MS");
+        char* e = nullptr;
+        int64_t ms = v && v[0] ? std::strtoll(v, &e, 10) : 0;
+        return ms > 0 && e && !*e ? ms : 75000;
+    }();
+    if (elapsed >= play_after) {
+        // In the arena: walk and hit A, and never press Start again - that is the pause button.
+        static std::atomic<bool> said{false};
+        if (!said.exchange(true)) LOGI("fuzion autostart: playing (stick and A only, no more Start)");
+        const double t = double(elapsed - play_after) / 1000.0;
+        pad.connected = true;
+        const int16_t ax = int16_t(24000 * std::cos(t * 0.7)), ay = int16_t(24000 * std::sin(t * 0.7));
+        if (pad.lx == 0) pad.lx = ax;
+        if (pad.ly == 0) pad.ly = ay;
+        if ((elapsed - play_after) % 2000 < 250 && pad.analog[0] < 0xFF) pad.analog[0] = 0xFF;  // Xbox A
+        return;
+    }
     const int64_t phase = elapsed >= 2000 ? (elapsed - 2000) % 10000 : -1;
     const bool start = phase >= 0 && phase < 500;
     const bool up = phase >= 3000 && phase < 3500;

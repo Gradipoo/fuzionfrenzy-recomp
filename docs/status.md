@@ -1,6 +1,6 @@
 # Bring-up status
 
-Recorded 2026-10-19. Every number below was observed on this machine or read from a file in this
+Recorded 2026-10-20. Every number below was observed on this machine or read from a file in this
 repository. Where a claim has not been exercised at runtime it says so; that is the authoritative
 distinction in this document.
 
@@ -13,12 +13,17 @@ distinction in this document.
 | XDK signature set | the SDK shipped 5849 and 5558 only; `sdk/xdk/3925/` was seeded by `tools/sig_bootstrap.py` and names 14 of 240 by constants alone, because this XBE has **no `.XTLID` section** |
 | Kernel imports | 111 imported, 111 covered, 0 uncovered (`docs/kernel-coverage.md`) |
 | Recompilation | 10,589 functions, 633,913 instructions, 2,165,441 of 2,368,328 code bytes (91.4%), 384 jump tables |
-| Native Linux build (Vulkan + SDL3) | builds and links, `out/build/linux-release/FuzionFrenzy` |
-| Windows build (D3D12 + XAudio2), cross-compiled on Linux | builds and links, `out/build/windows-cross/FuzionFrenzy.exe`, 15,944,704 bytes — **never run on Windows** |
+| Native Linux build (Vulkan + SDL3) | builds, links and plays, `out/build/linux-release/FuzionFrenzy` |
+| Windows build (D3D12 + XAudio2), cross-compiled on Linux | builds and links, `out/build/windows-cross/FuzionFrenzy.exe`, 15,951,360 bytes — **never run on Windows**; under Wine 11.20 it reaches a minigame in play with zero shader failures (`/tmp/wine_play.png`) |
 | Boot | starts, reads settings, finds and verifies the disc, runs the title to its Direct3D device creation |
-| Picture on screen | **never reached** |
-| Audio | **never reached** |
+| Picture on screen | yes — intro movie, menus, character select and arenas in play |
+| Gameplay | reaches minigames and plays them under the scripted pad (`FUZION_AUTOSTART=1`) |
+| Characters | render skinned and textured (`docs/render-defect.md`) |
+| Frame rate, Linux/Vulkan | mean 59.9 fps over 199 s of play, worst second 29.9, against 41.7 / 17.0 before the renderer work |
+| In-game clock | real time: 1:30 to 1:16 over 15 s of wall clock |
+| Audio | **never verified** |
 | F1 / F2 panels in play | **never seen running** |
+| Known defect | one arena's floor shades flat white (`docs/render-defect.md`) |
 
 ## Symbol coverage
 
