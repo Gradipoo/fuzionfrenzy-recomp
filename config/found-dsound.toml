@@ -1,0 +1,26 @@
+# DSOUND names proven in Fuzion Frenzy default.xbe (XDK 3925). Evidence: docs/dsound-symbols.md
+# 23 of the 63 DSOUND target names. The other 40 have no code in this image (see the doc).
+[symbols]
+IDirectSound_Release                  = 0x206A55
+IDirectSoundBuffer_Unlock             = 0x206A6B
+IDirectSoundBuffer_Release            = 0x206A70
+DirectSoundUseFullHRTF                = 0x206A86
+IDirectSound_SetDistanceFactor        = 0x2072B6
+IDirectSound_CommitDeferredSettings   = 0x2072DA
+IDirectSound_SetI3DL2Listener         = 0x2072F2
+IDirectSoundBuffer_SetVolume          = 0x207312
+IDirectSoundBuffer_SetMaxDistance     = 0x20732E
+IDirectSoundBuffer_SetMinDistance     = 0x207352
+IDirectSoundBuffer_SetPosition        = 0x207376
+IDirectSoundBuffer_SetVelocity        = 0x2073AB
+IDirectSoundBuffer_GetStatus          = 0x2073E0
+IDirectSoundBuffer_GetCurrentPosition = 0x2073FC
+IDirectSoundBuffer_SetCurrentPosition = 0x20741C
+IDirectSoundBuffer_Lock               = 0x207438
+DirectSoundDoWork                     = 0x207468
+IDirectSoundBuffer_SetFrequency       = 0x207953
+IDirectSoundBuffer_Play               = 0x20796F
+IDirectSoundBuffer_Stop               = 0x207993
+IDirectSoundBuffer_SetBufferData      = 0x2079AB
+IDirectSound_CreateSoundBuffer        = 0x207D05
+DirectSoundCreate                     = 0x207E35

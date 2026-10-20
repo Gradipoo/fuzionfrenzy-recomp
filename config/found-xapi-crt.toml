@@ -1,0 +1,26 @@
+# XAPI / XPP / CRT-math names proven in Fuzion Frenzy default.xbe (XDK 3925). Evidence: docs/xapi-crt-symbols.md
+[symbols]
+# LIBC 3911 x87 math (byte-identical to the 5849 signatures, callee trees included)
+_CIacos  = 0x1E05B0
+_CIasin  = 0x1E067C
+crt_acos = 0x1E05CD
+crt_asin = 0x1E0699
+crt_cos  = 0x1E1129
+crt_pow  = 0x1DF6AC
+crt_sin  = 0x1E1065
+crt_sqrt = 0x1E11D9
+
+# XAPILIB 3911, XPP section
+XInitDevices   = 0x24CA33
+XInputClose    = 0x24D2A2
+XInputGetState = 0x24D2AE
+XInputOpen     = 0x24D22D
+XInputSetState = 0x24D31F
+
+# XAPILIB 3911, .text
+XLaunchNewImageA   = 0x030603
+XMountUtilityDrive = 0x030E25
+
+# sec-less rows (no 5849 signature) that do exist in this 3925 image
+D3DDevice_SetPalette              = 0x1F60F0
+IDirectSound_DownloadEffectsImage = 0x20726F

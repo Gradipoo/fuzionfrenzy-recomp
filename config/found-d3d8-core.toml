@@ -1,0 +1,41 @@
+# d3d8-core names proven in Fuzion Frenzy default.xbe (XDK 3925). Evidence: docs/d3d8-core-symbols.md
+# Every entry is a stdcall/fastcall entry whose stack bytes popped (retn N) and register inputs match the
+# signature the SDK host body implements; see the doc for the one documented exception (MakeSpace, ecx).
+[symbols]
+CDevice_KickOff                   = 0x1FAED0
+D3D_BlockOnResource               = 0x1FB320
+D3D_BlockOnTime                   = 0x1FB020
+D3D_InitDefaultState              = 0x1FB580
+D3D_InternalAddRef                = 0x1FC780
+D3D_InternalRelease               = 0x1FC910
+D3D_KickOffAndWaitForIdle         = 0x1FB300
+D3D_SetFence                      = 0x1FAF80
+D3DDevice_BlockUntilVerticalBlank = 0x1F5520
+D3DDevice_Clear                   = 0x1FC1B0
+D3DDevice_CopyRects               = 0x1F58E0
+D3DDevice_CreateVertexShader      = 0x1F7EC0
+D3DDevice_DeleteVertexShader      = 0x1F82A0
+D3DDevice_DrawIndexedVertices     = 0x201570
+D3DDevice_DrawVertices            = 0x2014D0
+D3DDevice_DrawVerticesUP          = 0x201390
+D3DDevice_InsertFence             = 0x1F5550
+D3DDevice_LoadVertexShader        = 0x1F8090
+D3DDevice_MakeSpace               = 0x1FB110
+D3DDevice_PersistDisplay          = 0x1F6490
+D3DDevice_Release                 = 0x1F54D0
+D3DDevice_SelectVertexShader      = 0x1F80F0
+D3DDevice_SetPixelShader          = 0x202320
+D3DDevice_SetRenderTarget         = 0x1F5640
+D3DDevice_SetShaderConstantMode   = 0x1F8160
+D3DDevice_SetVertexShader         = 0x1F83C0
+D3DResource_BlockUntilNotBusy     = 0x1FC680
+D3DResource_IsBusy                = 0x1FC850
+Direct3D_CreateDevice             = 0x1F7650
+Lock2DSurface                     = 0x1FD160
+
+# PROVEN BUT HELD BACK - do not merge until the host body speaks 3925 render-state numbers.
+# 0x1F66A0 is SetRenderStateNotInline beyond doubt, but sdk/runtime/xdk/d3d8.cpp indexes the
+# encode table and D3D_RenderState with 5849 numbers (simple < 0x5C), while this build's simple
+# range ends at 0x52 and its complex range is 0x74-0x8F. Left at 0, the guest body routes 3925
+# numbers through 3925's own tables into the value-only leaf setters, which is correct.
+# D3DDevice_SetRenderStateNotInline = 0x1F66A0

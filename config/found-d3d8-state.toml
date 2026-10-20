@@ -1,0 +1,51 @@
+# D3D8 state-setting and texture-stage names proven in Fuzion Frenzy default.xbe (XDK 3925).
+# Evidence: docs/d3d8-state-symbols.md. 41 of the 52 adopted names; the other 11 are absent from this image.
+# Before merging, read "Wiring preconditions" in that doc: XDK 3925 numbers its render states and deferred
+# texture-stage states differently from the 5849 tables the SDK uses today.
+[symbols]
+# device.obj
+D3DDevice_SetTransform                         = 0x1F5360
+D3DDevice_SetMaterial                          = 0x1F54A0
+D3DDevice_SetViewport                          = 0x1F5B70
+D3DDevice_SetLight                             = 0x1F5CD0
+D3DDevice_LightEnable                          = 0x1F5EB0
+D3DDevice_SetTexture                           = 0x1F5F90
+D3DDevice_SetIndices                           = 0x1F6170
+D3DDevice_SetScissors                          = 0x1F6300
+# state.obj, numbering-independent leaves (method/value or texture states 22..30)
+D3DDevice_SetRenderState_Simple                = 0x1F6650
+D3DDevice_SetTextureState_TexCoordIndex        = 0x1F6BF0
+D3DDevice_SetTextureState_BumpEnv              = 0x1F6CD0
+D3DDevice_SetTextureState_BorderColor          = 0x1F6D30
+D3DDevice_SetTextureState_ColorKeyColor        = 0x1F6D70
+# state.obj, host body takes a texture-stage type: 3925 types 0..21 are rotated against 5849
+D3DDevice_SetTextureStageStateNotInline        = 0x1F6DB0
+# state.obj, complex render states: host body mirrors into D3D_RenderState by index, needs the 3925 index table
+D3DDevice_SetRenderState_PSTextureModes        = 0x1F6620
+D3DDevice_SetRenderState_EdgeAntiAlias         = 0x1F6730
+D3DDevice_SetRenderState_ShadowFunc            = 0x1F6760
+D3DDevice_SetRenderState_FogColor              = 0x1F6790
+D3DDevice_SetRenderState_CullMode              = 0x1F67E0
+D3DDevice_SetRenderState_FrontFace             = 0x1F6850
+D3DDevice_SetRenderState_NormalizeNormals      = 0x1F6890
+D3DDevice_SetRenderState_TextureFactor         = 0x1F68C0
+D3DDevice_SetRenderState_LineWidth             = 0x1F6910
+D3DDevice_SetRenderState_Dxt1NoiseEnable       = 0x1F6970
+D3DDevice_SetRenderState_LogicOp               = 0x1F6A70
+D3DDevice_SetRenderState_FillMode              = 0x1F6AC0
+D3DDevice_SetRenderState_BackFillMode          = 0x1F6B00
+D3DDevice_SetRenderState_TwoSidedLighting      = 0x1F6B50
+D3DDevice_SetRenderState_VertexBlend           = 0x1F6BB0
+D3DDevice_SetRenderState_ZEnable               = 0x1F7300
+D3DDevice_SetRenderState_StencilEnable         = 0x1F7370
+D3DDevice_SetRenderState_StencilFail           = 0x1F73F0
+D3DDevice_SetRenderState_YuvEnable             = 0x1F7460
+D3DDevice_SetRenderState_OcclusionCullEnable   = 0x1F7490
+D3DDevice_SetRenderState_StencilCullEnable     = 0x1F74F0
+D3DDevice_SetRenderState_RopZCmpAlwaysRead     = 0x1F7550
+D3DDevice_SetRenderState_RopZRead              = 0x1F7570
+D3DDevice_SetRenderState_DoNotCullUncompressed = 0x1F7590
+D3DDevice_SetRenderState_MultiSampleAntiAlias  = 0x1F75B0
+D3DDevice_SetRenderState_MultiSampleMask       = 0x1F7600
+# vertex-shader obj
+D3DDevice_SetStreamSource                      = 0x1F8000
