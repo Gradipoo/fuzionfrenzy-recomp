@@ -1,0 +1,19 @@
+# DSOUND names that exist in XDK 3925 but not in the 5849/5558 signature sets, proven in
+# Fuzion Frenzy default.xbe. Evidence: docs/dsound-3925-gaps.md. The rows are now in
+# sdk/xdk/3925/signatures.toml; merge adds them to config/game.toml.
+#
+# Mergeable as-is: sdk/runtime/xdk/dsound.cpp already carries the host body for every name
+# below, so a named address never binds to nothing. No staged marker.
+
+[symbols]
+# (this, DSCAPS*), retn 8. Fills the four-dword DSCAPS the title only logs. Called from 13
+# game sites, first from bInitSpecificWave at 0x5540F, which faults today without the body.
+IDirectSound_GetCaps = 0x207253
+
+# (this, DS3DLISTENER*, apply), retn 0Ch. 16-dword listener copy in the guest. The game
+# builds dwSize=0x40 at 0x559EB and calls it deferred at 0x55AC2, then commits at 0x55ACE.
+IDirectSound_SetAllParameters = 0x207296
+
+# (this, count, DSBPOSITIONNOTIFY*), retn 0Ch. The game arms one entry (offset 0 or
+# 0x1F800, event at object +0x44) at 0x57521 and 0x575CF for its double-buffered stream.
+IDirectSoundBuffer_SetNotificationPositions = 0x2079CB

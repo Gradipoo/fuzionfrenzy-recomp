@@ -185,7 +185,12 @@ def main() -> int:
             if hit is None:
                 conflicts.append(f"{name}: 0x{addr:X} is outside every section of {xbe}")
                 continue
-            if (sec := want_sec.get(name)) and sec != hit[0] and sec != ".text":
+            # The expected section only means anything when this image has a section by that name.
+            # A library linked into .text instead of its own section - Bink is, in Fuzion Frenzy,
+            # which is why the 5849 set's sec = "BINK" names can never match here - would otherwise
+            # be refused for landing where it actually lives.
+            names = {s[0] for s in sections}
+            if (sec := want_sec.get(name)) and sec in names and sec != hit[0] and sec != ".text":
                 conflicts.append(
                     f"{name}: 0x{addr:X} is in section {hit[0]}, but this name's code lives in {sec}"
                 )
