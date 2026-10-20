@@ -1,6 +1,6 @@
 # XAPI / XPP / CRT-math names proven in Fuzion Frenzy default.xbe (XDK 3925). Evidence: docs/xapi-crt-symbols.md
 [symbols]
-# LIBC 3911 x87 math (byte-identical to the 5849 signatures, callee trees included)
+# LIBC 3911 x87 math (bodies byte-identical to the 5849 signatures modulo addresses)
 _CIacos  = 0x1E05B0
 _CIasin  = 0x1E067C
 crt_acos = 0x1E05CD

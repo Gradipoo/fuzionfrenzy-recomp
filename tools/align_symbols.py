@@ -730,9 +730,15 @@ class Image:
         self.cache[va] = ins
         return ins
 
-    def sweep_calls(self) -> list[int]:
-        """rel32 call targets of a linear sweep of the code sections, as the signer's Sweep finds them."""
+    def sweep(self) -> tuple[list[int], list[int]]:
+        """A linear sweep of the code sections, as the signer's Sweep does it.
+
+        Returns the rel32 call targets, and the 16-aligned starts the signer's start rule adds:
+        an instruction start right after a ret, jmp, int3 or nop that no conditional or short
+        jump targets.
+        """
         calls: list[int] = []
+        labels: set[int] = set()
         starts: dict[str, bytearray] = {}
         d, base = self.data, self.base
 
@@ -747,6 +753,8 @@ class Image:
                 st[o + i] = 0
             if ins.flow == FLOW_CALL and ins.rel and ins.rel_size == 32:
                 calls.append(ins.target)
+            elif ins.rel and (ins.flow == FLOW_COND or ins.rel_size == 8):
+                labels.add(ins.target)
             return ins.length
 
         for s in self.code:
@@ -764,7 +772,21 @@ class Image:
             o += step(s, st, o)
             while o < len(st) and not st[o]:
                 o += step(s, st, o)
-        return sorted(set(calls))
+        aligned = []
+        for s in self.code:
+            st = starts[s.name]
+            for va in range((s.va + 15) & ~15, s.code_end, 16):
+                o = va - s.va
+                if not st[o] or va in labels:
+                    continue
+                p = o - 1
+                while p > 0 and not st[p]:
+                    p -= 1
+                ins = decode(d, s.va + p - base, s.code_end - base, s.va + p) if o else None
+                if not o or (ins and p + ins.length == o and (
+                        ins.flow in (FLOW_RET, FLOW_JMP) or ins.mnem in ("int3", "nop"))):
+                    aligned.append(va)
+        return sorted(set(calls)), aligned
 
 
 # ----------------------------------------------------------------------------- function shape
@@ -779,7 +801,6 @@ class Shape:
     regs: int
     calls: int
     k: tuple[int, ...]
-    targets: tuple[int, ...] = ()
 
 
 def extent(img: Image, va: int, bound: int) -> int:
@@ -881,8 +902,7 @@ def shape_at(img: Image, va: int, bounds: list[int]) -> Shape | None:
     if not length:
         return None
     k, ret, regs = trace(img, va, length)
-    targets = external_targets(img, va, length)
-    return Shape(va, length, ret, regs, len(targets), k, tuple(targets))
+    return Shape(va, length, ret, regs, len(external_targets(img, va, length)), k)
 
 
 def regs_text(mask: int) -> list[str]:
@@ -934,7 +954,7 @@ class Ref:
     spacer: bool = False
 
     def describe(self) -> str:
-        ret = "?" if self.ret is None else ("jmp" if not self.ret else "/".join(map(str, self.ret)))
+        ret = ret_text(self.ret)
         regs = "?" if self.regs is None else (",".join(regs_text(self.regs)) or "-")
         lens = "/".join(str(n) for n in self.lens) or "?"
         calls = "/".join(str(n) for n in self.calls) or "?"
@@ -1017,6 +1037,7 @@ class World:
     ff_shapes: dict[int, Shape]
     ff_starts: dict[str, list[int]]
     ff_interior: dict[str, list[int]]
+    ff_added: dict[str, list[int]]
     ff_inventory: int
     ref_img: Image
     ref_calls: set[int]
@@ -1026,6 +1047,8 @@ class World:
     ref_shapes: dict[int, Shape | None] = field(default_factory=dict)
     df: dict[str, Counter] = field(default_factory=dict)
     self_check: tuple[int, int, list[str]] = (0, 0, [])
+    ff_listed: dict[str, int] = field(default_factory=dict)  # recompiler starts per section
+    cross: dict[str, list[int]] = field(default_factory=dict)  # 5849 vs 5558: [equal, both known]
 
     def ref_shape(self, va: int) -> Shape | None:
         if va not in self.ref_shapes:
@@ -1049,6 +1072,14 @@ class World:
 
 def load_world() -> World:
     cfg = tomllib.loads((ROOT / "config/game.toml").read_text())
+    xbe_path = ROOT / cfg["xbe"]["path"]
+    mapping = ROOT / cfg["xbe"]["out"] / "x86_func_mapping.cpp"
+    inputs = [ROOT / "docs/symbol-targets.json", ROOT / "sdk/xdk/5849/signatures.toml",
+              ROOT / "config/ref/5558-signed.toml", xbe_path, ROOT / "out/ff.exe", ROOT / "out/sims5558.exe", mapping]
+    missing = [str(p.relative_to(ROOT)) for p in inputs if not p.exists()]
+    if missing:
+        raise SystemExit(f"missing input: {', '.join(missing)} (out/*.exe come from sdk/tools/symbols/xbe2pe.py,"
+                         f" {mapping.relative_to(ROOT)} from the recompiler)")
     targets = json.loads((ROOT / "docs/symbol-targets.json").read_text())
     s49 = tomllib.loads((ROOT / "sdk/xdk/5849/signatures.toml").read_text())["symbols"]
     s58 = tomllib.loads((ROOT / "config/ref/5558-signed.toml").read_text())["symbols"]
@@ -1056,9 +1087,9 @@ def load_world() -> World:
     anchors = {n: v for n, v in cfg["symbols"].items() if v}
 
     # the target: out/ff.exe bytes, the section table of the XBE it was made from
-    base, sections = xbe_sections(ROOT / cfg["xbe"]["path"])
+    base, sections = xbe_sections(xbe_path)
     data = (ROOT / "out/ff.exe").read_bytes()
-    xbe = (ROOT / cfg["xbe"]["path"]).read_bytes()
+    xbe = xbe_path.read_bytes()
     for s in sections:
         o = s.va - base
         hdr = u32(xbe, 0x120) - base + sections.index(s) * 56
@@ -1067,16 +1098,22 @@ def load_world() -> World:
         if data[o:o + n] != xbe[raw:raw + n]:
             raise SystemExit(f"out/ff.exe does not hold the bytes of {cfg['xbe']['path']} section {s.name}")
     ff = Image(data, base, sections, cfg["xbe"]["code_sections"])
-    ff_calls = set(ff.sweep_calls())
+    ff_call_list, ff_aligned = ff.sweep()
+    ff_calls = set(ff_call_list)
     bounds = sorted(ff_calls | set(anchors.values()) | {int(k, 0) for k in cfg.get("functions", {})})
     ff_sec = {s.name: s for s in sections}
-    inv = inventory(ROOT / cfg["xbe"]["out"] / "x86_func_mapping.cpp")
+    inv = inventory(mapping)
+    listed = set(inv)
     ff_shapes: dict[int, Shape] = {}
     ff_starts: dict[str, list[int]] = {}
     ff_interior: dict[str, list[int]] = {}
+    ff_added: dict[str, list[int]] = {}
     for name in LIBRARY_SECTIONS:
         s = ff_sec[name]
-        starts = [v for v in inv if s.va <= v < s.va + s.vsize]
+        # the recompiler's starts, plus starts the signer's own rule finds that it did not list
+        # (typically functions only reached through another function's jump table)
+        ff_added[name] = [v for v in ff_aligned if s.va <= v < s.va + s.vsize and v not in listed]
+        starts = sorted([v for v in inv if s.va <= v < s.va + s.vsize] + ff_added[name])
         for v in starts:
             sh = shape_at(ff, v, bounds)
             if sh:
@@ -1089,21 +1126,37 @@ def load_world() -> World:
     # (checked below against every signed function).
     rdata = (ROOT / "out/sims5558.exe").read_bytes()
     rbase, exports = pe_base_and_exports(rdata)
-    isize = u32(rdata, u32(rdata, 0x3C) + 24 + 56)
+    lo = rbase + 0x1000  # xbe2pe puts the headers in the first page
     text_end = min(r.addr for r in refs.values())
-    flat = Image(rdata, rbase, [Section("all", 0x11000 + rbase - 0x10000, isize, isize)], ["all"])
+    flat = Image(rdata, rbase, [Section("all", lo, len(rdata) - 0x1000, len(rdata) - 0x1000)], ["all"])
     last = max(exports)
     code_end = last + extent(flat, last, 1 << 32)
-    lo = rbase + 0x1000
     rsecs = [Section(".text", lo, text_end - lo, text_end - lo),
              Section("library", text_end, code_end - text_end, code_end - text_end)]
     ref_img = Image(rdata, rbase, rsecs, [".text", "library"])
-    ref_calls = set(ref_img.sweep_calls())
+    ref_call_list, ref_aligned = ref_img.sweep()
+    ref_calls = set(ref_call_list)
     named = {v for v, n in exports.items() if not n.startswith("sub_")}
     ref_bounds = sorted(ref_calls | named)
-    ref_starts = sorted(set(exports) | {r.addr for r in refs.values()})
-    world = World(refs, other, anchors, ff, ff_sec, ff_calls, ff_shapes, ff_starts, ff_interior, len(inv),
-                  ref_img, ref_calls, ref_bounds, ref_starts, exports)
+    ref_starts = sorted(set(exports) | {r.addr for r in refs.values()} | set(ref_aligned))
+    world = World(refs, other, anchors, ff, ff_sec, ff_calls, ff_shapes, ff_starts, ff_interior, ff_added,
+                  len(inv), ref_img, ref_calls, ref_bounds, ref_starts, exports)
+    world.ff_listed = {n: sum(1 for v in inv if ff_sec[n].va <= v < ff_sec[n].va + ff_sec[n].vsize)
+                       for n in LIBRARY_SECTIONS}
+    # how far the two reference builds agree with each other over these names
+    cross = {"ret": [0, 0], "regs": [0, 0], "len": [0, 0], "calls": [0, 0]}
+    for name in refs:
+        a, b = s49.get(name) or {}, s58.get(name) or {}
+        if "regs" in a and "regs" in b:
+            for key, x, y in (("ret", sig_ret(a), sig_ret(b)), ("regs", a["regs"], b["regs"])):
+                cross[key][0] += x == y
+                cross[key][1] += 1
+        if a.get("len") and b.get("len"):
+            cross["len"][0] += a["len"] == b["len"]
+            cross["calls"][0] += len(a.get("calls", [])) == len(b.get("calls", []))
+            cross["len"][1] += 1
+            cross["calls"][1] += 1
+    world.cross = cross
 
     # decoder self-check: every signed 5558 target function must come out as the signer recorded it
     checked = agreed = 0
@@ -1264,7 +1317,7 @@ class Region:
     right: Anchor | None
     refs: list[Ref]
     cands: list[Shape]
-    placements: dict[str, tuple] = field(default_factory=dict)
+    placements: dict[str, tuple] = field(default_factory=dict)  # name -> (cand index or None, verdict, lead, ref index)
     path: list[tuple[int, int]] = field(default_factory=list)
 
 
@@ -1396,11 +1449,9 @@ def align(region: Region, df: Counter) -> None:
         if options and options[0][0] > skip:
             best, j = options[0]
             rival = max(skip, options[1][0] if len(options) > 1 else -math.inf)
-            rival_j = options[1][1] if len(options) > 1 and options[1][0] >= skip else None
-            region.placements[r.name] = (j, V[i][j], best - rival, rival_j, i)
+            region.placements[r.name] = (j, V[i][j], best - rival, i)
         else:
-            lead = skip - (options[0][0] if options else -math.inf)
-            region.placements[r.name] = (None, None, lead, options[0][1] if options else None, i)
+            region.placements[r.name] = (None, None, skip - (options[0][0] if options else -math.inf), i)
 
 
 # ----------------------------------------------------------------------------- decisions
@@ -1440,8 +1491,9 @@ def section_ranking(world: World, ref: Ref, anchors: dict[str, int]) -> list[tup
     return scored
 
 
-def best_other(scored: list[tuple[Shape, Verdict]], va: int) -> tuple[Shape, Verdict] | None:
-    return next((x for x in scored if x[0].va != va), None)
+def best_rival(scored: list[tuple[Shape, Verdict]], va: int) -> tuple[Shape, Verdict] | None:
+    """The best-scoring other function that is itself a credible match (passes the required checks)."""
+    return next((x for x in scored if x[0].va != va and not x[1].required_failures()), None)
 
 
 def decide(world: World, anchors: dict[str, int], names: list[str]) -> dict[str, Result]:
@@ -1459,7 +1511,7 @@ def decide(world: World, anchors: dict[str, int], names: list[str]) -> dict[str,
         region = regions[key]
         res = results[name] = Result(ref, kind, left, right, region)
         res.ranked = section_ranking(world, ref, anchors)
-        j, ver, lead, _, _ = region.placements[name]
+        j, ver, lead, _ = region.placements[name]
         res.lead = lead
         why = res.reasons
         if kind not in ("tight", "loose"):
@@ -1473,8 +1525,8 @@ def decide(world: World, anchors: dict[str, int], names: list[str]) -> dict[str,
         res.choice, res.verdict = region.cands[j], ver
         in_bracket = sorted(((c, v) for c in region.cands if (v := evaluate(ref, c, world.df[ref.sec]))),
                             key=lambda x: -x[1].score)
-        res.bracket_rival = best_other(in_bracket, res.choice.va)
-        res.section_rival = best_other(res.ranked, res.choice.va)
+        res.bracket_rival = best_rival(in_bracket, res.choice.va)
+        res.section_rival = best_rival(res.ranked, res.choice.va)
         if ref.ret is None:
             why.append("reference ret unknown")
         why.extend(ver.required_failures())
@@ -1482,15 +1534,15 @@ def decide(world: World, anchors: dict[str, int], names: list[str]) -> dict[str,
             why.append(f"ambiguous alignment: lead {lead:.2f} < {MARGIN_MIN}")
         if res.gap(res.bracket_rival) < EXCLUSIVE_MIN:
             rv = res.bracket_rival
-            why.append(f"not exclusive in its bracket: {hx(rv[0].va)} scores {rv[1].score:.2f} "
+            why.append(f"not exclusive in its bracket: {hx(rv[0].va)} also passes, scoring {rv[1].score:.2f} "
                        f"against {ver.score:.2f}")
         if kind == "loose":
             if not ver.len_ok:
                 why.append("loose bracket and length outside band")
             if res.gap(res.section_rival) < EXCLUSIVE_MIN:
                 rv = res.section_rival
-                why.append(f"loose bracket and not exclusive in {ref.sec}: {hx(rv[0].va)} scores "
-                           f"{rv[1].score:.2f} against {ver.score:.2f}")
+                why.append(f"loose bracket and not exclusive in {ref.sec}: {hx(rv[0].va)} also passes, "
+                           f"scoring {rv[1].score:.2f} against {ver.score:.2f}")
         res.emit = not why
     # no address may carry two names
     by_addr: dict[int, list[str]] = {}
@@ -1505,12 +1557,676 @@ def decide(world: World, anchors: dict[str, int], names: list[str]) -> dict[str,
     return results
 
 
-def holdout(world: World) -> list[tuple[str, int, Result]]:
-    """Each library anchor removed in turn and placed by the rest, as if it were unknown."""
+def holdout(world: World, anchors: dict[str, int]) -> list[tuple[str, int, Result]]:
+    """Each library name of the anchor set removed in turn and placed by the rest, as if it were unknown."""
     out = []
-    for name, va in sorted(world.anchors.items(), key=lambda x: x[1]):
+    for name, va in sorted(anchors.items(), key=lambda x: x[1]):
         if name not in world.refs:
             continue
-        rest = {n: v for n, v in world.anchors.items() if n != name}
+        rest = {n: v for n, v in anchors.items() if n != name}
         out.append((name, va, decide(world, rest, [name])[name]))
     return out
+
+
+def other_findings(own: Path) -> dict[str, tuple[str, int]]:
+    """Names other config/found-*.toml files give (for the report's cross-check only, never an input)."""
+    out: dict[str, tuple[str, int]] = {}
+    for path in sorted((ROOT / "config").glob("found-*.toml")):
+        if path.resolve() == own.resolve():
+            continue
+        try:
+            table = tomllib.loads(path.read_text()).get("symbols", {})
+        except tomllib.TOMLDecodeError:
+            continue
+        for name, va in table.items():
+            if isinstance(va, int) and va:
+                out[name] = (path.name, va)
+    return out
+
+
+# ----------------------------------------------------------------------------- output
+
+TOML_PATH = ROOT / "config/found-align.toml"
+REPORT_PATH = ROOT / "docs/align-symbols.md"
+
+
+# Names whose SDK host body still reads 5849 data, from docs/d3d8-state-symbols.md "Wiring preconditions"
+# and docs/d3d8-core-symbols.md: every complex SetRenderState_* (all but _Simple) indexes the render-state
+# array by 5849 number, the two NotInline dispatchers route by 5849 numbering, and the device-state setters
+# read 5849 CDevice offsets. Merged before the runtime reads those per build they write into CDevice, so a
+# file that carries one declares tools/merge_symbols.py's `staged = true`. SetRenderState_Simple and the
+# SetTextureState_* leaves have no such dependency.
+PRECONDITION_NAMES = {"D3DDevice_SetRenderStateNotInline", "D3DDevice_SetTextureStageStateNotInline",
+                      "D3DDevice_SetTexture", "D3DDevice_SetIndices", "D3DDevice_SetStreamSource",
+                      "D3DDevice_SetViewport", "D3DDevice_SetTransform", "D3DDevice_SetMaterial"}
+
+
+def wiring_precondition(name: str) -> bool:
+    complex_state = name.startswith("D3DDevice_SetRenderState_") and name != "D3DDevice_SetRenderState_Simple"
+    return complex_state or name in PRECONDITION_NAMES
+
+
+def write_toml(emitted: list[Result]) -> None:
+    staged_names = [r.ref.name for r in emitted if wiring_precondition(r.ref.name)]
+    lines = ["# align names proven in Fuzion Frenzy default.xbe (XDK 3925). Evidence: docs/align-symbols.md",
+             "# Written by tools/align_symbols.py: rerun it instead of editing."]
+    if staged_names:
+        lines += [f"# Held back from the default merge: {len(staged_names)} of these names have SDK host bodies",
+                  "# that still read 5849 render-state numbers or CDevice offsets (\"Before merging\" in the",
+                  "# evidence doc). Name this file to tools/merge_symbols.py once that is resolved.",
+                  "staged = true",
+                  ""]
+    lines.append("[symbols]")
+    width = max((len(r.ref.name) for r in emitted), default=0)
+    for r in sorted(emitted, key=lambda r: r.choice.va):
+        lines.append(f"{r.ref.name:<{width}} = {hx(r.choice.va)}")
+    TOML_PATH.write_text("\n".join(lines) + "\n")
+    parsed = tomllib.loads(TOML_PATH.read_text())
+    if parsed.get("symbols") != {r.ref.name: r.choice.va for r in emitted} or \
+            parsed.get("staged", False) != bool(staged_names):
+        raise SystemExit(f"{TOML_PATH} does not read back as written")
+
+
+def neighbours(res: Result) -> str:
+    """The matched pairs either side of the name in its alignment."""
+    region = res.region
+    i = region.placements[res.ref.name][3]
+    before = [(a, b) for a, b in region.path if a < i]
+    after = [(a, b) for a, b in region.path if a > i]
+
+    def show(pair: tuple[int, int] | None, anchor: Anchor | None) -> str:
+        if pair:
+            r, t = region.refs[pair[0]], region.cands[pair[1]]
+            return f"`{r.name}` = {hx(t.va)}"
+        return f"anchor `{anchor.name}` = {hx(anchor.ff)}" if anchor else "section edge"
+
+    return (f"after {show(before[-1] if before else None, res.left)}, "
+            f"before {show(after[0] if after else None, res.right)}")
+
+
+def anchor_text(a: Anchor | None) -> str:
+    return f"`{a.name}` ({hx(a.ff)}; 5558 {hx(a.ref)})" if a else "none"
+
+
+def primary_reason(res: Result) -> str:
+    """One reason per rejected name, the first that applies in the order the rules are checked."""
+    if res.kind == "inverted":
+        return "nearest anchors inverted in the target"
+    if res.kind in ("forward", "backward"):
+        return "anchored on one side only"
+    if res.kind == "unanchored":
+        return "no anchor in the section"
+    if res.choice is None:
+        return "alignment leaves it unmatched"
+    v = res.verdict
+    if v.regs_ok is False:
+        return "regs differ"
+    if not v.calls_ok:
+        return "calls outside ±1"
+    if v.k_status == "missing":
+        return "reference constants missing"
+    if not v.len_ok and v.k_status != "distinctive":
+        return "length outside band, no distinctive constant"
+    if res.lead < MARGIN_MIN:
+        return "alignment ambiguous"
+    if res.gap(res.bracket_rival) < EXCLUSIVE_MIN:
+        return "not exclusive in its bracket"
+    if res.kind == "loose":
+        return "loose bracket: length or section exclusivity"
+    return "address claimed twice"
+
+
+def candidate_cells(res: Result, claimed: dict[int, str]) -> tuple[str, str]:
+    """The alignment's pick and the best section-wide alternatives, each with score and failed checks.
+
+    An address another name already holds (an anchor or an emitted name) is marked with that name.
+    """
+    def mark(va: int) -> str:
+        return f" = `{claimed[va]}`" if va in claimed and claimed[va] != res.ref.name else ""
+
+    if res.choice:
+        v = res.verdict
+        pick = f"{hx(res.choice.va)}{mark(res.choice.va)} score {v.score:.1f}, lead {res.lead:.1f}; fails: {v.failed()}"
+    else:
+        pick = "unmatched"
+    others = []
+    for sh, v in res.ranked:
+        if res.choice and sh.va == res.choice.va:
+            continue
+        others.append(f"{hx(sh.va)}{mark(sh.va)} {v.score:.1f} ({v.failed()})")
+        if len(others) == 3:
+            break
+    return pick, "; ".join(others) or "none with equal ret"
+
+
+def report(world: World, results: dict[str, Result], held: list[tuple[str, int, Result]],
+           others: dict[str, tuple[str, int]], stress: list[tuple[str, int, Result]],
+           projection: dict[str, Result]) -> str:
+    """docs/align-symbols.md: the method, the emitted names with their evidence, every rejected name."""
+    emitted = sorted((r for r in results.values() if r.emit), key=lambda r: r.choice.va)
+    rejected = [r for r in results.values() if not r.emit]
+    agreed, checked, bad = world.self_check
+    out: list[str] = []
+    w = out.append
+
+    w("# XDK names by neighbour-order alignment")
+    w("")
+    w("Written by `tools/align_symbols.py` (run from the repo root, no arguments); rerun it rather than")
+    w("editing this file. It writes `config/found-align.toml` with the names below that the image proves,")
+    w("and lists every other library target name here with its ranked candidates and what failed.")
+    w("")
+
+    # ---- result
+    w("## Result")
+    w("")
+    per_sec = {s: [r for r in world.refs.values() if r.sec == s] for s in LIBRARY_SECTIONS}
+    w("| Section | Target names | Already anchors | Aligned here | Emitted | Not emitted |")
+    w("| --- | ---: | ---: | ---: | ---: | ---: |")
+    for s in LIBRARY_SECTIONS:
+        names = per_sec[s]
+        anchored = sum(1 for r in names if r.name in world.anchors)
+        mine = [results[r.name] for r in names if r.name in results]
+        w(f"| {s} | {len(names)} | {anchored} | {len(mine)} | {sum(r.emit for r in mine)} | "
+          f"{sum(not r.emit for r in mine)} |")
+    total_anch = sum(1 for r in world.refs.values() if r.name in world.anchors)
+    w(f"| all | {len(world.refs)} | {total_anch} | {len(results)} | {len(emitted)} | {len(rejected)} |")
+    w("")
+    new = [r for r in emitted if r.ref.name not in others]
+    agree = [r for r in emitted if r.ref.name in others and others[r.ref.name][1] == r.choice.va]
+    clash = [r for r in emitted if r.ref.name in others and others[r.ref.name][1] != r.choice.va]
+    held_ok = sum(1 for _, va, r in held if r.emit and r.choice.va == va)
+    held_bad = sum(1 for _, va, r in held if r.emit and r.choice.va != va)
+    w(f"- **{len(emitted)} names emitted** to `config/found-align.toml`, out of the {len(results)} library-section")
+    w(f"  target names that `config/game.toml` did not already name ({len(world.anchors)} names were non-zero"
+      f" there at this run, {total_anch} of them in D3D, DSOUND and XPP).")
+    w(f"- **Decoder self-check:** {agreed} of {checked} signed 5558 target functions re-measured from"
+      f" `out/sims5558.exe` come out exactly as `config/ref/5558-signed.toml` records them (len, ret, regs,"
+      f" k, calls)." + ("" if agreed == checked else f" Mismatches: {', '.join(bad)}. **Nothing is emitted"
+                        " while this check fails.**"))
+    w(f"- **Held-out anchors:** each of the {len(held)} library anchors was removed in turn and placed by the"
+      f" others: {held_ok} re-emitted at their proven address, **{held_bad} emitted at a wrong address**,"
+      f" {len(held) - held_ok - held_bad} not emitted (details under *Held-out anchors*).")
+    if others:
+        w(f"- **Independent cross-check:** other agents' `config/found-*.toml` files (read for this report only,"
+          f" never as input) name {len(agree) + len(clash)} of the emitted names; {len(agree)} agree,"
+          f" **{len(clash)} disagree**. {len(new)} emitted {'name appears' if len(new) == 1 else 'names appear'}"
+          " in no other file.")
+        s_ok = sum(1 for _, va, r in stress if r.emit and r.choice.va == va)
+        s_bad = sum(1 for _, va, r in stress if r.emit and r.choice.va != va)
+        w(f"- **Larger truth set:** the same hold-out over the union of `config/game.toml` and those files"
+          f" ({len(stress)} library names): {s_ok} re-emitted correctly, **{s_bad} wrongly** (details under"
+          " *Validation against the other agents' results*).")
+    w("")
+
+    # ---- inputs
+    w("## Inputs")
+    w("")
+    w("| Input | Used for |")
+    w("| --- | --- |")
+    w("| `config/game.toml` | the anchors (every non-zero `[symbols]` entry), the XBE path, its code sections |")
+    w("| `assets/default.xbe` | the section table (`out/ff.exe` is a flat image and has lost it); the tool checks"
+      " every section's bytes against `out/ff.exe` |")
+    w("| `out/ff.exe` | the target bytes |")
+    w("| `generated/game/x86_func_mapping.cpp` | the target function inventory: the recompiler's own"
+      " `X86FuncMappings` table |")
+    w("| `out/sims5558.exe` | the reference bytes and its function starts (its exports) |")
+    w("| `docs/symbol-targets.json` | the target names and their 5558 addresses |")
+    w("| `sdk/xdk/5849/signatures.toml`, `config/ref/5558-signed.toml` | each name's ret, regs, len, calls and k"
+      " in two independent builds |")
+    w("")
+    w(f"**Inventory used.** The recompiler's table lists {world.ff_inventory} starts. In the three library"
+      " sections the tool adds the starts the SDK signer's own start rule finds there that the recompiler did"
+      " not list (16-aligned code right after a `ret`, `jmp`, `int3` or `nop` that no conditional or short jump"
+      " targets; these are functions reached only through another function's jump table), and drops starts"
+      " that are not call targets and lie inside the extent of the start before them (mid-function entries"
+      " from pointer seeding):")
+    w("")
+    w("| Section | Range | Recompiler starts | Added | Dropped as interior | Aligned |")
+    w("| --- | --- | ---: | ---: | ---: | ---: |")
+    for s in LIBRARY_SECTIONS:
+        sec = world.ff_sec[s]
+        kept = len(world.ff_starts[s])
+        added = len(world.ff_added[s])
+        dropped = len(world.ff_interior[s])
+        w(f"| {s} | {hx(sec.va)}-{hx(sec.va + sec.vsize)} | {world.ff_listed[s]} | {added} | {dropped} |"
+          f" {kept} |")
+    w("")
+
+    # ---- invariants
+    w("## How the invariants are measured")
+    w("")
+    w("`ret`, `regs`, `len`, `calls` and `k` are computed for every candidate by the tool itself, with a"
+      " standard-library x86 decoder that reproduces what `sdk/tools/symbols/main.cpp` reads through Zydis in"
+      " sign mode:")
+    w("")
+    w("- **len** is the signer's `ExtentBefore`: code reachable from the start, following conditional and"
+      " unconditional relative branches but not calls, stopping at `ret`/`int3`/`hlt`, bounded by the next known"
+      " start. Known starts are the signer's: every rel32 call target of a linear sweep of the code sections, plus"
+      " the anchors.")
+    w("- **ret** is the set of stack bytes the reachable `ret`/`retn imm16` instructions pop; an empty set means"
+      " the function leaves by jump.")
+    w("- **regs** is the signer's `Trace`: a path-sensitive walk that records a general register (eax ecx edx ebx"
+      " ebp esi edi) when an instruction reads it, explicitly or as a hidden operand (`cdq`, `rep movs`,"
+      " `mul`, ...), before every path to that instruction has written it. A call writes eax, ecx and edx;"
+      " `xor r,r`/`sub r,r`/`sbb r,r` and `push r` read nothing. **regs is measured, not dropped.**")
+    w("- **calls** is the number of rel32 call and jump targets that leave the function's extent.")
+    w("- **k** is the signer's constant list. Only its *stable* part is compared: constants ≥ 0x10000 (NV2A"
+      " push-buffer method headers, flag masks, HRESULTs, floats). Smaller ones are mostly structure offsets,"
+      " which moved between 3925 and 5558.")
+    w("")
+    w(f"Proof that the decoder measures what the signer measures: re-measuring the {checked} signed 5558 target"
+      f" functions from `out/sims5558.exe` reproduces {agreed} of them field for field. The 5558 side has no"
+      " XBE in this repository, so its sections are rebuilt from the data (`.text` up to the first library"
+      " target, code up to the end of the last export); that reproduces the signer's sweep and the check above.")
+    w("")
+
+    # ---- order finding
+    w("## Link order is preserved within an object, not across a section")
+    w("")
+    w("The premise of neighbour-order alignment is that both images link the same library in the same order."
+      " The anchors show that this holds for runs of functions but not for a whole section: whole blocks"
+      " (object files) sit in a different order in 3925. Anchors per section, in target order, with their rank"
+      " in 5558 order:")
+    w("")
+    for s in LIBRARY_SECTIONS:
+        sa = sorted(section_anchors(world, world.anchors, s), key=lambda a: a.ff)
+        if not sa:
+            w(f"- **{s}**: no anchor.")
+            continue
+        ranks = {a.name: i for i, a in enumerate(sorted(sa, key=lambda a: a.ref))}
+        seq = " ".join(str(ranks[a.name]) for a in sa)
+        breaks = sum(1 for a, b in zip(sa, sa[1:]) if ranks[b.name] != ranks[a.name] + 1)
+        w(f"- **{s}** ({len(sa)} anchors; {breaks} of {len(sa) - 1} target-order neighbours are not neighbours"
+          f" in 5558): `{seq}`")
+    w("")
+    w("A single monotone alignment of a whole section is therefore wrong. The tool aligns each name only inside"
+      " the bracket its own nearest anchors give it, and classifies that bracket (next section).")
+    w("")
+
+    # ---- algorithm
+    w("## Algorithm")
+    w("")
+    w("1. **Sequences.** Reference: the 5558 functions in address order (the target names, plus the unnamed"
+      " functions between them as spacers, so the alignment knows what separates two names). Target: the"
+      " inventory above, in address order. Anchors are taken out of both sequences: they are the pins.")
+    w("2. **Bracket.** For a name, take the anchor nearest below it and nearest above it in 5558 order (same"
+      " section). The kinds:")
+    w("   - *tight*: both exist, they are in the same order in the target, no other anchor lies between them in"
+      f" the target, and the two stretches they enclose differ in byte size by at most {SIZE_RATIO_MAX:g}x;")
+    w("   - *loose*: same order, but another anchor lies between them in the target (a moved block) or the"
+      " stretches differ grossly in size, so the target stretch holds code from elsewhere;")
+    w("   - *inverted*: the two anchors are in opposite order in the target (the name sits between two moved"
+      " blocks); *forward*/*backward*: an anchor on one side only; *unanchored*: no anchor in the section.")
+    w("   Inverted, one-sided and unanchored names are still aligned (inverted: the stretch after the lower"
+      " anchor followed by the stretch before the upper one; one-sided: from the anchor to the next anchor or"
+      " section edge; unanchored: the whole section) so they get candidates, but they are never emitted.")
+    w("3. **Alignment.** Needleman-Wunsch over the bracket: maximise the summed pair score of a monotone,"
+      " one-to-one pairing, where leaving either side unpaired costs nothing, so only positive pairings are"
+      " made and both missing and extra functions are absorbed. A pair whose `ret` differs cannot be made.")
+    w("4. **Lead.** Forward and backward score tables give, for each name, the best total with the name paired"
+      " to each candidate and with it unpaired (max-marginals). The lead is the best of those minus the"
+      " runner-up: how much worse the best alignment is that does not put the name where it was put.")
+    w("5. **Emission.** A name is written only when every one of these holds:")
+    w("   - the bracket is tight or loose (two proven anchors, in agreeing order);")
+    w("   - `ret` equal (required), `regs` equal (required), `calls` within ±1 (required);")
+    w("   - when the reference builds agree on stable constants, the candidate shares at least one;")
+    w("   - length within the band, or a *distinctive* shared stable constant stands in for it (one that at"
+      f" most {DISTINCT_DF} target functions in the section contain);")
+    w(f"   - alignment lead ≥ {MARGIN_MIN:g};")
+    w(f"   - exclusive in the bracket: every other target function in the bracket that itself passes the"
+      f" required checks scores at least {EXCLUSIVE_MIN:g} lower on the pair score alone (so identical-looking"
+      " functions are never told apart by position alone);")
+    w("   - in a loose bracket, additionally: length within the band, and the same exclusivity over the whole"
+      " section;")
+    w("   - no other name chose the same address.")
+    w("")
+
+    # ---- weights and bands
+    w("## Pair score, bands and why")
+    w("")
+    w("| Term | Value |")
+    w("| --- | --- |")
+    w("| ret differs | pairing not allowed |")
+    w(f"| regs equal / differ | +{W_REGS:g} / {W_REGS_MISS:g} |")
+    w(f"| len exact | +{W_LEN_EXACT:g} |")
+    w(f"| len within band | +{W_LEN_IN_BASE:g} … +{W_LEN_IN_BASE + W_LEN_IN_SLOPE:g}, falling linearly to the band"
+      " edge |")
+    w(f"| len outside band | −0.5 … −{W_LEN_OUT_MAX:g}, growing with the excess |")
+    w(f"| calls equal / ±1 / further | +{W_CALLS_EQ:g} / 0 / −{W_CALLS_STEP:g} per extra call |")
+    w(f"| stable constant: distinctive shared / shared / reference has some, candidate none | +{W_K_DISTINCT:g}"
+      f" / +{W_K_SHARED:g} / {W_K_MISSING:g} |")
+    w("")
+    w(f"**Length band: |len − reference| ≤ max({LEN_BAND_BYTES} bytes, {LEN_BAND_SHARE:.0%} of the reference"
+      " length)**, the reference length being whichever of len5849/len5558 is closer. Measured on the anchors"
+      " (functions proven by other means, so the measurement is not circular), 3925 against 5558:")
+    w("")
+    w("| Anchor | Section | len 3925 | len 5849/5558 | Δ | ret | regs | calls Δ |")
+    w("| --- | --- | ---: | ---: | ---: | --- | --- | ---: |")
+    stats = {"n": 0, "ret": 0, "regs": 0, "calls0": 0, "calls1": 0, "band": 0, "exact": 0}
+    bounds = sorted(world.ff_calls | set(world.anchors.values()))
+    for name, va in sorted(world.anchors.items(), key=lambda x: x[1]):
+        ref = world.refs.get(name)
+        if not ref:
+            continue
+        sh = world.ff_shapes.get(va) or shape_at(world.ff, va, bounds)
+        lref = min(ref.lens, key=lambda n: abs(sh.len - n)) if ref.lens else sh.len
+        d = sh.len - lref
+        dc = min(abs(sh.calls - c) for c in ref.calls) if ref.calls else 0
+        stats["n"] += 1
+        stats["ret"] += sh.ret == ref.ret
+        stats["regs"] += sh.regs == ref.regs
+        stats["calls0"] += dc == 0
+        stats["calls1"] += dc <= CALLS_BAND
+        stats["band"] += abs(d) <= max(LEN_BAND_BYTES, LEN_BAND_SHARE * lref)
+        stats["exact"] += d == 0
+        w(f"| `{name}` | {ref.sec} | {sh.len} | {'/'.join(map(str, ref.lens))} | {d:+d} |"
+          f" {'=' if sh.ret == ref.ret else '≠'} | {'=' if sh.regs == ref.regs else '≠'} | {dc} |")
+    n = stats["n"] or 1
+    w("")
+    w(f"Over these {stats['n']} anchors: ret equal {stats['ret']}/{stats['n']}, regs equal"
+      f" {stats['regs']}/{stats['n']}, calls equal {stats['calls0']}/{stats['n']} and within ±1"
+      f" {stats['calls1']}/{stats['n']}, length identical {stats['exact']}/{stats['n']} and within the band"
+      f" {stats['band']}/{stats['n']} ({stats['band'] / n:.0%}).")
+    w("")
+    cr = world.cross
+    w(f"Between the two reference builds (5849 against 5558), over the library target names both sign: ret equal"
+      f" {cr['ret'][0]}/{cr['ret'][1]}, regs {cr['regs'][0]}/{cr['regs'][1]}, len {cr['len'][0]}/{cr['len'][1]},"
+      f" calls {cr['calls'][0]}/{cr['calls'][1]}.")
+    w("")
+    w(f"- **ret and regs are required.** ret held for {stats['ret']}/{stats['n']} anchors and"
+      f" {cr['ret'][0]}/{cr['ret'][1]} reference pairs, regs for {stats['regs']}/{stats['n']} and"
+      f" {cr['regs'][0]}/{cr['regs'][1]}. A mismatch means a different calling convention, which is exactly"
+      " the failure that corrupts the port.")
+    w(f"- **calls within ±1 is required**: it held for {stats['calls1']}/{stats['n']} anchors, and the"
+      f" reference builds agree on {cr['calls'][0]}/{cr['calls'][1]} names.")
+    w("- **Length is corroboration, not proof.** 3925 drifts further from 5558 than 5849 does (the anchored"
+      " render-state setters FogColor, CullMode and LineWidth are each 6 bytes shorter), so the band keeps"
+      " the anchors' usual drift, and a length outside it is not disqualifying when a distinctive hardware"
+      " constant (the NV2A method the function writes) carries the identity instead. When the reference has"
+      " no stable constant, the length must be inside the band.")
+    w("- **Stable constants** (NV2A methods, flags, HRESULTs) are hardware and ABI identities; a candidate that"
+      " shares none of the constants both reference builds agree on is not emitted.")
+    w(f"- **Lead ≥ {MARGIN_MIN:g}** is the weight of one agreeing required invariant (regs): any alignment that"
+      " places the name elsewhere, or nowhere, must lose at least that much evidence, not a rounding amount"
+      " of length closeness.")
+    w(f"- **Exclusivity ≥ {EXCLUSIVE_MIN:g}** is one shared-constant bonus: the candidate must out-score every"
+      " credible alternative by real evidence, not by a length difference of a few bytes. Order alone does"
+      " not prove which of several identical-looking functions is which.")
+    w(f"- **Size ratio ≤ {SIZE_RATIO_MAX:g}**: an object's code changes by tens of percent between XDK versions,"
+      " not by multiples; a bracket whose two stretches differ by more holds code from elsewhere.")
+    w("")
+
+    # ---- emitted
+    w("## Emitted names")
+    w("")
+    if not emitted:
+        w("None.")
+        w("")
+    for r in emitted:
+        v = r.verdict
+        w(f"### `{r.ref.name}` = {hx(r.choice.va)}")
+        w("")
+        w(f"- **Bracket ({r.kind}):** {anchor_text(r.left)} … {anchor_text(r.right)}.")
+        w(f"- **Reference:** 5558 {hx(r.ref.addr)}; {r.ref.describe()}"
+          + (f"; stable k {' '.join(hx(c) for c in sorted(r.ref.k))}" if r.ref.k else "") + ".")
+        w(f"- **Target {hx(r.choice.va)}:** ret {ret_text(r.choice.ret)}, regs"
+          f" {','.join(regs_text(r.choice.regs)) or '-'}, len {r.choice.len}, calls {r.choice.calls}.")
+        w(f"- **Invariants held:** {v.holds()}.")
+        w(f"- **Alignment:** score {v.score:.2f}, lead {r.lead:.2f}; {neighbours(r)}.")
+        br = r.bracket_rival
+        sr = r.section_rival
+        w(f"- **Exclusivity:** best credible rival in the bracket "
+          + (f"{hx(br[0].va)} ({br[1].score:.2f})" if br else "none")
+          + "; in the section " + (f"{hx(sr[0].va)} ({sr[1].score:.2f})" if sr else "none") + ".")
+        if r.ref.name in others:
+            src, va = others[r.ref.name]
+            w(f"- **Cross-check:** `{src}` gives {hx(va)}" + (" (agrees)." if va == r.choice.va else " (**disagrees**)."))
+        w("")
+
+    # ---- tallies
+    w("## Rejections")
+    w("")
+    w("First rule each rejected name fails, in the order the rules are checked:")
+    w("")
+    reasons: dict[str, Counter] = {s: Counter() for s in LIBRARY_SECTIONS}
+    for r in rejected:
+        reasons[r.ref.sec][primary_reason(r)] += 1
+    keys = sorted({k for c in reasons.values() for k in c}, key=lambda k: -sum(c[k] for c in reasons.values()))
+    w("| Reason | " + " | ".join(LIBRARY_SECTIONS) + " | all |")
+    w("| --- | " + " | ".join("---:" for _ in LIBRARY_SECTIONS) + " | ---: |")
+    for k in keys:
+        w(f"| {k} | " + " | ".join(str(reasons[s][k]) for s in LIBRARY_SECTIONS) +
+          f" | {sum(c[k] for c in reasons.values())} |")
+    w("")
+    w("Every check the alignment's own candidate fails, counted over the rejected names that have one (a name"
+      " can fail several):")
+    w("")
+    fails: Counter = Counter()
+    with_cand = [r for r in rejected if r.choice]
+    for r in with_cand:
+        v = r.verdict
+        fails["regs differ"] += v.regs_ok is False
+        fails["calls outside ±1"] += not v.calls_ok
+        fails["shares no reference constant"] += v.k_status == "missing"
+        fails["length outside band"] += not v.len_ok
+        fails["length outside band, no distinctive constant"] += (not v.len_ok and v.k_status != "distinctive")
+        fails["alignment lead too small"] += r.lead < MARGIN_MIN
+        fails["not exclusive in bracket"] += r.gap(r.bracket_rival) < EXCLUSIVE_MIN
+        fails["not bracketed by two anchors"] += r.kind not in ("tight", "loose")
+    w("| Check | Failed |")
+    w("| --- | ---: |")
+    w(f"| (rejected names with a candidate) | {len(with_cand)} |")
+    for k, c in fails.items():
+        w(f"| {k} | {c} |")
+    w(f"| ret differs | 0 (a pairing with another ret is never made) |")
+    w("")
+
+    # ---- not emitted
+    claimed = {va: n for n, va in world.anchors.items()}
+    claimed.update({r.choice.va: r.ref.name for r in emitted})
+    w("## Candidates not emitted")
+    w("")
+    leads = sorted((r for r in rejected if r.choice and r.verdict.strict), key=lambda r: -r.verdict.score)
+    w(f"### Strongest leads ({len(leads)})")
+    w("")
+    w("Names whose pick passes every invariant (ret, regs, calls, constants and the length band) and is held"
+      " back only by position or ambiguity. They are where static RE pays off first; they are still not"
+      " proof (the next table shows each one's competitors).")
+    w("")
+    w("| Name | Pick | Score | Held back because |")
+    w("| --- | --- | ---: | --- |")
+    for r in leads:
+        w(f"| `{r.ref.name}` | {hx(r.choice.va)}{' = `' + claimed[r.choice.va] + '`' if r.choice.va in claimed else ''}"
+          f" | {r.verdict.score:.1f} | {'; '.join(r.reasons)} |")
+    w("")
+    w("### All, by section")
+    w("")
+    w("Ranked within each section by the best pair score any candidate reaches, so the most promising names"
+      " for static RE come first. *Pick* is the alignment's choice in the name's bracket (score, lead, failed"
+      " checks); *Others* are the best-scoring functions anywhere in the section with the same `ret`. An"
+      " address already held by an anchor or an emitted name is marked `= Name`. A pick or an alternative is a"
+      " lead for a human, **not** evidence: no row here passed the emission rule.")
+    w("")
+    for s in LIBRARY_SECTIONS:
+        rows = [r for r in rejected if r.ref.sec == s]
+        if not rows:
+            continue
+        rows.sort(key=lambda r: -max([r.verdict.score if r.verdict else -math.inf] +
+                                     [v.score for _, v in r.ranked[:1]]))
+        w(f"#### {s} ({len(rows)})")
+        w("")
+        w("| Name | 5558 | Reference | Bracket | Pick | Others | Why not emitted |")
+        w("| --- | --- | --- | --- | --- | --- | --- |")
+        for r in rows:
+            pick, alts = candidate_cells(r, claimed)
+            br = r.kind
+            if r.left or r.right:
+                br += " " + " … ".join(a.name if a else "edge" for a in (r.left, r.right))
+            w(f"| `{r.ref.name}` | {hx(r.ref.addr)} | {r.ref.describe()} | {br} | {pick} | {alts} |"
+              f" {'; '.join(r.reasons)} |")
+        w("")
+
+    # ---- holdout
+    w("## Held-out anchors")
+    w("")
+    w("Each library anchor, removed from the anchor set and placed by the rest exactly as an unknown name"
+      " would be. This measures the emission rule on names whose answer is known.")
+    w("")
+    w("| Anchor | Proven | Bracket without it | Result |")
+    w("| --- | --- | --- | --- |")
+    for name, va, r in held:
+        if r.emit:
+            res = "emitted, **correct**" if r.choice.va == va else f"emitted **{hx(r.choice.va)}, WRONG**"
+        else:
+            pick = (f"pick {hx(r.choice.va)}" + (" (right)" if r.choice.va == va else " (wrong)")) if r.choice \
+                else "no pick"
+            res = f"not emitted, {pick}: {'; '.join(r.reasons)}"
+        w(f"| `{name}` | {hx(va)} | {r.kind} | {res} |")
+    w("")
+
+    # ---- validation against the other agents' results
+    if others:
+        merged_only = sum(1 for n, _, _ in stress if n not in world.anchors)
+        s_ok = sum(1 for _, va, r in stress if r.emit and r.choice.va == va)
+        s_bad = [(n, va, r) for n, va, r in stress if r.emit and r.choice.va != va]
+        gained = sorted((r for r in projection.values() if r.emit), key=lambda r: r.choice.va)
+        w("## Validation against the other agents' results")
+        w("")
+        w("The other `config/found-*.toml` files hold names other agents proved by reading the code. They are"
+          " never an input to the decisions above; here they serve as a larger set of known answers.")
+        w("")
+        w(f"- **Held out against the union.** Taking `config/game.toml` and those files together"
+          f" ({len(stress)} library names, {merged_only} of them not yet in `config/game.toml`) and removing"
+          f" each name in turn: {s_ok} re-emitted at the proven address, **{len(s_bad)} at a different"
+          f" address**, {len(stress) - s_ok - len(s_bad)} held back.")
+        for n, va, r in s_bad:
+            w(f"  - `{n}`: proven {hx(va)}, emitted {hx(r.choice.va)} ({r.kind} bracket)")
+        w(f"- **Projection.** With every name those files give merged in as anchors, the alignment emits"
+          f" {len(gained)} further name{'' if len(gained) == 1 else 's'}"
+          + (": " + ", ".join(f"`{r.ref.name}` = {hx(r.choice.va)}" for r in gained) if gained else "") + ".")
+        w("")
+
+    # ---- other names
+    w("## Names outside this tool's scope")
+    w("")
+    w("Target names whose section is not D3D, DSOUND or XPP (game code and statically linked CRT/XAPI in"
+      " `.text`, where 5558 neighbour order says nothing about this game's link order), or that have no 5558"
+      " address:")
+    w("")
+    for name, sec, why in sorted(world.other):
+        state = f" (= {hx(world.anchors[name])} in game.toml)" if name in world.anchors else ""
+        w(f"- `{name}` ({sec}): {why}{state}")
+    w("")
+
+    # ---- before merging
+    w("## Before merging")
+    w("")
+    staged_names = [r.ref.name for r in emitted if wiring_precondition(r.ref.name)]
+    w("This tool identifies addresses; it does not check that the SDK's host body for a name reads this"
+      " build's data. XDK 3925 numbers its render states and texture-stage states differently from the 5849"
+      " tables the SDK runtime uses, and its CDevice layout differs (the wiring preconditions in"
+      " `docs/d3d8-state-symbols.md`; `docs/d3d8-core-symbols.md` holds back"
+      " `D3DDevice_SetRenderStateNotInline` for the same reason). Merged before the runtime reads those per"
+      " build, the complex render-state setters (every `SetRenderState_*` but `_Simple`) make the host write"
+      " 5849 indices into the 3925 state array and land inside CDevice, the two `NotInline` dispatchers route"
+      " by the wrong numbering, and the device-state setters (`SetTexture`, `SetIndices`, `SetStreamSource`,"
+      " `SetViewport`, `SetTransform`, `SetMaterial`) read and write the wrong CDevice fields."
+      " `SetRenderState_Simple` and the `SetTextureState_*` leaves have no such dependency.")
+    w("")
+    if staged_names:
+        w(f"{len(staged_names)} of the emitted names fall in those families, so `config/found-align.toml`"
+          " declares `staged = true`: `tools/merge_symbols.py` skips it unless it is named explicitly. The"
+          f" names: {', '.join('`' + n + '`' for n in staged_names)}.")
+    else:
+        w("None of the emitted names falls in those families, so `config/found-align.toml` is not staged.")
+    w("")
+
+    # ---- assessment
+    w("## Assessment")
+    w("")
+    remaining = len(results)
+    unmatched = sum(1 for r in rejected if r.choice is None)
+    w(f"Of the {len(world.refs)} library-section target names, {total_anch} were already named in"
+      f" `config/game.toml` when this ran, leaving {remaining}. The alignment proves {len(emitted)} of those"
+      f" ({len(emitted) / max(remaining, 1):.0%})" + (f", {len(new)} of which no other agent's file names" if
+                                                      others else "") + ".")
+    w("")
+    w(f"Precision, measured rather than assumed: held out one at a time, the {len(held)} library anchors were"
+      f" re-emitted at a wrong address {held_bad} times (correctly {held_ok} times, the rest held back)"
+      + (f", and the independent manual results in other agents' files agree with {len(agree)} of the"
+         f" {len(agree) + len(clash)} emitted names they also give" if others else "") + ".")
+    w("")
+    w(f"Of the {len(rejected)} names left after this run, {len(leads)} have a pick that passes every invariant"
+      f" and is held back only by position or ambiguity (*Strongest leads*), {unmatched} have no pick in their"
+      f" bracket, and the rest have a pick that fails at least one invariant. The automated alignment"
+      " therefore closes the part of the gap that sits in agreeing brackets with a distinguishing shape; the"
+      " rest needs a human to read the code, starting from the leads.")
+    if others:
+        gained = sorted(r.ref.name for r in projection.values() if r.emit)
+        s_ok = sum(1 for _, va, r in stress if r.emit and r.choice.va == va)
+        text = (f"Measured against what the other agents found by hand: of this run's {len(emitted)} names,"
+                f" {len(new)} {'is' if len(new) == 1 else 'are'} in none of their files"
+                + (f" ({', '.join('`' + r.ref.name + '`' for r in new)})" if new else "")
+                + f"; with their files merged in as anchors, the alignment emits {len(gained)} name"
+                + ("" if len(gained) == 1 else "s") + " beyond them"
+                + (f" ({', '.join('`' + n + '`' for n in gained)})" if gained else "")
+                + f". Held out one at a time, it independently re-derives {s_ok} of the {len(stress)} library"
+                " names known so far.")
+        if len(gained) * 10 <= max(len(rejected), 1):
+            text += (" So with the anchors available now, the alignment adds little beyond the manual work; its"
+                     " value is confirmation by an independent method and the ranked leads above.")
+        w("")
+        w(text)
+    w("")
+    w("Why the yield is bounded, from the rejection table:")
+    w("")
+    w("- **Block moves.** Link order holds inside an object, not across a section, so a name is only placed"
+      " between anchors that agree with each other. Names whose nearest anchors disagree, or that have an"
+      " anchor on one side only, cannot be emitted however good their candidate looks.")
+    w("- **Identical-looking runs.** Runs of setters with the same shape (same ret, length, call count and"
+      " no distinguishing constant) are told apart only by order; the tool refuses to emit those, by design.")
+    w("- **Absent or rewritten functions.** A title links only what it calls, and 3925 lacks APIs 5558 has."
+      " A name the alignment leaves unmatched has nothing in its bracket with the same ret that scores"
+      " positively: either it is not in this image (a correct zero), or it moved out of its bracket or was"
+      " rewritten past what these invariants recognise. The *Others* column is where to look for the latter.")
+    w("- **Length drift.** 3925 is two years older than 5558; functions rewritten in between fail the length"
+      " band, and without a distinctive hardware constant they stay unproven.")
+    w("")
+    w("Each run uses whatever `config/game.toml` holds. Every name merged into it becomes an anchor that"
+      " narrows the brackets around its neighbours, so rerun the tool after each merge; the held-out-anchor"
+      " table above is the running check that the rule stays safe as the anchor set grows.")
+    w("")
+    return "\n".join(out)
+
+
+def main() -> int:
+    world = load_world()
+    names = [n for n in world.refs if n not in world.anchors]
+    results = decide(world, world.anchors, names)
+    held = holdout(world, world.anchors)
+    agreed, checked, _ = world.self_check
+    if agreed != checked:
+        for r in results.values():
+            if r.emit:
+                r.emit = False
+                r.reasons.append("decoder self-check failed")
+    emitted = [r for r in results.values() if r.emit]
+    others = other_findings(TOML_PATH)
+    merged = {**{n: va for n, (_, va) in others.items()}, **world.anchors}
+    stress = holdout(world, merged) if others else []
+    projection = decide(world, merged, [n for n in world.refs if n not in merged]) if others else {}
+    text = report(world, results, held, others, stress, projection)
+    write_toml(emitted)
+    REPORT_PATH.write_text(text)
+    print(f"{len(emitted)} of {len(results)} unanchored library names emitted to {TOML_PATH.relative_to(ROOT)};"
+          f" report in {REPORT_PATH.relative_to(ROOT)}")
+    for label, runs in (("held-out anchors", held), ("held-out known names (anchors + other found files)", stress)):
+        if runs:
+            print(f"{label}: re-emitted correctly {sum(1 for _, va, r in runs if r.emit and r.choice.va == va)}"
+                  f"/{len(runs)}, wrongly {sum(1 for _, va, r in runs if r.emit and r.choice.va != va)}")
+    print(f"decoder self-check {agreed}/{checked}")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

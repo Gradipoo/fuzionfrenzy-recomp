@@ -1,0 +1,28 @@
+# align names proven in Fuzion Frenzy default.xbe (XDK 3925). Evidence: docs/align-symbols.md
+# Written by tools/align_symbols.py: rerun it instead of editing.
+# Held back from the default merge: 13 of these names have SDK host bodies
+# that still read 5849 render-state numbers or CDevice offsets ("Before merging" in the
+# evidence doc). Name this file to tools/merge_symbols.py once that is resolved.
+staged = true
+
+[symbols]
+D3DDevice_SetIndices                      = 0x1F6170
+D3DDevice_PersistDisplay                  = 0x1F6490
+D3DDevice_SetRenderState_Simple           = 0x1F6650
+D3DDevice_SetRenderStateNotInline         = 0x1F66A0
+D3DDevice_SetRenderState_EdgeAntiAlias    = 0x1F6730
+D3DDevice_SetRenderState_ShadowFunc       = 0x1F6760
+D3DDevice_SetRenderState_FrontFace        = 0x1F6850
+D3DDevice_SetRenderState_NormalizeNormals = 0x1F6890
+D3DDevice_SetRenderState_TextureFactor    = 0x1F68C0
+D3DDevice_SetRenderState_Dxt1NoiseEnable  = 0x1F6970
+D3DDevice_SetRenderState_LogicOp          = 0x1F6A70
+D3DDevice_SetRenderState_VertexBlend      = 0x1F6BB0
+D3DDevice_SetTextureState_BumpEnv         = 0x1F6CD0
+D3DDevice_SetTextureState_BorderColor     = 0x1F6D30
+D3DDevice_SetTextureState_ColorKeyColor   = 0x1F6D70
+D3DDevice_SetRenderState_ZEnable          = 0x1F7300
+D3DDevice_SetRenderState_StencilEnable    = 0x1F7370
+D3DDevice_CreateVertexShader              = 0x1F7EC0
+D3DDevice_SetStreamSource                 = 0x1F8000
+D3DDevice_LoadVertexShader                = 0x1F8090

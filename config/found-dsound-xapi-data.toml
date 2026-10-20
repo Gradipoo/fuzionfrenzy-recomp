@@ -1,0 +1,18 @@
+# XAPI data symbol proven in Fuzion Frenzy default.xbe (XDK 3925, out/ff.exe).
+# Evidence: docs/effects-image-xpp.md ("XPP_GamepadType"). The three EffectsImage_* values proven in
+# the same doc are layout keys for sdk/xdk/3925/layout.toml, not [data] symbols, so they are not here.
+
+[data]
+# XInputOpen 0x24D22D: `cmp [ebp+arg_0], offset 0x24C2BC` selects XID type index 0; the game's
+# GetAttachedDevices 0x49990 passes 0x24C2BC to XGetDevices 0x24D37E (logged as "device mask", 4 port
+# bits) and then to XInputOpen ("Connected pad found"). The XID type-info entry for index 0 declares an
+# 0x12-byte input report (sizeof XINPUT_GAMEPAD) and a 4-byte output report (XINPUT_RUMBLE) at 0x24C344.
+# The memory-unit record is 0x24C238 (MU class init 0x24C3EC, "\Device\MU_n", 8 slot bits).
+XPP_GamepadType = 0x24C2BC
+
+# Added by the integrator from the same analysis (docs/effects-image-xpp.md): sdk/runtime/xdk/xapi.cpp
+# also accepts an optional XPP_MemoryUnitType, and this record was proven alongside the gamepad one.
+# It is the USB mass-storage driver's record: its init at 0x24C3EC creates \Device\MU_n, the game
+# calls XGetDevices(0x24C238) at 0x49A51 and logs "memory card mask" over 8 slot bits (0-3, 16-19),
+# and unlike 0x24C2BC it is not one of the three types XInputOpen 0x24D22D accepts.
+XPP_MemoryUnitType = 0x24C238

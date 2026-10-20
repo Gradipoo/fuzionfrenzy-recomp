@@ -66,10 +66,11 @@ in their own section at the end.
 
 ## CRT math (LIBC 3911)
 
-These are the x87 workers of the VC7-era CRT. A worker takes `x` in `st(0)`. A loader sets
-`eax` = high dword of `x` masked to the exponent, and sets ZF when the exponent is 0x7FF. That loader
-is why the 5849 `regs` field is `["eax"]`. Each worker reports errors with `mov edx, OP_<fn>` plus
-`lea ecx, "<fn>"`, then leaves through shared tails:
+These are the x87 workers of the VC7-era CRT. A worker takes `x` in `st(0)`. A loader (`0x1E3988` for
+`_CI` callers, `0x1E3945` for cdecl callers) sets `eax` to the high dword of `x` masked to the exponent,
+or the whole high dword when the exponent is 0x7FF, and sets ZF in exactly that case. The worker reads
+that `eax` before writing it, which is why the 5849 `regs` field is `["eax"]`. Each worker reports errors
+with `mov edx, OP_<fn>` plus `lea ecx, "<fn>"`, then leaves through shared tails:
 
 - `0x1E399E`: fast exit, `__fastflag`-like global at `0x315A94`.
 - `0x1E39AB`: precision check.
@@ -182,14 +183,16 @@ USB host-controller memory (ordinals 165, 175, 173).
 
 ret 8, regs [] match. The game calls it once, through the 5-byte thunk `0x24D379` (`jmp 0x24CA33`), from
 `0x49D76`. The arguments are `(2, {{0x24C2BC, 4}, {0x24C238, 4}})`. Nothing else references `0x24CA33`.
-The thunk has the same stdcall ABI. The body is the proven function: replacing it covers the thunk path.
+The thunk has the same stdcall ABI. Naming the body is enough: `sdk/runtime/xdk/hle.h` replaces the
+recompiled weak `sub_<addr>` of a `[symbols]` address with the host's strong definition. The thunk's
+`jmp` is compiled as a tail call to `sub_24CA33`, so the game's call reaches the host implementation.
 
 ### `XInputOpen = 0x24D22D` (0x24D22D-0x24D2A1)
 - It compares `DeviceType` with the three XID type records `0x24C2BC`, `0x24C2C8` and `0x24C2D4`, giving
   index 0, 1 or 2. 5558 calls a lookup (`0x2DAFD5`) for the same purpose.
 - An unknown type pushes `0x57` (ERROR_INVALID_PARAMETER) to `0x31127`, returns NULL and does `ret 10h`.
-  `0x31127` is SetLastError; it has the same body as 5558 `0x100F6B` and writes the thread's TLS block
-  through TLS index `0x2BB130`.
+  `0x31127` is SetLastError. Its body matches 5558 `0x100F6B` instruction for instruction, except that it
+  stores the error at TLS block `+4` (5558: `+8`). It finds the block through TLS index `0x2BB130`.
 - A NULL `pPollingParameters` takes the type's default from `[idx*24+0x24C394]`.
 - The 5558 sequence `cmp [ebp+10h],1; mov edx,[ebp+0Ch]; jne; add edx,10h` appears here byte for byte:
   bottom slot means port + 16.
@@ -270,13 +273,14 @@ Data addresses for the `[data]` table. These are observations only; I do not wri
 ## XAPI misc (XAPILIB 3911, .text)
 
 ### `XLaunchNewImageA = 0x030603` (0x30603-0x30715)
-- **The game names it.** At `0x184EF` the game calls `0x30603("d:\XDemos\XDemos.xbe" @0x254F38, 0x2D08A8)`.
-  It then formats `"\n\nXLaunchNewImage returned %d\n\n"` (`0x254F18`) with the return value.
+- **The game names it.** At `0x184EF` the game calls `0x30603(path, 0x2D08A8)`. The path is either
+  `"d:\XDemos\XDemos.xbe"` (`0x254F38`) or a runtime path buffer (`0x2D08B4`). It then formats
+  `"\n\nXLaunchNewImage returned %d\n\n"` (`0x254F18`) with the return value.
   - Game `0x4FA49` calls it with `(NULL, NULL)` to go to the dashboard.
   - Library `0x33C67` (ret 0xC, 3 args) builds a zeroed 0xC00-byte LAUNCH_DATA with reason/parameters
     and calls `0x30603(NULL, &ld)`, the boot-to-dashboard path.
 - **The body matches 5558** (its internal `0x102D2E`):
-  - The NULL path pushes `dwLaunchData != 0 ? 1 : -1` (`setne; lea [x+x-1]`) and the TitleID read from
+  - The NULL path pushes `pLaunchData != NULL ? 1 : -1` (`setne; lea [x+x-1]`) and the TitleID read from
     the certificate (`[0x10118]+8`).
   - `D:\` parsing: `cmp al,'D'` or `'d'`, then `':'`, then `'\'`.
   - `push 57h; pop eax` for an invalid path.
@@ -300,16 +304,17 @@ Data addresses for the `[data]` table. These are observations only; I do not wri
 - It formats `\Device\Harddisk0\Partition%d\` (`0x257940`) into `[ebp-114h]`. Its three uses of
   `[ebp-114h]` are the 5849 `k` `0xFFFFFEEC` x3.
 - It initializes two ANSI strings via RtlInitAnsiString (289, `0x25338C`).
-- If needed it formats the partition (`0x33DDB`: NtFsControlFile/NtDeviceIoControlFile path) and mounts
-  it (`0x33794`).
+- It calls `0x33DDB` (NtOpenFile, NtFsControlFile, NtDeviceIoControlFile, NtWriteFile) when the drive
+  must be (re)formatted, and `0x33794` to mount it.
 - `IoCreateSymbolicLink(\??\Z:, ...)`: ordinal 67 at `0x30EE7`; the string is at `0x257938`.
 
 ## sec-less (`(none)`) rows that exist in this image
 
 ### `D3DDevice_SetPalette = 0x1F60F0` (0x1F60F0-0x1F616E)
 - **Unique NV2A method.** `add esi, 0x41B20` after `shl esi, 6` at `0x1F6158` pushes
-  `NV097_SET_TEXTURE_PALETTE(stage)` (method 0x1B20 + stage*64, count 1). The dword `0x41B20` occurs
-  nowhere else in the image.
+  `NV097_SET_TEXTURE_PALETTE(stage)` (method 0x1B20 + stage*64, count 1). No other instruction in the
+  image uses `0x41B20` or a per-stage variant (`0x41B60`/`0x41BA0`/`0x41BE0`). The only other byte match,
+  `0x21E70D`, lies inside a byte table in DSOUND's data.
 - **Matches 5558 `D3DDevice_SetPalette` `0x2473A0` line for line.**
   - It reads the old `device->Palettes[stage]`, sets its Lock to the device time and drops a reference
     (`add 0FFF80000h; test 78FFFFh`), destroying it at zero (`0x1FC6A0`).
@@ -338,7 +343,8 @@ Data addresses for the `[data]` table. These are observations only; I do not wri
   - It forwards `(pvImageBuffer, dwImageSize, ppImageDesc)` to the loader `0x206A23`, which sets or clears
     the "image loaded" bit (5558 `0x28B9C1`).
   - GetEffectData's 5558 method has a different shape: one 0x3A helper and no image-location store.
-- `IDirectSound_SetI3DL2Listener` (`0x206C46`) later returns `0x88780032` when the stored I3DL2 index is -1.
+- The SetI3DL2Listener method (`0x206C46`, behind wrapper `0x2072F2`) later returns `0x88780032` when
+  that stored I3DL2 index is -1.
 - **The game names the action.** In `bInitSpecificWave` (`0x55440`):
   - DirectSoundCreate is called, then `0x20726F(pDS, 0x285A98, 0x60F8, &{0,1}, &desc)`.
   - The failure string is `"Downloading default DSP program failed"`; the success string is
@@ -349,12 +355,12 @@ Data addresses for the `[data]` table. These are observations only; I do not wri
 
 | Name | Reason |
 |---|---|
-| `crt_tan` | Not linked. No hit for the 5849 hash (0x95). No `mov edx, 20h` (OP_TAN) load and no code-referenced "tan" string. The LIBC `.data` name cluster `0x2B74D8-0x2B755C` has only pow, acos, asin, fmod, sin, cos and sqrt. The 15-name table at `0x27C81C-0x27C8C0` is referenced only from data (`0x2B7A2C-0x2B7AE4`). Every `fptan` in the image is inlined in game or XGRAPHC code. |
-| `crt_atan` | Not linked. Same evidence: no hash hit (0x82), no OP_ATAN `0x0F` load, no code-referenced "atan". The only `fpatan` in LIBC are crt_acos and crt_asin. |
-| `crt_log` | Not linked. No hash hit (0xB8), no OP_LOG `0x1A` load, no "log" string in the LIBC cluster. `0x22A7FA` references "log" from XGRAPHC (vertex-shader instruction text). The `fldln2/fyl2x` at `0x2BF90` and in D3D are inline. |
-| `crt_log10` | Not linked. No hash hit (0xB8), no OP_LOG10 `0x1B` load, no code reference to "log10". |
+| `crt_tan` | Not linked. No hit for the 5849 hash (0x95). No code section contains `mov edx, 20h` (OP_TAN) next to a `lea ecx, <name>`. The same search finds exactly the known acos (`0x1E0605`, `0x1E0669`) and sin (`0x1E108F`, `0x1E10E4`) sites. No code references a "tan" string. The LIBC `.data` name cluster `0x2B74D8-0x2B755C` has only pow, acos, asin, fmod, sin, cos and sqrt. The 15-name table at `0x27C81C-0x27C8C0` is referenced only from data (`0x2B7A2C-0x2B7AE4`). Every `fptan` in the image is inline code inside ordinary functions (e.g. `0x11C7E0`, `0x1D6960`, `0x1EB590`); none has the worker shape (`fstcw` prologue, OP/name error report, shared tails). |
+| `crt_atan` | Not linked. No hash hit (0x82), no OP_ATAN (`0x0F`) / name load in any code section, no code-referenced "atan". LIBC carries only the old-style two-argument atan2: a dispatch table at `0x2B7C99` (OP 0x10) with entries `_CIatan2` `0x1E10F8` and `atan2` `0x1E1102`. atan2 is a different function from the one-argument `crt_atan` worker and is not a target. Apart from atan2's handler (`0x1E645B`), the only `fpatan` in the CRT math code are crt_acos and crt_asin. |
+| `crt_log` | Not linked. No hash hit (0xB8), no OP_LOG (`0x1A`) / name load in any code section, no "log" string in the LIBC cluster. `0x22A7FA` references "log" from XGRAPHC (vertex-shader instruction text). The old-style dispatch tables present are fmod (OP 0x16 at `0x2B74FD`), exp (OP 0x14 at `0x2B75C8`) and atan2; there is none for log. The `fldln2`/`fldlg2` + `fyl2x` block at `0x1E3562-0x1E359F` inside LIBC's shared x87 object has no call, jump or table pointer reaching it. The `fldln2/fyl2x` at `0x2BF90` and in D3D are inline. |
+| `crt_log10` | Not linked. No hash hit (0xB8), no OP_LOG10 (`0x1B`) / name load in any code section, no code reference to "log10", and no log10 dispatch table (see `crt_log`). |
 | `XNetGetEthernetLinkStatus` | No network stack. No hash hit (0x48). No PhyGetLinkState (252) or PhyInitialize (253) import. No NIC MMIO constant (`0xFEF00000-0xFEF00FFF`) in any code section. No XNET section or library. See the socket section. |
-| `D3DDevice_BeginPush` | Not in D3D8 3925. No hash hit (0x44). No public `BeginPush(Count)` (1 argument, returns the push pointer). The only `+0x200` push-slack reserve is the internal `0x1FB3D0(device, count)` (`ret 8`). Its 7 callers are internal draw and shader routines (`0x1F8090`, `0x1F82C0`, `0x1F84A0`, `0x201390`, `0x2014D0`, `0x201570`). Naming it would change the ABI. |
+| `D3DDevice_BeginPush` | Not in D3D8 3925. No hash hit (0x44). No public `BeginPush(Count)` (1 argument, returns the push pointer). The only `+0x200` push-slack reserve is the internal `0x1FB3D0(device, count)` (`ret 8`). Its 7 call sites are in 6 internal routines: `0x1F8090` (vertex-program load, method `0x41E9C`), `0x1F82C0`, `0x1F84A0`, `0x201390`, and the DrawVertices `0x2014D0` and DrawIndexedVertices `0x201570` anchors. Naming it would change the ABI. |
 | `D3DDevice_EndPush` | Not in D3D8 3925. No hash hit (0xF). No function stores its argument into `[D3D__pDevice]` (`0x206720`), by exact pattern or by a scan of all small D3D functions. |
 | `DirectSoundUseLightHRTF` | Not separable. The image has exactly one HRTF installer, `0x206A86`: AutoLock, `mov [0x22180C], 0x20B291`, leave lock, `ret`. `0x22180C` starts zeroed, and the game calls the installer once (`0x554DD`) after the DSP download. Nothing tells Full from Light: 3925 has a single HRTF table (61x31 grid at `0x220200`), and its code does not resemble either 5558 variant. DSoundFns emits it as `DirectSoundUseFullHRTF`; so that the address never carries two names, it is not emitted here. |
 | `IDirectSound_GetEffectData` | Not linked. DSOUND has exactly 8 IDirectSound wrappers (the `pThis-8` idiom, nothing outside DSOUND): Release `0x206A55`, GetCaps `0x207253`, DownloadEffectsImage `0x20726F`, SetAllParameters `0x207296` (copies 16 dwords to listener+0x144), SetDistanceFactor `0x2072B6`, CommitDeferredSettings `0x2072DA`, SetI3DL2Listener `0x2072F2`, CreateSoundBuffer `0x207D05`. The only `ret 14h` one is DownloadEffectsImage, proven above. |
