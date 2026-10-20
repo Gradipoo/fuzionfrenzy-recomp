@@ -1,0 +1,43 @@
+# The remaining D3D-section names of Fuzion Frenzy default.xbe (XDK 3925), worked through name by name.
+# Evidence: docs/d3d8-rest-symbols.md.
+#
+# Result: no name in this set can be merged today. One name is proven but cannot reach the build yet
+# (held back below, commented out), one candidate is proven to be a library-internal body but cannot be
+# shown to carry the exported name (also commented out), and the other 27 do not exist in this image:
+# the bodies the names would need are demonstrably absent from the D3D range 0x1F5340-0x206970, not
+# merely unidentified. The per-name evidence, including the searches that would have found each body
+# if it existed, is in the doc.
+#
+# Nothing here is staged: there is simply nothing to merge until the held-back row's prerequisites
+# exist. Do not uncomment a row without reading its section of the doc.
+
+[symbols]
+# PROVEN BUT HELD BACK - do not merge until all three prerequisites exist.
+# 0x1F84A0 is D3DDevice_SetVertexShaderConstant beyond doubt (stdcall (Register, pData, Count),
+# retn 0Ch, NV2A token 0x41EA4, (count << 18) | 0xB80 chunks, 29 title call sites; docs section
+# "Proven but held back"). It is a 3925-only form: the name has no [symbols] row in config/game.toml,
+# no row in any sdk/xdk/*/signatures.toml (only the fastcall Constant1/1Fast/4/NotInlineFast rows
+# exist, and those bodies are absent here), and sdk/runtime/xdk/d3d8.cpp has no host body for the
+# plain name (only the four fastcall variants, which this build does not have). Merging it now would
+# be refused by tools/merge_symbols.py ("not a name the scanner knows"), and naming it without a
+# host body would only replace a working guest body with nothing. The orchestrator needs to add the
+# 3925 signature row first (the hand-added no-signature form, as for D3DDevice_Present), let the
+# scanner put a row in game.toml, and add an HLE_STDCALL(D3DDevice_SetVertexShaderConstant, 3) that
+# stores the constants like the fastcall bodies do (register + 96 is this build's numbering: the
+# guest body adds 60h to the register before use, and its mirror copy lands at
+# device + (Register + 300) * 16; the host's own constant copy is indexed by the guest register in
+# every other SetVertexShaderConstant path, so the +96 has to be accounted for there, not ignored).
+# D3DDevice_SetVertexShaderConstant = 0x1F84A0
+
+# UNPROVABLE - do not merge on this evidence.
+# 0x1F6240 is proven to be the body 5558 calls SetTileNoWait (retn 8, (Index, pTile), stores the
+# 6-dword tile at device + Index * 24 + 0x21BC, programs it through the miniport at device + 0x2308);
+# its only callers are the library's own frame-buffer setup (0x1FB927, 0x1FBA07) and teardown
+# (0x1FB6CB, 0x1FB6F8), exactly the internal callers the 5558 NoWait body has. But the exported
+# 5558/5849 D3DDevice_SetTile is a different, 10-byte body (call D3D_KickOffAndWaitForIdle;
+# jmp NoWait), and no such wrapper exists here: D3D_KickOffAndWaitForIdle (0x1FB300) is called or
+# jumped to only by the BlockUntilIdle thunk, PersistDisplay, CDevice_UnInit and Present. Whether
+# 3925 exported the NoWait body itself under the SetTile name cannot be shown from this image, and
+# the host body (HLE_STDCALL(D3DDevice_SetTile, 2), a no-op) would also replace the guest body for
+# the library's own frame-buffer setup if it ever ran. Left at 0, the guest body keeps running.
+# D3DDevice_SetTile = 0x1F6240
