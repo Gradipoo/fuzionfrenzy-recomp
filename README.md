@@ -6,12 +6,18 @@ statically recompiling the game's x86 XBE with the
 submodule on branch `fuzion-frenzy-port`). Windows uses Direct3D 12 and XAudio2; Linux is a native
 Vulkan and SDL3 build - no Wine.
 
-**Status: builds and boots; not yet playable.** Both binaries build from this repository on Linux
-(`FuzionFrenzy` for Linux, `FuzionFrenzy.exe` cross-compiled for Windows). The Linux binary starts,
-reads its settings, finds and verifies the disc, recompiles and runs 10,587 guest functions, and
-reaches the title's Direct3D device creation. It stops there, by design, with a named list of the
-XDK data symbols this build still needs. **No picture has ever been on screen.** The exact state,
-with evidence, is in `docs/status.md`; the first boot and what it proved is in `docs/boot-crash.md`.
+**Status: playable on Linux.** Both binaries build from this repository on Linux (`FuzionFrenzy`
+for Linux, `FuzionFrenzy.exe` cross-compiled for Windows). The Linux build boots, plays the intro
+movie, runs the menus and character select, and reaches the minigames and plays them, at a mean of
+59.9 fps over 199 s of driven play (worst second 29.9). Characters render skinned and textured, and
+the in-game clock runs at real time.
+
+The Windows exe is cross-compiled here and has **never been run on Windows**; under Wine 11.20 it
+reaches a minigame in play with zero shader failures. Audio has never been verified. One arena's
+floor shades flat white - a known, unfixed defect recorded in `docs/render-defect.md`.
+
+The exact state, with evidence, is in `docs/status.md`; the first boot and what it proved is in
+`docs/boot-crash.md`.
 
 This repository contains **no game code and no game assets**. It holds tooling, configuration and
 host-side glue only. You must supply your own legally acquired copy of the disc.
