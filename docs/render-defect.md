@@ -55,12 +55,39 @@ The walker now tracks the load register as device state, exactly as the hardware
 `out/shots/fx_55s_zoom.png` and `out/shots/pass_55s_zoom.png` show Jet, Geena and Samson
 rendering correctly; `out/shots/deep_90s.png` shows a solid, textured arena in play.
 
-## Still open: a white arena floor
+## The white arena floor: cause found, fix not yet proven on the scene
 
-Separately, one arena's floor shades to flat `(255,255,255)` while every object standing on
-it textures and shades correctly — `out/shots/speed_125s.png`, where 313,545 of 320,000
-pixels sampled in the middle of the frame are pure white. It is **not** caused by the
-renderer's per-draw reuse caches: scanning eight gameplay frames with every cache disabled
-gave a worst case of 2.5% pure white against 2.1% with them all enabled. Stage-0 textures
-bind cleanly in that scene (`undescribable 0` over a 200 s run), so it is not a missing
-texture falling back to white. Not yet root-caused.
+One arena's floor shaded flat `(255,255,255)` while every object standing on it textured and
+shaded correctly — `out/shots/speed_125s.png`, where 313,545 of 320,000 pixels sampled in the
+middle of the frame are pure white.
+
+What a frame capture of that scene showed (`XBE_CAPTURE_DIR`, F3 path):
+
+- The title clears two 128x128 off-screen surfaces to opaque white and submits 271 draws into
+  them. Those surfaces came out **100.0%** white: not one of the draws painted a pixel.
+- The floor samples those surfaces, so it takes their clear colour.
+- In healthy scenes the equivalent surfaces are 256x256 and come out 94-96% white, which is
+  what a mostly-unshadowed pass should look like.
+
+Ruled out along the way, each by measurement: the renderer's per-draw reuse caches (eight
+gameplay frames with every cache disabled gave a worst case of 2.5% pure white against 2.1%
+with them all enabled); a missing palette (P8 is used in nearly every gameplay frame and the
+count of P8 binds with no palette was 0 over a 240 s run); an unbound texture falling back to
+white (`nullImage_` is cleared to black); and the texel decoders for the formats in play
+(0x02, 0x06, 0x0B, 0x12).
+
+The cause is an ordering hazard in the ultrawide centring. `FrameCentreShift` decides whether
+to shift by looking at the surface bound **at the moment the constant is stored**
+(`gpu::SurfaceSize(g_state.rt ...)`), and the shift was baked into the stored constant. A title
+that writes its fold and screen constants while the frame is still bound and only then switches
+to the off-screen surface they were meant for gets the frame's shift applied to an off-screen
+pass, which pushes its geometry off its own target: it draws nothing and the surface keeps its
+clear colour. `CentreVsConstant` now keeps the value the title actually wrote, and
+`RecentreVsConstants` re-derives the shifted value whenever the bound surface changes.
+
+**What is proven:** the hazard is real and is fixed, and the fix does not regress the widened
+frame — `out/shots/rc_215s.png` is a fully textured, correctly centred arena, and a 200 s driven
+run reports 0 skipped draws at a mean of 59.7 fps. **What is not proven:** that this was the
+cause of the white floor. That scene was only ever reproduced once, before the fix; across
+roughly 25 minutes of driven play afterwards it has not recurred, but absence over eleven
+sampled frames and two 450 s capture runs is not the same as a demonstrated repair.
