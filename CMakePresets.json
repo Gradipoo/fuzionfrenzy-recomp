@@ -40,6 +40,10 @@
          "cacheVariables": {"CMAKE_BUILD_TYPE": "Release"}},
         {"name": "linux-relwithdebinfo", "displayName": "Linux RelWithDebInfo", "inherits": "linux-base",
          "cacheVariables": {"CMAKE_BUILD_TYPE": "RelWithDebInfo"}},
+        {"name": "linux-verbose", "displayName": "Linux verbose (RelWithDebInfo without NDEBUG)", "inherits": "linux-base",
+         "cacheVariables": {"CMAKE_BUILD_TYPE": "RelWithDebInfo",
+                            "CMAKE_CXX_FLAGS_RELWITHDEBINFO": "-O2 -g",
+                            "CMAKE_C_FLAGS_RELWITHDEBINFO": "-O2 -g"}},
         {"name": "host-tools", "displayName": "Host tools only (xbe_recomp, xbe_symbols) for windows-cross",
          "inherits": "linux-base",
          "cacheVariables": {"CMAKE_BUILD_TYPE": "Release", "XBE_HOST_TOOLS_ONLY": "ON"}},
@@ -63,6 +67,7 @@
         {"name": "linux-debug", "configurePreset": "linux-debug"},
         {"name": "linux-release", "configurePreset": "linux-release"},
         {"name": "linux-relwithdebinfo", "configurePreset": "linux-relwithdebinfo"},
+        {"name": "linux-verbose", "configurePreset": "linux-verbose"},
         {"name": "host-tools", "configurePreset": "host-tools"},
         {"name": "windows-cross", "configurePreset": "windows-cross"}
     ]
