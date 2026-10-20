@@ -1,0 +1,15 @@
+# Bink names proven in Fuzion Frenzy default.xbe (XDK 3925). Evidence: docs/movie-path.md
+# Bink is statically linked into .text in this image (there is no BINK section), so the
+# 5849 set's sec = "BINK" rows could never match here; the addresses below are all in .text.
+# BinkOpen, BinkClose and BinkCopyToBuffer are not in the 5849/5558 signature sets at all:
+# their rows were added to sdk/xdk/3925/signatures.toml in the hand-added form, so a rescan
+# gives config/game.toml a row for them and this file can then be merged.
+
+[symbols]
+BinkOpen         = 0x591C0
+BinkDoFrame      = 0x585C0
+BinkNextFrame    = 0x59E20
+BinkWait         = 0x58B60
+BinkGetSummary   = 0x58E00
+BinkClose        = 0x59F80
+BinkCopyToBuffer = 0x57FB0
