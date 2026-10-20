@@ -1,0 +1,41 @@
+# D3D8 global data symbols proven in Fuzion Frenzy default.xbe (XDK 3925).
+# Derived by the state-setter analysis (docs/d3d8-state-symbols.md) and each one re-checked here
+# against the disassembly of a second, independent function before being written down.
+#
+# DO NOT MERGE THIS FILE until sdk/runtime/gpu/state.h and sdk/runtime/xdk/d3d8.cpp read their
+# render-state and texture-stage indices from sdk/xdk/<build>/layout.toml. D3D_RenderState is what
+# makes the host Direct3D_CreateDevice get past its XDK_REQUIRE, and the moment it does,
+# ApplyDefaultStates and SetComplex start writing the guest array at 5849 indices. This build's
+# array is only 144 entries and ends exactly at D3D_Device (0x203B90), so a 5849 index such as
+# CullMode 147 would write 0x203B9C, which is CDevice_Flags. That is silent corruption, which is
+# strictly worse than the loud XDK_REQUIRE abort we have today. See docs/boot-crash.md.
+# Held back from the default merge: see the note above.
+staged = true
+
+[data]
+# Re-checked: D3DDevice_SetIndices 0x1F6189 does `mov eax,[edi+4]; mov D3D_IndexData, eax`, and its
+# null branch writes 0 - exactly the host's `W32(kIndexData, ib ? R32(ib+4) : 0)`.
+D3D_IndexData = 0x20374C
+
+# Re-checked: D3DDevice_SetTextureStageStateNotInline 0x1F6DB0 gates on `cmp eax,16h` (types 0..21),
+# computes `(stage << 5) + type` and stores at D3D_DeferredTextureState[index*4], which also proves
+# TextureState_Stage = 32 dwords.
+D3D_DeferredTextureState = 0x203750
+
+# Re-checked: the complex handler table at 0x2025C0 is indexed by render state, every handler stores
+# its argument at 0x203950 + 4*index, and SetRenderStateNotInline 0x1F66A0 bounds the index with
+# `cmp esi,52h` (82) and `cmp esi,74h` (116). 144 entries end exactly at D3D_Device.
+D3D_RenderState = 0x203950
+
+# Re-checked twice: D3DDevice_SetStreamSource 0x1F8073 and D3DDevice_SetIndices 0x1F6190 both OR
+# their dirty bits into [CDevice+8], and D3D_Device is 0x203B90. In XDK 5849 the dirty flags are a
+# separate global and CDevice+8 is CDevice_Flags; this build disagrees on both counts.
+D3D_DirtyFlags = 0x203B98
+
+# Re-checked: D3DDevice_SetStreamSource 0x1F8000 does `lea esi,[eax+eax*2]; shl esi,2` (12 bytes per
+# stream), stores Stride at D3D_Streams[esi] (+0x0) and pStreamData at 0x206730[esi] (+0x8).
+D3D_Streams = 0x206728
+
+# 82 entries, each identical to 5558's 0..81; 5849's 82 DepthClipControl, 83 StippleEnable and 84..91
+# do not exist here. The host's `R32(kSimpleEncode + rs * 4) & 0x1FFC` decode is unchanged.
+D3D_SimpleRenderStateEncode = 0x253520

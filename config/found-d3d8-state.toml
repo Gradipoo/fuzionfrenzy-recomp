@@ -2,6 +2,9 @@
 # Evidence: docs/d3d8-state-symbols.md. 41 of the 52 adopted names; the other 11 are absent from this image.
 # Before merging, read "Wiring preconditions" in that doc: XDK 3925 numbers its render states and deferred
 # texture-stage states differently from the 5849 tables the SDK uses today.
+# Held back from the default merge: see the note above.
+staged = true
+
 [symbols]
 # device.obj
 D3DDevice_SetTransform                         = 0x1F5360

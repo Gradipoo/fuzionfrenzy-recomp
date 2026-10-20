@@ -136,6 +136,17 @@ def main() -> int:
     if not found_files:
         print("no config/found-*.toml to merge")
         return 0
+    # A file that declares `staged = true` has a precondition the runtime does not meet yet - merging
+    # it would be harmful, not merely premature. It is skipped by the default glob and only merged
+    # when named explicitly on the command line, so no bare run can pull it in by accident.
+    if not args.found:
+        held = [f for f in found_files if tomllib.loads(f.read_text()).get("staged") is True]
+        for f in held:
+            print(f"holding {f.name}: it declares staged = true; name it explicitly to merge it")
+        found_files = [f for f in found_files if f not in held]
+        if not found_files:
+            print("nothing left to merge")
+            return 0
 
     cfg_text = args.config.read_text()
     cfg = tomllib.loads(cfg_text)
