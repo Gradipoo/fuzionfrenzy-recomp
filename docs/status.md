@@ -23,6 +23,7 @@ distinction in this document.
 | In-game clock | real time: 1:30 to 1:16 over 15 s of wall clock |
 | Game speed vs frame rate | **not frame-step quantised**: at `fps_cap` 30 vs 120 the gameplay frame rate differs 2.38x (30.0 vs 71.4 fps) and the title reaches the same scene 0.4 s apart (53.1 s vs 53.5 s). The intro movie takes 11.3 s under both caps. Nothing to fix for this title. |
 | Audio | **never verified** |
+| Scripted pad (`FUZION_STEP`) | exercised: tokens `STARTx3`, `Ax2`, `LSRIGHTx2` were each picked up in order with their exact pulse counts, at 60.0 fps |
 | F1 / F2 panels in play | **never seen running** |
 | Known defect | one arena's floor shades flat white (`docs/render-defect.md`) |
 
