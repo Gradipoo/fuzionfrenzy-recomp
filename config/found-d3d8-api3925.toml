@@ -1,0 +1,22 @@
+# The three D3D8 entry points that exist in XDK 3925 but not in the 5849/5558 signature sets, so they
+# have no row until one is added by hand (they are now in config/game.toml and in
+# sdk/xdk/3925/signatures.toml). Evidence: docs/d3d8-core-symbols.md.
+#
+# Held back until sdk/runtime/xdk/d3d8.cpp carries the host bodies for them. Without those bodies a
+# named address is worse than an unnamed one: the recompiler would bind the name to nothing.
+staged = true
+
+[symbols]
+# This build has no D3DDevice_Swap. It presents through Present(4 args, retn 10h); the game calls it
+# at 0x41F3F, 0x42481, 0x4249D and 0x42C5E, always with four zeros, and never reads the result.
+D3DDevice_Present = 0x202150
+
+# The older three-argument form, (BackBuffer, Type, ppSurface), retn 0Ch. There is no GetBackBuffer2
+# here. It returns surfaces embedded in CDevice at +0x2150 + index * 0x18 rather than pointers, which
+# is why CDevice_BackBuffer and CDevice_FrontBuffer have no equivalent in this build. The game passes
+# the result to D3DDevice_SetRenderTarget from its own code at 0x45387.
+D3DDevice_GetBackBuffer = 0x1F58A0
+
+# The older one-argument form, (ppSurface), retn 4. Harmless as long as the host keeps CDevice+0x410
+# filled, which SetupPresentation does.
+D3DDevice_GetDepthStencilSurface = 0x1F5B40
