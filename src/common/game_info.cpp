@@ -198,10 +198,17 @@ const app::GameInfo app::kGame = {
     .ui = &overlay::Draw,                    // ImGui drawing each frame: F1 settings, F2 performance
     .pad = &PadHook,                         // keyboard and mouse as port 0, FUZION_AUTOSTART self-test
     .rumble = nullptr,                       // changes a rumble before it is set
-    // The picture rect is unmeasured for this title: which rows of the frame hold picture has not
-    // been found yet. 0/480 is the no-crop default, the whole 640x480 frame presented as it is. The
-    // real rows must be derived from the title's own 2D screen matrix and the reciprocals its UI
-    // scales screen coordinates by (1/640 across, 1/<picture height> down), not judged by eye.
+    // Measured, not guessed: this title draws the whole frame and leaves no overscan band, so the
+    // no-crop 0/480 is the right answer rather than an unexamined default.
+    //   - Its own viewport transform, dumped from running draws (XBE_VK_DEBUG_DRAW): the XDK fold
+    //     holds half-size c[58] = (320, -240, ...) about centre c[59] = (320, 240, ...), so the
+    //     picture spans y 0 to 480. The 160/+-120 variants about (160,120), (480,120), (160,360) and
+    //     (480,360) are the four-player split-screen quadrants of that same 640x480 frame.
+    //   - Guest front buffers captured through a 200 s driven run (XBE_VK_CAPTURE_EVERY): 0 black
+    //     rows top and bottom on all 18 gameplay and menu frames. The one letterboxed frame is a
+    //     cutscene at 54/52 rows, about 11% a side - the game's own 16:9 bar, not the ~3% a TV's
+    //     overscan band would leave, and not present every frame.
+    // A title that did draw into a band would show it in both, as The Urbz does at 640x448 offset 16.
     .picture_top = 0,
     .picture_height = 480,
 };

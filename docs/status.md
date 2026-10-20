@@ -21,6 +21,7 @@ distinction in this document.
 | Characters | render skinned and textured (`docs/render-defect.md`) |
 | Frame rate, Linux/Vulkan | mean 59.9 fps over 199 s of play, worst second 29.9, against 41.7 / 17.0 before the renderer work |
 | In-game clock | real time: 1:30 to 1:16 over 15 s of wall clock |
+| Game speed vs frame rate | **not frame-step quantised**: at `fps_cap` 30 vs 120 the gameplay frame rate differs 2.38x (30.0 vs 71.4 fps) and the title reaches the same scene 0.4 s apart (53.1 s vs 53.5 s). The intro movie takes 11.3 s under both caps. Nothing to fix for this title. |
 | Audio | **never verified** |
 | F1 / F2 panels in play | **never seen running** |
 | Known defect | one arena's floor shades flat white (`docs/render-defect.md`) |
