@@ -1,0 +1,46 @@
+{
+  "$schema": "https://recomp.fyi/schema/v1.json",
+  "game": "Fuzion Frenzy",
+  "system": "Xbox",
+  "type": "recomp",
+  "original": {
+    "region": "USA",
+    "serial": "0x4D530002",
+    "sha1": "c6fb6082900532cde5fa8dbb7de8dfa202f0fdad"
+  },
+  "project": "Fuzion Frenzy Recompiled",
+  "status": "in-progress",
+  "targets": [
+    "Windows",
+    "Linux"
+  ],
+  "toolchain": "XboxXBERecomp",
+  "approach": "Static recompilation of the retail XBE to C++; XDK HLE with a Direct3D 12 renderer and XAudio2 on Windows, and a native Vulkan renderer with SDL3 on Linux (no Wine)",
+  "maintainers": [
+    {
+      "name": "abilliontokens",
+      "link": "https://github.com/abilliontokens"
+    }
+  ],
+  "links": [
+    {
+      "label": "SDK fork",
+      "url": "https://github.com/abilliontokens/XboxXBERecomp"
+    }
+  ],
+  "help": [
+    "Match the XDK 3925 libraries (D3D8, DSOUND 3925; XAPILIB, XBOXKRNL, LIBC, XGRAPHC 3911) into config/game.toml",
+    "First build and boot of the native Linux target (Vulkan + SDL3)",
+    "Build and test the Windows target (Direct3D 12 + XAudio2)"
+  ],
+  "tags": [
+    "xbox",
+    "static-recomp",
+    "xbe",
+    "xdk-3925",
+    "d3d12",
+    "vulkan",
+    "sdl3"
+  ],
+  "notes": "Bring-up: the FuzionFrenzy build is wired to the XboxXBERecomp SDK, recompiling the retail assets/default.xbe (XDK build 3925, title ID 0x4D530002) with the symbols and partitions xbe_symbols writes to config/game.toml. It has not yet been built or booted."
+}

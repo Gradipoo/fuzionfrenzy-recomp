@@ -1,0 +1,8 @@
+# Names proven while localising the first boot crash of Fuzion Frenzy (XDK 3925).
+# Evidence: docs/boot-crash.md
+[symbols]
+Direct3D_CreateDevice = 0x1F7650
+
+[data]
+D3D_Device  = 0x203B90
+D3D_pDevice = 0x206720
