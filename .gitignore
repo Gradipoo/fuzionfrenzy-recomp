@@ -49,3 +49,9 @@ __pycache__/
 /FuzionFrenzy-linux-x64.tar.zst
 /FuzionFrenzy-win64.zip
 /FuzionFrenzy.zip
+
+# macOS launcher product. The .app and .dmg are built locally. The disk image
+# must not be committed: a shipped game binary would be game-derived, and the
+# launcher is supposed to compile that binary on the player's Mac.
+/macos/launcher/dist/
+*.dmg
