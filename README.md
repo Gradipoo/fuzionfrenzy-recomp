@@ -20,8 +20,10 @@ floor shades flat white - a known, unfixed defect recorded in `docs/render-defec
 On Apple Silicon the same tree builds natively (arm64, MoltenVK, no Rosetta). It boots, opens a
 borderless window, and draws past the point where MoltenVK used to lose the device (about 53
 seconds, one command buffer holding ~8500 draws). A scripted run stayed up through 99 seconds,
-including the pad's play phase and a heavier ~10000-draw scene at about 40 fps. Menus and a
-minigame are not confirmed from a picture. `HANDOFF.md` has the run notes.
+including the pad's play phase and a heavier ~10000-draw scene at about 40 fps. The window blit
+is a single texture; MoltenVK would not compile the two-texture present shader. Menus and a
+minigame are not confirmed from a picture. `HANDOFF.md` has the run notes and the ports that
+were read for the fault.
 
 The exact state, with evidence, is in `docs/status.md`; the first boot and what it proved is in
 `docs/boot-crash.md`.

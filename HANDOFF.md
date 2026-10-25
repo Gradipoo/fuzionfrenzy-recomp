@@ -60,10 +60,15 @@ Applied by `tools/apply-macos-sdk.sh` (also from the top of `CMakeLists.txt` on 
   The same draws split across submits do not. 1024 stays under the 8192-set segment
   and the upload ring. Metal argument buffers stay enabled.
 - glslang's `setShiftBinding` is applied by `mapIO()`, which this path was not calling.
-  Without it, HLSL registers are the bindings (`t0` and `s0` both binding 0). The
-  present shader then fails in MoltenVK with both textures at `[[texture(0)]]`.
+  Without it, HLSL registers are the bindings (`t0` and `s0` both binding 0).
   `mapIO()` puts textures at bindings 2..5 and samplers at 6..9, which is the
   descriptor set the draws already write. The SPIR-V cache key changed with that call.
+  Distinct bindings are not enough for the old two-texture present shader: MoltenVK
+  still emits both textures as `[[texture(0)]]` and both samplers as `[[sampler(0)]]`,
+  and the Metal library does not compile. The present shader is now one texture and
+  one sampler. The gamma ramp lives in the binding-0 uniform (192 `float4`s, the
+  existing b0 range) and the blit constants sit after it in b1. The upload covers
+  that ramp plus a full `DrawConstants`, which is the range the descriptor writes.
 - Cocoa: `SDL_PumpEvents` is not called from the guest input thread. AppKit aborts if it is.
   The main thread already pumps. `SDL_PeepEvents` still drains gamepad add/remove.
 - `ucontext.h` needs `_XOPEN_SOURCE` before it is included. `sysctlbyname`'s last argument is
@@ -100,10 +105,19 @@ OpenSSL 3. No LunarG SDK, so shaders go through glslang. `file` on the linked bi
   used to kill the device (~53 s, about 8500 draws) ran at about 45–50 fps. After the
   scripted pad's 75 s play phase the draw count dropped to about 600 at 60 fps, then a
   heavier scene held about 10000 draws at about 40 fps. No `VK_ERROR_DEVICE_LOST`, no
-  skipped draws, no pipeline failures, no upload overflow. That run is perf counters
-  only. Menus and a minigame were not confirmed from a picture. The host-target readback
-  from an earlier, pre-fix scene was a picture; the guest-sized readback of that same
-  present was all zeros.
+  skipped draws, no pipeline failures, no upload overflow.
+- A later run with `mapIO()` applied stayed up through at least 73 s. The ~53 s frame
+  dropped to about 48 fps and was back at 60 fps by 58 s. Render-target readbacks at
+  presents 1500 and 3000 were not blank, at host size and at guest size (present 0 is
+  still all zeros). Those files were deleted.
+- The one-texture present shader drew at about 60 fps through 21 s with zero pipeline
+  misses. The present-900 readback was not blank, host and guest. That process then
+  left with `Exit (0)` (the SDL quit path, not a device loss). The startup
+  `cannot reserve 'texture'` line on that run named `lut`, the previous present
+  shader, replayed while the pipeline cache was created. The new module does not
+  contain that texture.
+- Menus and a minigame were not confirmed from a picture. Draw counts move the way a
+  title does when the scripted pad leaves the opening and enters play.
 - The title opened its music package while this was running. The test set `XBE_MUTE=1`, so
   playback was not listened to.
 - Guest threads run. The main thread stays in the Cocoa event loop. An earlier build aborted
@@ -114,14 +128,14 @@ OpenSSL 3. No LunarG SDK, so shaders go through glslang. `file` on the linked bi
 - The heavy scene after 75 s runs at about 40 fps. Each 1024-draw `Flush()` waits for the
   GPU, so a 10000-draw frame pays several stalls. 2745 draws in one buffer stayed alive in
   a cap test; 8500 did not. 1024 is the split that was measured with the full draw count.
-- The present shader logged `cannot reserve 'texture' resource location at index 0` on the
-  run that survived to 99 s (both textures and both samplers assigned Metal index 0).
-  Present times stayed non-zero, and that binary still created pipelines. `mapIO()` is in
-  this revision so those bindings are distinct. Re-check that the MoltenVK line is gone
-  and that a host readback of a post-53 s frame is not a blank image.
-- Menus and a minigame are not confirmed from a picture. Draw counts move the way a title
-  does when the scripted pad leaves the opening and enters play, and the device stays up
-  through that. The window itself was not captured (screen recording is blocked here).
+- The window blit and the render target are different images. The readbacks above are
+  the render target. A cache-clean run (delete `shadercache/*/pipeline.bin` first) is
+  what shows whether the new present shader compiles without the `lut` line. The
+  swapchain itself was not read back, and screen recording is blocked here.
+- Menus and a minigame are not confirmed from a picture. The post-75 s heavy scene was
+  measured on the binary from before the one-texture blit. One short run of the blit
+  binary exited 0 at 22 s; that was not a GPU fault, and it has not been repeated past
+  the old 53 s point on that binary yet.
 - MoltenVK does not implement every feature the Linux backend uses (some BC layouts,
   `D24_UNORM_S8`, RGB32 float images, non-solid fill). The device only enables features it
   advertises; the depth format falls through the existing loop.
@@ -217,21 +231,24 @@ black-macos-runtime's NV2A renderer are GPL as well.
   [#2278](https://github.com/KhronosGroup/MoltenVK/issues/2278) (descriptor indexing).
   The Metal rule that matches the measurement: with argument buffers the driver does not
   see every resource, and a command buffer that outruns its residency set page-faults a
-  read. Splitting the submits is what kept this device alive.
+  read. Splitting the submits is what kept this device alive. DirectXbox's frames stay
+  a few hundred draws, so that port never needed this split. The idea that came across
+  is to keep argument buffers on and keep each submit's residency set small.
+- The one-texture present shader is local. Giving that shader two textures still
+  collapsed both to Metal index 0 after `mapIO()` and after each variable had its own
+  SPIR-V image type. Game shaders that sample four textures at bindings 2..5 compile.
+  Nothing from the GPL trees was copied into the blit.
 
 ## Next steps
 
-1. Confirm the present shader compiles after `mapIO()` (no `cannot reserve 'texture'`
-   line) and that a host readback past 53 s is not a blank frame. Delete the bmp. Do not
-   commit it.
+1. Delete `out/build/macos-release/shadercache/*/pipeline.bin`, rerun, and confirm the
+   log has no `cannot reserve 'texture'` line and no `lut` in that MoltenVK error.
+   One host readback past 53 s, then delete the bmp. Do not commit it.
 2. A host-resolution picture of the post-75 s scene is what would confirm a minigame.
-   Draw counts already show that scene running with the device up. Leave
-   `FUZION_AUTOSTART_PLAY_MS` at 75000; that default is shared with Linux.
+   Draw counts on the earlier binary already show that scene running with the device
+   up. Leave `FUZION_AUTOSTART_PLAY_MS` at 75000; that default is shared with Linux.
 3. If the heavy scene needs to be faster, try a split of 2048 draws. Do not jump to 4096
    without a run: 2745 in one buffer survived a cap test of an earlier scene, and ~8500
    did not.
-4. The guest-sized frame dump (`front_NNNNN.bmp` from `XBE_VK_CAPTURE_EVERY`) came back
-   black while `front_NNNNN_host.bmp` had the picture. Fix that readback only if you need
-   guest-resolution captures. Keep capture output outside the repo and delete it.
-5. Keep the patch the only SDK delta. Do not commit a new `sdk` gitlink, and do not commit
+4. Keep the patch the only SDK delta. Do not commit a new `sdk` gitlink, and do not commit
    `generated/`, `assets/`, `logs/`, or pictures.
