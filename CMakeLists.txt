@@ -1,6 +1,19 @@
 # Fuzion Frenzy (original Xbox, USA), statically recompiled
 
 cmake_minimum_required(VERSION 3.25)
+
+# macOS arm64 support lives in patches/sdk-macos-arm64.patch, applied onto the
+# pinned SDK submodule. Idempotent. Linux and Windows configure the submodule as-is.
+if(APPLE)
+    execute_process(
+        COMMAND /bin/sh "${CMAKE_CURRENT_SOURCE_DIR}/tools/apply-macos-sdk.sh"
+        WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
+        RESULT_VARIABLE _xbe_macos_patch)
+    if(NOT _xbe_macos_patch EQUAL 0)
+        message(FATAL_ERROR "tools/apply-macos-sdk.sh failed (${_xbe_macos_patch})")
+    endif()
+endif()
+
 project(FuzionFrenzy LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 20)

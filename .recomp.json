@@ -12,10 +12,11 @@
   "status": "in-progress",
   "targets": [
     "Windows",
-    "Linux"
+    "Linux",
+    "macOS"
   ],
   "toolchain": "XboxXBERecomp",
-  "approach": "Static recompilation of the retail XBE to C++; XDK HLE with a Direct3D 12 renderer and XAudio2 on Windows, and a native Vulkan renderer with SDL3 on Linux (no Wine)",
+  "approach": "Static recompilation of the retail XBE to C++; XDK HLE with a Direct3D 12 renderer and XAudio2 on Windows, and a native Vulkan renderer with SDL3 on Linux and macOS arm64 (MoltenVK, no Wine, no Rosetta)",
   "maintainers": [
     {
       "name": "abilliontokens",

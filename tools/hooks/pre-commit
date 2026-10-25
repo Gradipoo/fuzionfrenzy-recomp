@@ -1,0 +1,53 @@
+#!/bin/sh
+# Refuse commits that touch game data, recompiled guest code, or build output.
+#
+# Install, from the repository root (pick one):
+#   git config core.hooksPath tools/hooks
+#   ln -sfn ../../tools/hooks/pre-commit .git/hooks/pre-commit
+#
+# core.hooksPath replaces every other hook in .git/hooks. This repository
+# ships no other hooks.
+set -eu
+
+fail=0
+files=$(git diff --cached --name-only --diff-filter=ACMRDT)
+
+for f in $files; do
+    case "$f" in
+        sdk|sdk/*)
+            echo "pre-commit: refusing an sdk submodule change: $f" >&2
+            echo "pre-commit: macOS edits belong in patches/sdk-macos-arm64.patch" >&2
+            fail=1
+            continue
+            ;;
+    esac
+    case "$f" in
+        assets|assets/*|generated|generated/*|out|out/*|build|build/*|\
+        logs|logs/*|hdd|hdd/*|CrashDumps|CrashDumps/*|shadercache|shadercache/*|\
+        tools/bin|tools/bin/*|.toolchain|.toolchain/*)
+            echo "pre-commit: refusing game, asset, or build path: $f" >&2
+            fail=1
+            continue
+            ;;
+    esac
+    case "$f" in
+        *.xbe|*.XBE|*.iso|*.ISO|*.xiso|*.XISO|*.dmp|*.DMP|*.d3dcap|*.pdb|*.exe)
+            echo "pre-commit: refusing disc, dump, or binary type: $f" >&2
+            fail=1
+            continue
+            ;;
+    esac
+    case "$f" in
+        *x86_recomp*|*x86_func_mapping*|*image_symbols.h)
+            echo "pre-commit: refusing recompiled guest code: $f" >&2
+            fail=1
+            continue
+            ;;
+    esac
+done
+
+if [ "$fail" -ne 0 ]; then
+    echo "pre-commit: commit blocked. Game files and recompiled output stay on this machine." >&2
+    exit 1
+fi
+exit 0

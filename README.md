@@ -3,8 +3,9 @@
 An unofficial native PC port of the original Xbox release of *Fuzion Frenzy* (USA), produced by
 statically recompiling the game's x86 XBE with the
 [XboxXBERecomp SDK](https://github.com/abilliontokens/XboxXBERecomp) fork (vendored in `sdk/` as a
-submodule on branch `fuzion-frenzy-port`). Windows uses Direct3D 12 and XAudio2; Linux is a native
-Vulkan and SDL3 build - no Wine.
+submodule on branch `fuzion-frenzy-port`). Windows uses Direct3D 12 and XAudio2; Linux and macOS
+are native Vulkan and SDL3 builds - no Wine, and the Mac build is arm64, not Rosetta. macOS draws
+through MoltenVK.
 
 **Status: playable on Linux.** Both binaries build from this repository on Linux (`FuzionFrenzy`
 for Linux, `FuzionFrenzy.exe` cross-compiled for Windows). The Linux build boots, plays the intro
@@ -72,6 +73,7 @@ two real XDK builds (`ret` identical in 171/171 names, `regs` in 175/175, byte l
 | Recompilation | done - 10,587 functions, 633,913 instructions, 2,165,441 of 2,368,328 code bytes (91.4%) |
 | Kernel import coverage (`tools/kernel_coverage.py`) | done - 111 of 111 (`docs/kernel-coverage.md`) |
 | Native Linux build (Vulkan + SDL3) | done - builds, links, boots |
+| Native macOS arm64 build (Vulkan via MoltenVK + SDL3) | in progress - see `HANDOFF.md` |
 | Windows build (D3D12 + XAudio2), cross-compiled on Linux | done - builds and links; **never run on Windows** |
 | Picture on screen | **not reached** |
 | Audio | **not reached** |
@@ -159,7 +161,10 @@ sdk/           XboxXBERecomp SDK submodule (recompiler, runtime, XDK HLE, render
 src/common/    host-side code: F1/F2 overlay, keyboard-as-pad, GameInfo
 src/game/      hooks and overrides for recompiled functions
 tools/         xiso_extract.py, xbe_info.py, kernel_coverage.py, sig_bootstrap.py,
-               align_symbols.py, merge_symbols.py, and the screenshot/driving helpers
+               align_symbols.py, merge_symbols.py, and the screenshot/driving helpers.
+               tools/apply-macos-sdk.sh applies the macOS patch; tools/hooks/pre-commit
+               refuses commits of game data
+patches/       sdk-macos-arm64.patch, applied on Darwin only, onto the pinned sdk/ submodule
 generated/     recompiler output (never committed)
 ```
 
@@ -203,6 +208,40 @@ You supply the game: the USA Xbox release, as either
    `config/game.toml` is already written and committed for this XBE, so neither route needs to
    regenerate it.
 
+   **macOS, Apple Silicon** (native arm64, Vulkan via MoltenVK + SDL3):
+
+   Prerequisites:
+
+   - Xcode Command Line Tools (`xcode-select --install`). The compiler must be arm64. Do not
+     build this target under Rosetta.
+   - Homebrew packages: `brew install cmake ninja openssl@3 glslang molten-vk vulkan-loader vulkan-headers`
+   - A Vulkan ICD. Those Homebrew packages are enough: MoltenVK's ICD is
+     `$(brew --prefix)/etc/vulkan/icd.d/MoltenVK_icd.json`, and the game points the loader at it
+     when `VK_DRIVER_FILES` is unset. The [LunarG Vulkan SDK](https://vulkan.lunarg.com/sdk/home#mac)
+     is the other way to get MoltenVK, and it also ships DXC (`libdxcompiler.dylib`). With
+     `VULKAN_SDK` set, the build looks there for DXC headers and the game prefers DXC over glslang.
+     glslang from Homebrew is enough to compile shaders when DXC is absent.
+   - `xdvdfs` is not a Homebrew formula. Install it with `cargo install xdvdfs-cli` if you want
+     that extractor. This repository's `tools/xiso_extract.py` reads a disc image without it.
+
+   The `sdk/` submodule has to be checked out (`git submodule update --init sdk`). On Darwin,
+   `./build.sh` and CMake both run `tools/apply-macos-sdk.sh`, which applies
+   `patches/sdk-macos-arm64.patch` onto that submodule. The patch is not applied on Linux or
+   Windows, so those builds keep the submodule as upstream pinned it. Re-running the script does
+   nothing once the patch is present.
+
+   ```
+   git submodule update --init sdk
+   ./build.sh
+   ```
+
+   `./build.sh` with no argument selects `macos-release` on Darwin and `linux-release` on Linux.
+   The executable is `out/build/macos-release/FuzionFrenzy`. Run it from anywhere; it walks up
+   from its own directory to find `assets/`. `arch` on the binary should report `arm64`.
+
+   The same `settings.toml`, `logs/` and `hdd/` as on Linux are created beside the executable.
+   HDR settings are ignored. Keyboard and pad mapping is the table above.
+
 ## Working on the port
 
 - Never edit anything in `generated/`; it is rewritten on every recompile.
@@ -217,5 +256,21 @@ You supply the game: the USA Xbox release, as either
 ## Legal
 
 Bring your own disc. Do not commit or distribute the XBE, the disc image, extracted assets, or any key
-material. `assets/`, `generated/`, `*.iso`, `*.xbe` and `out/` are ignored by git for that reason. The
-SDK is MIT licensed; see `sdk/LICENSE` and `sdk/THIRD_PARTY.txt`.
+material. `assets/`, `generated/`, `*.iso`, `*.xiso`, `*.xbe` and `out/` are ignored by git for that
+reason. Install the commit hook so a slip is rejected rather than only ignored:
+
+```
+git config core.hooksPath tools/hooks
+```
+
+or `ln -sfn ../../tools/hooks/pre-commit .git/hooks/pre-commit`. The hook refuses `assets/`,
+`generated/`, build output, recompiled guest sources, and `*.xbe` / `*.iso` / `*.xiso` / dumps.
+`core.hooksPath` replaces any other hooks in `.git/hooks`. This repository ships no other hooks.
+
+The SDK is MIT licensed; see `sdk/LICENSE` and `sdk/THIRD_PARTY.txt`. This repository adds no
+license of its own. The macOS patch was written for this port. Its Darwin memory behaviour (an
+unnamed `shm_open` object for the physical aliases, and 4 KB guest pages on a 16 KB host page)
+follows the approach described by [DirectXbox-Recomp](https://github.com/phobos665/DirectXbox-Recomp)
+(`src/platform/posix_memory.c`), which is GPL-3.0. That source was used as a reference and is not
+copied here. DirectXbox-Recomp is a different recompiler; this game stays on the XboxXBERecomp SDK
+so the Linux and Windows builds are unchanged.

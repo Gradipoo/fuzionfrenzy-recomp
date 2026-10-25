@@ -1,0 +1,641 @@
+diff --git a/cmake/XbeRecomp.cmake b/cmake/XbeRecomp.cmake
+index 15638ea..da84add 100644
+--- a/cmake/XbeRecomp.cmake
++++ b/cmake/XbeRecomp.cmake
+@@ -102,6 +102,13 @@ list(REMOVE_ITEM XBE_RUNTIME_SOURCES
+     ${XBE_SDK_DIR}/runtime/gpu/spirv.cpp
+     ${XBE_SDK_DIR}/runtime/audio/sdl_audio.cpp)
+ else()
++if(APPLE)
++    # Homebrew's prefix is not on CMake's default search path.
++    list(PREPEND CMAKE_PREFIX_PATH "/opt/homebrew" "/usr/local")
++    if(DEFINED ENV{VULKAN_SDK})
++        list(PREPEND CMAKE_PREFIX_PATH "$ENV{VULKAN_SDK}")
++    endif()
++endif()
+ # Win32-only sources out; the SDL/Vulkan counterparts in (globbed above,
+ # appended explicitly so the contract survives a stale glob)
+ list(REMOVE_ITEM XBE_RUNTIME_SOURCES
+@@ -124,11 +131,15 @@ find_package(ZLIB REQUIRED)  # runtime/app/image_decode.cpp: the splash PNG deco
+ # offered when found. XBE_SHADER_BACKEND makes one of them required instead of optional.
+ set(XBE_SHADER_BACKEND "" CACHE STRING "require a Vulkan shader compiler: dxc or glslang (empty: whatever is found)")
+ set_property(CACHE XBE_SHADER_BACKEND PROPERTY STRINGS dxc glslang)
+-find_path(XBE_DXC_INCLUDE dxc/dxcapi.h HINTS /opt/dxc/include)
+-find_library(XBE_GLSLANG glslang)
+-find_library(XBE_SPIRV SPIRV)
+-find_library(XBE_GLSLANG_RES glslang-default-resource-limits)
+-find_path(XBE_GLSLANG_INCLUDE glslang/Public/ShaderLang.h)
++set(_XBE_DXC_HINTS /opt/dxc/include)
++if(DEFINED ENV{VULKAN_SDK})
++    list(APPEND _XBE_DXC_HINTS "$ENV{VULKAN_SDK}/include")
++endif()
++find_path(XBE_DXC_INCLUDE dxc/dxcapi.h HINTS ${_XBE_DXC_HINTS})
++find_library(XBE_GLSLANG glslang HINTS /opt/homebrew/lib /usr/local/lib)
++find_library(XBE_SPIRV SPIRV HINTS /opt/homebrew/lib /usr/local/lib)
++find_library(XBE_GLSLANG_RES glslang-default-resource-limits HINTS /opt/homebrew/lib /usr/local/lib)
++find_path(XBE_GLSLANG_INCLUDE glslang/Public/ShaderLang.h HINTS /opt/homebrew/include /usr/local/include)
+ set(XBE_SHADER_LIBS "")
+ set(XBE_SHADER_DEFINES "")
+ set(XBE_SHADER_INCLUDES "")
+@@ -212,6 +223,10 @@ function(add_xbe_image target xbe config partitions game_dir)
+         message(FATAL_ERROR "the recompiled image links with lld-link; CMAKE_LINKER is ${CMAKE_LINKER}")
+     endif()
+     target_link_options(${target} PRIVATE /DEBUG)
++    elseif(APPLE)
++    # Mach-O ld64 keeps a strong host definition over the recompiler's weak
++    # one. Apple clang rejects -fuse-ld=lld.
++    target_link_options(${target} PRIVATE -g)
+     else()
+     target_link_options(${target} PRIVATE -fuse-ld=lld -g)
+     endif()
+diff --git a/runtime/app/main_sdl.cpp b/runtime/app/main_sdl.cpp
+index 2514392..cd190e7 100644
+--- a/runtime/app/main_sdl.cpp
++++ b/runtime/app/main_sdl.cpp
+@@ -22,6 +22,10 @@
+ 
+ #include <unistd.h>
+ #include <ucontext.h>
++#if defined(__APPLE__)
++#include <mach-o/dyld.h>
++#include <cstdlib>
++#endif
+ 
+ #include "app/app.h"
+ #include "app/platform.h"
+@@ -128,7 +132,17 @@ void CrashHandler(int sig, siginfo_t* info, void* uc) {
+         if (p >= base && p < base + (size_t{1} << 32))
+             LOGE("fault at guest address %08X (host %p)", uint32_t(p - base), at);
+     }
+-    if (uc) LOGE("host faulting instruction %p", reinterpret_cast<void*>(uintptr_t(reinterpret_cast<ucontext_t*>(uc)->uc_mcontext.gregs[REG_RIP])));
++    if (uc) {
++        void* pc = nullptr;
++#if defined(__APPLE__) && defined(__aarch64__)
++        pc = reinterpret_cast<void*>(reinterpret_cast<ucontext_t*>(uc)->uc_mcontext->__ss.__pc);
++#elif defined(__APPLE__) && defined(__x86_64__)
++        pc = reinterpret_cast<void*>(reinterpret_cast<ucontext_t*>(uc)->uc_mcontext->__ss.__rip);
++#elif defined(REG_RIP)
++        pc = reinterpret_cast<void*>(uintptr_t(reinterpret_cast<ucontext_t*>(uc)->uc_mcontext.gregs[REG_RIP]));
++#endif
++        if (pc) LOGE("host faulting instruction %p", pc);
++    }
+     if (kernel::Thread* t = kernel::Current(); t && t->ctx) {
+         LOGE("signal %d on guest thread %X", sig, t->id);
+         kernel::LogGuestStack(*t->ctx, 256);
+@@ -281,10 +295,19 @@ bool HandleEvent(const SDL_Event& e) {  // window thread; true: quit
+ }  // namespace
+ 
+ std::filesystem::path ExeDir() {
++#if defined(__APPLE__)
++    char self[4096] = {};
++    uint32_t sz = sizeof(self);
++    if (_NSGetExecutablePath(self, &sz) != 0) return std::filesystem::current_path();
++    char real[4096] = {};
++    if (!realpath(self, real)) return std::filesystem::path(self).parent_path();
++    return std::filesystem::path(real).parent_path();
++#else
+     char self[4096] = {};
+     ssize_t n = readlink("/proc/self/exe", self, sizeof(self) - 1);
+     if (n <= 0) return std::filesystem::current_path();
+     return std::filesystem::path(std::string(self, size_t(n))).parent_path();
++#endif
+ }
+ 
+ int Instance() {
+@@ -399,7 +422,11 @@ bool CursorVisible() { return SDL_CursorVisible(); }
+ 
+ HdrInfo QueryHdr() {
+     // No HDR swap chain exists in the Vulkan build; say so, never pretend.
++#if defined(__APPLE__)
++    return {false, false, 0, "HDR is not available on macOS"};
++#else
+     return {false, false, 0, "HDR is not available on Linux"};
++#endif
+ }
+ 
+ }  // namespace platform
+@@ -407,6 +434,20 @@ HdrInfo QueryHdr() {
+ }  // namespace app
+ 
+ int main(int argc, char** argv) {
++#if defined(__APPLE__)
++    // Homebrew's MoltenVK ICD is not on the loader's default search path.
++    // A LunarG SDK install, or an explicit VK_DRIVER_FILES, wins.
++    if (!getenv("VK_DRIVER_FILES") && !getenv("VK_ICD_FILENAMES")) {
++        const char* candidates[] = {"/opt/homebrew/etc/vulkan/icd.d/MoltenVK_icd.json",
++                                    "/usr/local/etc/vulkan/icd.d/MoltenVK_icd.json"};
++        for (const char* c : candidates) {
++            if (access(c, R_OK) != 0) continue;
++            setenv("VK_DRIVER_FILES", c, 0);
++            setenv("VK_ICD_FILENAMES", c, 0);
++            break;
++        }
++    }
++#endif
+     app::g_argc = argc;
+     app::g_argv = argv;
+     // SA_SIGINFO so CrashHandler receives the fault address (see above); sigaction rather than
+@@ -452,7 +493,11 @@ int main(int argc, char** argv) {
+     app::CacheClientSize();
+     app::g_focus = SDL_GetKeyboardFocus() == app::g_window;
+     // HDR is honestly off on this platform, from the start.
++#if defined(__APPLE__)
++    app::SetHdr({false, false, 0, "HDR is not available on macOS"});
++#else
+     app::SetHdr({false, false, 0, "HDR is not available on Linux"});
++#endif
+ 
+     // Vulkan handshake: the backend owns the instance; SDL names the
+     // extensions it needs, the backend creates it, SDL makes the surface.
+diff --git a/runtime/app/system_info.cpp b/runtime/app/system_info.cpp
+index b2cd099..eea5767 100644
+--- a/runtime/app/system_info.cpp
++++ b/runtime/app/system_info.cpp
+@@ -9,9 +9,15 @@
+ #include <windows.h>
+ #include <intrin.h>
+ #else
++#if !defined(__APPLE__)
+ #include <cpuid.h>
++#endif
+ #include <sys/utsname.h>
+ #include <unistd.h>
++#if defined(__APPLE__)
++#include <mach-o/dyld.h>
++#include <sys/sysctl.h>
++#endif
+ #endif
+ 
+ #include <algorithm>
+@@ -91,7 +97,17 @@ std::string CpuName() {
+ // running kernel behind it: the counterpart of the Windows product name and build.
+ std::string OsVersion() {
+     utsname u{};
+-    if (uname(&u) != 0) return "Linux (uname failed)";
++    if (uname(&u) != 0) return "unknown (uname failed)";
++#if defined(__APPLE__)
++    char ver[64] = {};
++    size_t len = sizeof(ver);
++    if (sysctlbyname("kern.osproductversion", ver, &len, nullptr, nullptr) != 0) ver[0] = 0;
++    std::string out = std::string("macOS ") + (ver[0] ? ver : u.release);
++    out += " (";
++    out += u.machine;
++    out += ')';
++    return out;
++#else
+     std::string pretty;
+     std::ifstream f("/etc/os-release");
+     for (std::string line; std::getline(f, line);) {
+@@ -119,11 +135,19 @@ std::string OsVersion() {
+     out += u.machine;
+     out += ')';
+     return out;
++#endif
+ }
+ 
+ // The same CPUID brand leaves the Windows path reads (0x80000002..4), through
+-// <cpuid.h>'s __get_cpuid instead of MSVC's __cpuid intrinsic.
++// <cpuid.h>'s __get_cpuid instead of MSVC's __cpuid intrinsic. Apple Silicon
++// has no CPUID; the brand string comes from sysctl.
+ std::string CpuName() {
++#if defined(__APPLE__)
++    char brand[256] = {};
++    size_t len = sizeof(brand);
++    if (sysctlbyname("machdep.cpu.brand_string", brand, &len, nullptr, nullptr) != 0 || !brand[0]) return "Apple Silicon";
++    return brand;
++#else
+     if (__get_cpuid_max(0x80000000, nullptr) < 0x80000004) return "unknown";
+     char brand[49] = {};
+     for (unsigned i = 0; i < 3; i++) {
+@@ -137,14 +161,24 @@ std::string CpuName() {
+     s.erase(0, first);
+     s.erase(s.find_last_not_of(' ') + 1);
+     return s;
++#endif
+ }
+ 
+ // This process's own executable, resolved the way ExeDir resolves it in main_sdl.cpp.
+ std::string ExePath() {
++#if defined(__APPLE__)
++    char self[4096] = {};
++    uint32_t sz = sizeof(self);
++    if (_NSGetExecutablePath(self, &sz) != 0) return {};
++    char real[4096] = {};
++    if (!realpath(self, real)) return self;
++    return real;
++#else
+     char self[4096] = {};
+     ssize_t n = readlink("/proc/self/exe", self, sizeof(self) - 1);
+     if (n <= 0) return {};
+     return {self, size_t(n)};
++#endif
+ }
+ 
+ // Windows enumerates a GPU line per display adapter; Linux has no equivalent list to
+@@ -152,10 +186,14 @@ std::string ExePath() {
+ // line when it picks a device), so the honest fact here is the display server this
+ // session is running on, named by the environment every compositor sets.
+ std::string DisplayStack() {
++#if defined(__APPLE__)
++    return "macOS WindowServer";
++#else
+     if (const char* w = std::getenv("WAYLAND_DISPLAY"); w && w[0])
+         return std::string("Wayland (WAYLAND_DISPLAY=") + w + ")";
+     if (const char* x = std::getenv("DISPLAY"); x && x[0]) return std::string("X11 (DISPLAY=") + x + ")";
+     return "no display server in the environment (neither WAYLAND_DISPLAY nor DISPLAY is set)";
++#endif
+ }
+ 
+ #endif
+@@ -173,7 +211,7 @@ void LogSystem() {
+     LOGR("Path: %s", ExeDir().string().c_str());
+     std::string exe = ExePath();
+     if (exe.empty()) {
+-        LOGR("Exe: /proc/self/exe could not be read");
++        LOGR("Exe: the process path could not be read");
+     } else {
+         std::error_code ec;
+         uintmax_t size = std::filesystem::file_size(exe, ec);
+diff --git a/runtime/cpu/dispatch.cpp b/runtime/cpu/dispatch.cpp
+index 1169944..9517a58 100644
+--- a/runtime/cpu/dispatch.cpp
++++ b/runtime/cpu/dispatch.cpp
+@@ -13,7 +13,7 @@
+ 
+ #ifdef _WIN32
+ #include <intrin.h>
+-#else
++#elif defined(__x86_64__) || defined(__i386__)
+ #include <x86intrin.h>
+ #endif
+ 
+diff --git a/runtime/gpu/render_thread.cpp b/runtime/gpu/render_thread.cpp
+index 5b8aa22..b62ce91 100644
+--- a/runtime/gpu/render_thread.cpp
++++ b/runtime/gpu/render_thread.cpp
+@@ -13,7 +13,10 @@
+ #else
+ #include <pthread.h>
+ #endif
++#if defined(__SSE4_1__)
+ #include <smmintrin.h>
++#define XBE_HAVE_SSE41 1
++#endif
+ 
+ #include <algorithm>
+ #include <bit>
+@@ -102,8 +105,10 @@ std::vector<Range> StatePieces() {
+     return pieces;
+ }
+ 
+-// equal bytes, 16 at a time
++// equal bytes, 16 at a time on x86 (SSE4.1). arm64 uses the libc compare, which
++// is the NEON path; the result is the same.
+ bool Same(const uint8_t* a, const uint8_t* b, size_t n) {
++#if defined(XBE_HAVE_SSE41)
+     size_t i = 0;
+     __m128i diff = _mm_setzero_si128();
+     for (; i + 16 <= n; i += 16)
+@@ -111,6 +116,9 @@ bool Same(const uint8_t* a, const uint8_t* b, size_t n) {
+                                                 _mm_loadu_si128(reinterpret_cast<const __m128i*>(b + i))));
+     if (!_mm_testz_si128(diff, diff)) return false;
+     return i == n || !std::memcmp(a + i, b + i, n - i);
++#else
++    return n == 0 || std::memcmp(a, b, n) == 0;
++#endif
+ }
+ 
+ using Clock = std::chrono::steady_clock;
+@@ -468,8 +476,12 @@ private:
+         if (auto set = reinterpret_cast<SetDescription>(
+                 reinterpret_cast<void*>(GetProcAddress(GetModuleHandleW(L"kernel32.dll"), "SetThreadDescription"))))
+             set(GetCurrentThread(), L"render");
++#else
++#if defined(__APPLE__)
++        pthread_setname_np("render");
+ #else
+         pthread_setname_np(pthread_self(), "render");  // 15 chars plus NUL is the kernel's limit
++#endif
+ #endif
+         for (;;) {
+             Batch* b;
+diff --git a/runtime/gpu/spirv.cpp b/runtime/gpu/spirv.cpp
+index 95630b2..2cf0bb5 100644
+--- a/runtime/gpu/spirv.cpp
++++ b/runtime/gpu/spirv.cpp
+@@ -13,6 +13,7 @@
+ 
+ #include "gpu/spirv.h"
+ 
++#include <cstdlib>
+ #include <cstring>
+ #include <dlfcn.h>
+ #include <fstream>
+@@ -121,8 +122,15 @@ using DxcCreateInstanceFn = HRESULT (*)(REFCLSID rclsid, REFIID riid, LPVOID* pp
+ DxcCreateInstanceFn DxcEntry() {
+     static DxcCreateInstanceFn fn = [] {
+         void* lib = dlopen("libdxcompiler.so", RTLD_NOW | RTLD_LOCAL);
++        if (!lib) lib = dlopen("libdxcompiler.dylib", RTLD_NOW | RTLD_LOCAL);
+         if (!lib) lib = dlopen("/opt/dxc/lib/libdxcompiler.so", RTLD_NOW | RTLD_LOCAL);
+         if (!lib) lib = dlopen("/usr/local/lib/libdxcompiler.so", RTLD_NOW | RTLD_LOCAL);
++        if (!lib) lib = dlopen("/usr/local/lib/libdxcompiler.dylib", RTLD_NOW | RTLD_LOCAL);
++        if (!lib)
++            if (const char* sdk = std::getenv("VULKAN_SDK")) {
++                std::string p = std::string(sdk) + "/lib/libdxcompiler.dylib";
++                lib = dlopen(p.c_str(), RTLD_NOW | RTLD_LOCAL);
++            }
+         return lib ? reinterpret_cast<DxcCreateInstanceFn>(dlsym(lib, "DxcCreateInstance")) : nullptr;
+     }();
+     return fn;
+diff --git a/runtime/gpu/vulkan.cpp b/runtime/gpu/vulkan.cpp
+index c35896c..eeb7acd 100644
+--- a/runtime/gpu/vulkan.cpp
++++ b/runtime/gpu/vulkan.cpp
+@@ -549,6 +549,17 @@ VkInstance VulkanInstance() {
+     std::vector<VkExtensionProperties> avail(count);
+     vkEnumerateInstanceExtensionProperties(nullptr, &count, avail.data());
+     for (auto& a : avail) if (!std::strcmp(a.extensionName, VK_KHR_GET_PHYSICAL_DEVICE_PROPERTIES_2_EXTENSION_NAME)) add(VK_KHR_GET_PHYSICAL_DEVICE_PROPERTIES_2_EXTENSION_NAME);
++    // MoltenVK is a portability driver: without this bit the loader hides it
++    // and vkEnumeratePhysicalDevices returns nothing.
++#if defined(__APPLE__)
++    bool portability = false;
++    for (auto& a : avail)
++        if (!std::strcmp(a.extensionName, VK_KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME)) portability = true;
++    if (portability) {
++        add(VK_KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME);
++        add(VK_KHR_GET_PHYSICAL_DEVICE_PROPERTIES_2_EXTENSION_NAME);
++    }
++#endif
+     std::vector<const char*> layers;
+     if (VkDebugEnabled()) {
+         uint32_t lcount = 0; vkEnumerateInstanceLayerProperties(&lcount, nullptr);
+@@ -565,6 +576,9 @@ VkInstance VulkanInstance() {
+     VkApplicationInfo appInfo{VK_STRUCTURE_TYPE_APPLICATION_INFO};
+     appInfo.pApplicationName = "xbe-recomp"; appInfo.apiVersion = VK_API_VERSION_1_2;
+     VkInstanceCreateInfo ci{VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO};
++#if defined(__APPLE__)
++    if (portability) ci.flags |= VK_INSTANCE_CREATE_ENUMERATE_PORTABILITY_BIT_KHR;
++#endif
+     ci.pApplicationInfo = &appInfo; ci.enabledExtensionCount = uint32_t(exts.size()); ci.ppEnabledExtensionNames = exts.data();
+     ci.enabledLayerCount = uint32_t(layers.size()); ci.ppEnabledLayerNames = layers.data();
+     VkDebugUtilsMessengerCreateInfoEXT msgCi{VK_STRUCTURE_TYPE_DEBUG_UTILS_MESSENGER_CREATE_INFO_EXT};
+@@ -964,6 +978,16 @@ bool VulkanBackend::CreateDeviceAndSwap() {
+     anisotropy_ = feats.samplerAnisotropy; fillNonSolid_ = feats.fillModeNonSolid; bc_ = feats.textureCompressionBC;
+     std::vector<const char*> exts;
+     if (surface_) exts.push_back(VK_KHR_SWAPCHAIN_EXTENSION_NAME);
++#if defined(__APPLE__)
++    {
++        uint32_t ec = 0;
++        vkEnumerateDeviceExtensionProperties(physical_, nullptr, &ec, nullptr);
++        std::vector<VkExtensionProperties> de(ec);
++        if (ec) vkEnumerateDeviceExtensionProperties(physical_, nullptr, &ec, de.data());
++        for (auto& e : de)
++            if (!std::strcmp(e.extensionName, "VK_KHR_portability_subset")) exts.push_back("VK_KHR_portability_subset");
++    }
++#endif
+     float prio = 1.0f;
+     VkDeviceQueueCreateInfo qi{VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO};
+     qi.queueFamilyIndex = qfamily_; qi.queueCount = 1; qi.pQueuePriorities = &prio;
+@@ -1012,7 +1036,11 @@ bool VulkanBackend::CreateSwapchain() {
+     ci.surface = surface_; ci.minImageCount = imageCount; ci.imageFormat = chosen.format; ci.imageColorSpace = chosen.colorSpace;
+     ci.imageExtent = swapExtent_; ci.imageArrayLayers = 1; ci.imageUsage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
+     ci.imageSharingMode = VK_SHARING_MODE_EXCLUSIVE; ci.preTransform = caps.currentTransform;
+-    ci.compositeAlpha = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR; ci.presentMode = mode; ci.clipped = VK_TRUE;
++    VkCompositeAlphaFlagBitsKHR alpha = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR;
++    for (VkCompositeAlphaFlagBitsKHR a : {VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR, VK_COMPOSITE_ALPHA_INHERIT_BIT_KHR,
++                                          VK_COMPOSITE_ALPHA_PRE_MULTIPLIED_BIT_KHR, VK_COMPOSITE_ALPHA_POST_MULTIPLIED_BIT_KHR})
++        if (caps.supportedCompositeAlpha & a) { alpha = a; break; }
++    ci.compositeAlpha = alpha; ci.presentMode = mode; ci.clipped = VK_TRUE;
+     if (vkCreateSwapchainKHR(device_, &ci, nullptr, &swapchain_) != VK_SUCCESS) { LOGE("vulkan: no swapchain"); return false; }
+     uint32_t n = 0; vkGetSwapchainImagesKHR(device_, swapchain_, &n, nullptr);
+     swapImages_.resize(n); vkGetSwapchainImagesKHR(device_, swapchain_, &n, swapImages_.data());
+diff --git a/runtime/kernel/boot.cpp b/runtime/kernel/boot.cpp
+index 9fc79d1..cf24749 100644
+--- a/runtime/kernel/boot.cpp
++++ b/runtime/kernel/boot.cpp
+@@ -29,6 +29,9 @@
+ #include <fcntl.h>
+ #include <poll.h>
+ #include <unistd.h>
++#if defined(__APPLE__)
++#include <mach-o/dyld.h>
++#endif
+ #endif
+ #include "xbe/xbe.h"
+ 
+@@ -222,12 +225,26 @@ void Relaunch(const char* exe) {
+     std::_Exit(0);
+ #else
+     char self[4096] = {};
++#if defined(__APPLE__)
++    uint32_t self_sz = sizeof(self);
++    if (_NSGetExecutablePath(self, &self_sz) != 0) {
++        LOGE("relaunch: cannot find own executable");
++        std::_Exit(0);
++    }
++    char resolved[4096] = {};
++    if (!realpath(self, resolved)) {
++        LOGE("relaunch: cannot find own executable (%s)", std::strerror(errno));
++        std::_Exit(0);
++    }
++    std::string path = resolved;
++#else
+     ssize_t n = readlink("/proc/self/exe", self, sizeof(self) - 1);
+     if (n <= 0) {
+         LOGE("relaunch: cannot find own executable (%s)", std::strerror(errno));
+         std::_Exit(0);
+     }
+     std::string path = std::string(self, size_t(n));
++#endif
+     path = path.substr(0, path.find_last_of('/') + 1) + exe;
+ 
+     // The new instance's argument vector: this one's, read back from
+@@ -333,8 +350,15 @@ void Relaunch(const char* exe) {
+             LOGE("relaunch: handover listen failed (%s)", std::strerror(errno));
+         } else {
+             listening = true;
++#if defined(SYS_pidfd_open)
+             pidfd = int(::syscall(SYS_pidfd_open, child, 0u));
+             if (pidfd < 0) LOGW("relaunch: pidfd failed (%s), child exit will not cut the wait short", std::strerror(errno));
++#else
++            // Darwin has no pidfd. The wait below still returns when the
++            // handover socket connects; a child that dies first is reaped
++            // only after that wait times out.
++            pidfd = -1;
++#endif
+         }
+     }
+ 
+diff --git a/runtime/kernel/memory.cpp b/runtime/kernel/memory.cpp
+index e36cacd..cf36874 100644
+--- a/runtime/kernel/memory.cpp
++++ b/runtime/kernel/memory.cpp
+@@ -1,6 +1,8 @@
+ #include "kernel/memory.h"
+ 
+ #include <algorithm>
++#include <cerrno>
++#include <cstdio>
+ #include <cstring>
+ #include <map>
+ #include <mutex>
+@@ -14,6 +16,9 @@
+ #else
+ #include <sys/mman.h>
+ #include <unistd.h>  // ftruncate, on the memfd the 4 GiB guest space is mapped from
++#if defined(__APPLE__)
++#include <fcntl.h>
++#endif
+ #endif
+ 
+ namespace mem {
+@@ -23,6 +28,13 @@ static std::recursive_mutex g_lock;
+ 
+ uint8_t* Base() { return g_base; }
+ 
++#if !defined(_WIN32)
++static size_t HostPage() {
++    long p = sysconf(_SC_PAGESIZE);
++    return p > 0 ? size_t(p) : 4096u;
++}
++#endif
++
+ // physical memory shows at 0x80000000 and again at 0xF0000000 (write combined view)
+ static bool InPhysical(uint32_t va) {
+     return (va >= kContiguousBase && va < kContiguousBase + kPhysicalSize) ||
+@@ -56,13 +68,39 @@ bool Init() {
+         UnmapViewOfFile(b + kWriteCombineBase);
+     }
+ #else
+-    void* p = mmap(reinterpret_cast<void*>(0x100000000ull), size, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
++    // XBE_DARWIN_GUEST: Apple Silicon host pages are 16 KB and Darwin has no
++    // memfd_create. The 4 GB guest window is still one PROT_NONE reservation
++    // (the address is a hint; access is base + guest offset), and the two
++    // physical aliases are two MAP_FIXED views of one unnamed shm object.
++    // mprotect below is per host page. The shape follows DirectXbox-Recomp's
++    // POSIX memory notes; this is not a copy of that code.
++    int map_flags = MAP_PRIVATE | MAP_ANONYMOUS;
++#ifndef __APPLE__
++    map_flags |= MAP_NORESERVE;
++#endif
++    void* p = MAP_FAILED;
++    for (uint64_t hint : {0x100000000ull, 0x200000000ull, 0x180000000ull, 0ull}) {
++        p = mmap(hint ? reinterpret_cast<void*>(hint) : nullptr, size, PROT_NONE, map_flags, -1, 0);
++        if (p != MAP_FAILED) break;
++    }
+     g_base = p == MAP_FAILED ? nullptr : static_cast<uint8_t*>(p);
+-    int fd = g_base ? memfd_create("ram", 0) : -1;
++    int fd = -1;
++    if (g_base) {
++#if defined(__APPLE__)
++        char name[64];
++        std::snprintf(name, sizeof(name), "/xbe-ram.%d", int(::getpid()));
++        fd = ::shm_open(name, O_RDWR | O_CREAT | O_EXCL, 0600);
++        if (fd >= 0) ::shm_unlink(name);  // nameless once the last fd and mapping go
++#else
++        fd = memfd_create("ram", 0);
++#endif
++    }
+     if (fd < 0 || ftruncate(fd, kPhysicalSize) ||
+         mmap(g_base + kContiguousBase, kPhysicalSize, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_FIXED, fd, 0) == MAP_FAILED ||
+         mmap(g_base + kWriteCombineBase, kPhysicalSize, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_FIXED, fd, 0) == MAP_FAILED)
+         g_base = nullptr;
++    else
++        LOGI("memory: host page %zu", HostPage());
+ #endif
+     if (!g_base) {
+         LOGE("memory: could not reserve the 4 GB guest space");
+@@ -75,6 +113,39 @@ bool Init() {
+ // page commit map, one byte per 4 KB page
+ static std::vector<uint8_t> g_committed(0x100000, 0);
+ 
++#if defined(__APPLE__)
++// Guest commits are 4 KB. A host page is writable when any guest page on it
++// is committed, and inaccessible only when none are. 64 KB reservations (the
++// Xbox allocation granularity, including stack guards) stay exact. A 4 KB
++// commit shares its host page with its neighbours: those neighbours become
++// writable too, and a fault the title expected on one of them does not fire.
++static bool HostProtect(uint64_t first, uint64_t end) {
++    const uint64_t hp = HostPage();
++    const uint64_t space = 1ull << 32;
++    uint64_t lo = first & ~(hp - 1);
++    uint64_t hi = (end + hp - 1) & ~(hp - 1);
++    if (hi > space) hi = space;
++    for (uint64_t p = lo; p < hi; p += hp) {
++        bool physical = false, any = false;
++        for (uint64_t g = p; g < p + hp && g < space; g += kPage) {
++            if (InPhysical(uint32_t(g))) {
++                physical = true;
++                break;
++            }
++            if (g_committed[size_t(g >> 12)]) any = true;
++        }
++        if (physical) continue;  // the shared RAM views are already mapped read-write
++        int prot = any ? (PROT_READ | PROT_WRITE) : PROT_NONE;
++        if (!any) madvise(g_base + p, size_t(hp), MADV_DONTNEED);
++        if (mprotect(g_base + p, size_t(hp), prot) != 0) {
++            LOGE("memory: mprotect %llx failed (%s)", (unsigned long long)p, std::strerror(errno));
++            return false;
++        }
++    }
++    return true;
++}
++#endif
++
+ bool Commit(uint32_t va, uint32_t size) {
+     if (!size || InPhysical(va)) return true;
+     uint32_t first = va & ~(kPage - 1);
+@@ -85,13 +156,22 @@ bool Commit(uint32_t va, uint32_t size) {
+         LOGE("memory: commit %08X+%X failed", first, uint32_t(end - first));
+         return false;
+     }
++#elif defined(__APPLE__)
++    for (uint64_t p = first; p < end; p += kPage) g_committed[size_t(p >> 12)] = 1;
++    if (!HostProtect(first, end)) {
++        for (uint64_t p = first; p < end; p += kPage) g_committed[size_t(p >> 12)] = 0;
++        LOGE("memory: commit %08X+%X failed", first, uint32_t(end - first));
++        return false;
++    }
+ #else
+     if (mprotect(g_base + first, size_t(end - first), PROT_READ | PROT_WRITE)) {
+         LOGE("memory: commit %08X+%X failed", first, uint32_t(end - first));
+         return false;
+     }
+ #endif
++#if !defined(__APPLE__)
+     for (uint64_t p = first; p < end; p += kPage) g_committed[size_t(p >> 12)] = 1;
++#endif
+     return true;
+ }
+ 
+@@ -102,11 +182,16 @@ void Decommit(uint32_t va, uint32_t size) {
+     std::lock_guard<std::recursive_mutex> lock(g_lock);
+ #ifdef _WIN32
+     VirtualFree(g_base + first, size_t(end - first), MEM_DECOMMIT);
++#elif defined(__APPLE__)
++    for (uint64_t p = first; p < end; p += kPage) g_committed[size_t(p >> 12)] = 0;
++    if (!HostProtect(first, end)) LOGE("memory: decommit %08X+%X failed", first, uint32_t(end - first));
+ #else
+     madvise(g_base + first, size_t(end - first), MADV_DONTNEED);
+     mprotect(g_base + first, size_t(end - first), PROT_NONE);
+ #endif
++#if !defined(__APPLE__)
+     for (uint64_t p = first; p < end; p += kPage) g_committed[size_t(p >> 12)] = 0;
++#endif
+ }
+ 
+ bool IsCommitted(uint32_t va) { return InPhysical(va) || g_committed[va >> 12] != 0; }
+diff --git a/runtime/kernel/threads.cpp b/runtime/kernel/threads.cpp
+index 56fadb8..5e60004 100644
+--- a/runtime/kernel/threads.cpp
++++ b/runtime/kernel/threads.cpp
+@@ -90,6 +90,9 @@ void NameHostThread(const char* name) {
+     using Fn = HRESULT(WINAPI*)(HANDLE, PCWSTR);
+     static Fn set = reinterpret_cast<Fn>(reinterpret_cast<void*>(GetProcAddress(GetModuleHandleW(L"kernel32.dll"), "SetThreadDescription")));
+     if (set) set(GetCurrentThread(), w);
++#elif defined(__APPLE__)
++    // Darwin names the calling thread only, and takes the name alone.
++    pthread_setname_np(name);
+ #else
+     pthread_setname_np(pthread_self(), name);
+ #endif
