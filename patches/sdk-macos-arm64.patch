@@ -49,12 +49,20 @@ index 15638ea..da84add 100644
      target_link_options(${target} PRIVATE -fuse-ld=lld -g)
      endif()
 diff --git a/runtime/app/main_sdl.cpp b/runtime/app/main_sdl.cpp
-index 2514392..cd190e7 100644
+index 2514392..63fc9b1 100644
 --- a/runtime/app/main_sdl.cpp
 +++ b/runtime/app/main_sdl.cpp
-@@ -22,6 +22,10 @@
+@@ -21,7 +21,18 @@
+ #include <thread>
  
  #include <unistd.h>
++#if defined(__APPLE__)
++// ucontext.h on Darwin errors unless this is set. It only has to be visible
++// at the include, and the crash handler is the only user.
++#ifndef _XOPEN_SOURCE
++#define _XOPEN_SOURCE 700
++#endif
++#endif
  #include <ucontext.h>
 +#if defined(__APPLE__)
 +#include <mach-o/dyld.h>
@@ -63,7 +71,7 @@ index 2514392..cd190e7 100644
  
  #include "app/app.h"
  #include "app/platform.h"
-@@ -128,7 +132,17 @@ void CrashHandler(int sig, siginfo_t* info, void* uc) {
+@@ -128,7 +139,17 @@ void CrashHandler(int sig, siginfo_t* info, void* uc) {
          if (p >= base && p < base + (size_t{1} << 32))
              LOGE("fault at guest address %08X (host %p)", uint32_t(p - base), at);
      }
@@ -82,7 +90,7 @@ index 2514392..cd190e7 100644
      if (kernel::Thread* t = kernel::Current(); t && t->ctx) {
          LOGE("signal %d on guest thread %X", sig, t->id);
          kernel::LogGuestStack(*t->ctx, 256);
-@@ -281,10 +295,19 @@ bool HandleEvent(const SDL_Event& e) {  // window thread; true: quit
+@@ -281,10 +302,19 @@ bool HandleEvent(const SDL_Event& e) {  // window thread; true: quit
  }  // namespace
  
  std::filesystem::path ExeDir() {
@@ -102,7 +110,7 @@ index 2514392..cd190e7 100644
  }
  
  int Instance() {
-@@ -399,7 +422,11 @@ bool CursorVisible() { return SDL_CursorVisible(); }
+@@ -399,7 +429,11 @@ bool CursorVisible() { return SDL_CursorVisible(); }
  
  HdrInfo QueryHdr() {
      // No HDR swap chain exists in the Vulkan build; say so, never pretend.
@@ -114,7 +122,7 @@ index 2514392..cd190e7 100644
  }
  
  }  // namespace platform
-@@ -407,6 +434,20 @@ HdrInfo QueryHdr() {
+@@ -407,6 +441,20 @@ HdrInfo QueryHdr() {
  }  // namespace app
  
  int main(int argc, char** argv) {
@@ -135,7 +143,7 @@ index 2514392..cd190e7 100644
      app::g_argc = argc;
      app::g_argv = argv;
      // SA_SIGINFO so CrashHandler receives the fault address (see above); sigaction rather than
-@@ -452,7 +493,11 @@ int main(int argc, char** argv) {
+@@ -452,7 +500,11 @@ int main(int argc, char** argv) {
      app::CacheClientSize();
      app::g_focus = SDL_GetKeyboardFocus() == app::g_window;
      // HDR is honestly off on this platform, from the start.
@@ -148,7 +156,7 @@ index 2514392..cd190e7 100644
      // Vulkan handshake: the backend owns the instance; SDL names the
      // extensions it needs, the backend creates it, SDL makes the surface.
 diff --git a/runtime/app/system_info.cpp b/runtime/app/system_info.cpp
-index b2cd099..eea5767 100644
+index b2cd099..1304c37 100644
 --- a/runtime/app/system_info.cpp
 +++ b/runtime/app/system_info.cpp
 @@ -9,9 +9,15 @@
@@ -176,7 +184,7 @@ index b2cd099..eea5767 100644
 +#if defined(__APPLE__)
 +    char ver[64] = {};
 +    size_t len = sizeof(ver);
-+    if (sysctlbyname("kern.osproductversion", ver, &len, nullptr, nullptr) != 0) ver[0] = 0;
++    if (sysctlbyname("kern.osproductversion", ver, &len, nullptr, 0) != 0) ver[0] = 0;
 +    std::string out = std::string("macOS ") + (ver[0] ? ver : u.release);
 +    out += " (";
 +    out += u.machine;
@@ -201,7 +209,7 @@ index b2cd099..eea5767 100644
 +#if defined(__APPLE__)
 +    char brand[256] = {};
 +    size_t len = sizeof(brand);
-+    if (sysctlbyname("machdep.cpu.brand_string", brand, &len, nullptr, nullptr) != 0 || !brand[0]) return "Apple Silicon";
++    if (sysctlbyname("machdep.cpu.brand_string", brand, &len, nullptr, 0) != 0 || !brand[0]) return "Apple Silicon";
 +    return brand;
 +#else
      if (__get_cpuid_max(0x80000000, nullptr) < 0x80000004) return "unknown";
@@ -256,6 +264,24 @@ index b2cd099..eea5767 100644
      } else {
          std::error_code ec;
          uintmax_t size = std::filesystem::file_size(exe, ec);
+diff --git a/runtime/core/input.cpp b/runtime/core/input.cpp
+index 8a0f1d0..a059d06 100644
+--- a/runtime/core/input.cpp
++++ b/runtime/core/input.cpp
+@@ -44,7 +44,13 @@ void UpdatePads() {
+     uint64_t now = SDL_GetTicks();
+     if (!g_sdl || now == last) return;
+     last = now;
++#if defined(__APPLE__)
++    // Cocoa delivers NSEvents on the main thread only. SDL_PumpEvents from a
++    // guest thread aborts the process. main_sdl pumps on the main thread;
++    // SDL_HINT_JOYSTICK_THREAD keeps the pad state readable from here.
++#else
+     SDL_PumpEvents();
++#endif
+     SDL_Event e;
+     while (SDL_PeepEvents(&e, 1, SDL_GETEVENT, SDL_EVENT_FIRST, SDL_EVENT_LAST) == 1) {
+         if (e.type == SDL_EVENT_GAMEPAD_ADDED) AddPad(e.gdevice.which);
 diff --git a/runtime/cpu/dispatch.cpp b/runtime/cpu/dispatch.cpp
 index 1169944..9517a58 100644
 --- a/runtime/cpu/dispatch.cpp
@@ -348,7 +374,7 @@ index 95630b2..2cf0bb5 100644
      }();
      return fn;
 diff --git a/runtime/gpu/vulkan.cpp b/runtime/gpu/vulkan.cpp
-index c35896c..eeb7acd 100644
+index c35896c..9c300c3 100644
 --- a/runtime/gpu/vulkan.cpp
 +++ b/runtime/gpu/vulkan.cpp
 @@ -549,6 +549,17 @@ VkInstance VulkanInstance() {
@@ -379,24 +405,56 @@ index c35896c..eeb7acd 100644
      ci.pApplicationInfo = &appInfo; ci.enabledExtensionCount = uint32_t(exts.size()); ci.ppEnabledExtensionNames = exts.data();
      ci.enabledLayerCount = uint32_t(layers.size()); ci.ppEnabledLayerNames = layers.data();
      VkDebugUtilsMessengerCreateInfoEXT msgCi{VK_STRUCTURE_TYPE_DEBUG_UTILS_MESSENGER_CREATE_INFO_EXT};
-@@ -964,6 +978,16 @@ bool VulkanBackend::CreateDeviceAndSwap() {
+@@ -964,12 +978,47 @@ bool VulkanBackend::CreateDeviceAndSwap() {
      anisotropy_ = feats.samplerAnisotropy; fillNonSolid_ = feats.fillModeNonSolid; bc_ = feats.textureCompressionBC;
      std::vector<const char*> exts;
      if (surface_) exts.push_back(VK_KHR_SWAPCHAIN_EXTENSION_NAME);
 +#if defined(__APPLE__)
++    // MoltenVK turns an out-of-range buffer or image read into a GPU page fault and
++    // then a lost device. Desktop drivers usually keep going. Robustness2 makes
++    // those reads defined (zero) when the device advertises it.
++    bool robust2 = false;
 +    {
 +        uint32_t ec = 0;
 +        vkEnumerateDeviceExtensionProperties(physical_, nullptr, &ec, nullptr);
 +        std::vector<VkExtensionProperties> de(ec);
 +        if (ec) vkEnumerateDeviceExtensionProperties(physical_, nullptr, &ec, de.data());
-+        for (auto& e : de)
++        for (auto& e : de) {
 +            if (!std::strcmp(e.extensionName, "VK_KHR_portability_subset")) exts.push_back("VK_KHR_portability_subset");
++            if (!std::strcmp(e.extensionName, VK_EXT_ROBUSTNESS_2_EXTENSION_NAME)) robust2 = true;
++        }
 +    }
++    if (robust2) exts.push_back(VK_EXT_ROBUSTNESS_2_EXTENSION_NAME);
 +#endif
      float prio = 1.0f;
      VkDeviceQueueCreateInfo qi{VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO};
      qi.queueFamilyIndex = qfamily_; qi.queueCount = 1; qi.pQueuePriorities = &prio;
-@@ -1012,7 +1036,11 @@ bool VulkanBackend::CreateSwapchain() {
+     VkPhysicalDeviceFeatures want{}; want.samplerAnisotropy = anisotropy_; want.fillModeNonSolid = fillNonSolid_; want.textureCompressionBC = bc_; want.depthClamp = feats.depthClamp;
+     VkDeviceCreateInfo ci{VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO};
+-    ci.queueCreateInfoCount = 1; ci.pQueueCreateInfos = &qi; ci.enabledExtensionCount = uint32_t(exts.size()); ci.ppEnabledExtensionNames = exts.data(); ci.pEnabledFeatures = &want;
++    ci.queueCreateInfoCount = 1; ci.pQueueCreateInfos = &qi; ci.enabledExtensionCount = uint32_t(exts.size()); ci.ppEnabledExtensionNames = exts.data();
++#if defined(__APPLE__)
++    VkPhysicalDeviceRobustness2FeaturesKHR robEnable{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ROBUSTNESS_2_FEATURES_KHR};
++    VkPhysicalDeviceFeatures2 feat2{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2};
++    if (robust2) {
++        VkPhysicalDeviceRobustness2FeaturesKHR robQuery{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ROBUSTNESS_2_FEATURES_KHR};
++        VkPhysicalDeviceFeatures2 query{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2, &robQuery};
++        vkGetPhysicalDeviceFeatures2(physical_, &query);
++        robEnable.robustBufferAccess2 = robQuery.robustBufferAccess2;
++        robEnable.robustImageAccess2 = robQuery.robustImageAccess2;
++        robEnable.nullDescriptor = robQuery.nullDescriptor;
++        if (robEnable.robustBufferAccess2) want.robustBufferAccess = VK_TRUE;
++        feat2.pNext = &robEnable;
++        feat2.features = want;
++        ci.pNext = &feat2;
++        LOGR("vulkan: robustness2 buffer %d image %d nullDescriptor %d", int(robEnable.robustBufferAccess2), int(robEnable.robustImageAccess2), int(robEnable.nullDescriptor));
++    } else
++#endif
++    ci.pEnabledFeatures = &want;
+     if (vkCreateDevice(physical_, &ci, nullptr, &device_) != VK_SUCCESS) { LOGE("vulkan: vkCreateDevice failed"); return false; }
+     vkGetDeviceQueue(device_, qfamily_, 0, &queue_);
+     for (VkFormat f : {VK_FORMAT_D24_UNORM_S8_UINT, VK_FORMAT_D32_SFLOAT_S8_UINT, VK_FORMAT_D16_UNORM}) {
+@@ -1012,7 +1061,11 @@ bool VulkanBackend::CreateSwapchain() {
      ci.surface = surface_; ci.minImageCount = imageCount; ci.imageFormat = chosen.format; ci.imageColorSpace = chosen.colorSpace;
      ci.imageExtent = swapExtent_; ci.imageArrayLayers = 1; ci.imageUsage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
      ci.imageSharingMode = VK_SHARING_MODE_EXCLUSIVE; ci.preTransform = caps.currentTransform;
@@ -409,21 +467,47 @@ index c35896c..eeb7acd 100644
      if (vkCreateSwapchainKHR(device_, &ci, nullptr, &swapchain_) != VK_SUCCESS) { LOGE("vulkan: no swapchain"); return false; }
      uint32_t n = 0; vkGetSwapchainImagesKHR(device_, swapchain_, &n, nullptr);
      swapImages_.resize(n); vkGetSwapchainImagesKHR(device_, swapchain_, &n, swapImages_.data());
+@@ -2255,9 +2308,9 @@ void VulkanBackend::LogPerf() {
+     VkPerf& p = g_vkPerf;
+     double n = double(perfFrames_);
+     double host = p.draw + p.present + p.clear + p.copy;
+-    LOGI("perf: %.1f fps %.2f ms/frame | host %.2f (draw %.2f clear %.2f copy %.2f present %.2f) other %.2f",
++    LOGR("perf: %.1f fps %.2f ms/frame | host %.2f (draw %.2f clear %.2f copy %.2f present %.2f) other %.2f",
+          n * 1000.0 / el, el / n, host / n, p.draw / n, p.clear / n, p.copy / n, p.present / n, (el - host) / n);
+-    LOGI("perf: title thread per frame: recording %.2f ms, waiting %.2f ms (%.1f waits: read-back %.2f "
++    LOGR("perf: title thread per frame: recording %.2f ms, waiting %.2f ms (%.1f waits: read-back %.2f "
+          "resource %.2f fence %.2f flush %.2f copy %.2f, next frame %.2f) | in XDK draws %.2f (of it sendstate %.2f) | read-backs waited for: %.1f lock, "
+          "%.1f NOOVERWRITE",
+          g_perf_capture_ns.exchange(0) / n / 1e6, g_perf_wait_ns.exchange(0) / n / 1e6,
+@@ -2267,7 +2320,7 @@ void VulkanBackend::LogPerf() {
+          g_perf_wait_kind_ns[5].exchange(0) / n / 1e6, g_perf_hle_ns.exchange(0) / n / 1e6,
+          g_perf_sendstate_ns.exchange(0) / n / 1e6, g_perf_sync_block.exchange(0) / n,
+          g_perf_sync_late.exchange(0) / n);
+-    LOGI("perf: per frame %.0f draws (%.0f raw) %.0f skipped %.0f nopipeline (shader %.0f pso %.0f set %.0f) stalealloc %llu %.0fk verts %.1f MB upload %.1f overflow | "
++    LOGR("perf: per frame %.0f draws (%.0f raw) %.0f skipped %.0f nopipeline (shader %.0f pso %.0f set %.0f) stalealloc %llu %.0fk verts %.1f MB upload %.1f overflow | "
+          "%.1f tex uploads %.2f MB, %.1f new tex, %.1f new targets, %.1f target uploads, %.1f read-backs | %llu shaders %llu psos this second | %.0f clears %.0f copies per frame",
+          p.draws / n, p.raw / n, p.skipped / n, p.nopipeline / n, p.nopipeShader / n, p.nopipePso / n, p.nopipeSet / n, (unsigned long long)p.staleAlloc, p.verts / n / 1000.0, p.upload / n / 1048576.0, p.overflow / n,
+          p.texups / n, p.texupBytes / n / 1048576.0, p.newtex / n, p.targets / n, p.rtups / n, p.syncs / n,
 diff --git a/runtime/kernel/boot.cpp b/runtime/kernel/boot.cpp
-index 9fc79d1..cf24749 100644
+index 9fc79d1..2c50340 100644
 --- a/runtime/kernel/boot.cpp
 +++ b/runtime/kernel/boot.cpp
-@@ -29,6 +29,9 @@
+@@ -29,6 +29,14 @@
  #include <fcntl.h>
  #include <poll.h>
  #include <unistd.h>
 +#if defined(__APPLE__)
 +#include <mach-o/dyld.h>
++// Darwin's socket.h hides SOCK_CLOEXEC unless _DARWIN_C_SOURCE was set before
++// the first system header, and it has no accept4.
++#ifndef SOCK_CLOEXEC
++#define SOCK_CLOEXEC 0
++#endif
 +#endif
  #endif
  #include "xbe/xbe.h"
  
-@@ -222,12 +225,26 @@ void Relaunch(const char* exe) {
+@@ -222,12 +230,26 @@ void Relaunch(const char* exe) {
      std::_Exit(0);
  #else
      char self[4096] = {};
@@ -450,7 +534,17 @@ index 9fc79d1..cf24749 100644
      path = path.substr(0, path.find_last_of('/') + 1) + exe;
  
      // The new instance's argument vector: this one's, read back from
-@@ -333,8 +350,15 @@ void Relaunch(const char* exe) {
+@@ -322,6 +344,9 @@ void Relaunch(const char* exe) {
+     } else if ((listener = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0)) < 0) {
+         LOGE("relaunch: handover socket failed (%s)", std::strerror(errno));
+     } else {
++#if defined(__APPLE__)
++        fcntl(listener, F_SETFD, FD_CLOEXEC);
++#endif
+         sockaddr_un addr{};
+         addr.sun_family = AF_UNIX;
+         addr.sun_path[0] = '\0';  // abstract namespace: the name is not a file
+@@ -333,8 +358,15 @@ void Relaunch(const char* exe) {
              LOGE("relaunch: handover listen failed (%s)", std::strerror(errno));
          } else {
              listening = true;
@@ -466,6 +560,19 @@ index 9fc79d1..cf24749 100644
          }
      }
  
+@@ -384,7 +416,12 @@ void Relaunch(const char* exe) {
+             }
+             if (!(fds[0].revents & (POLLIN | POLLERR | POLLHUP))) continue;
+             if (conn < 0) {
++#if defined(__APPLE__)
++                conn = accept(listener, nullptr, nullptr);
++                if (conn >= 0) fcntl(conn, F_SETFD, FD_CLOEXEC);
++#else
+                 conn = accept4(listener, nullptr, nullptr, SOCK_CLOEXEC);
++#endif
+                 if (conn < 0) {
+                     if (errno == EINTR || errno == EAGAIN) continue;
+                     LOGW("relaunch: handover accept failed (%s)", std::strerror(errno));
 diff --git a/runtime/kernel/memory.cpp b/runtime/kernel/memory.cpp
 index e36cacd..cf36874 100644
 --- a/runtime/kernel/memory.cpp
