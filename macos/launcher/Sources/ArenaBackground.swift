@@ -7,7 +7,7 @@ struct ArenaBackground: View {
         ZStack {
             Arena.black
             Canvas { context, size in
-                let ink = GraphicsContext.Shading.color(Arena.hud.opacity(0.22))
+                let ink = GraphicsContext.Shading.color(Arena.hud.opacity(0.62))
                 let cols = 7
                 let originX = size.width * 0.78
                 for col in 0..<cols {
@@ -18,7 +18,7 @@ struct ArenaBackground: View {
                         let bit = (state >> 28) & 1
                         let label = Text(bit == 0 ? "0" : "1")
                             .font(.system(size: 11, weight: .regular, design: .monospaced))
-                            .foregroundColor(Arena.hud.opacity(0.22))
+                            .foregroundColor(Arena.hud.opacity(0.5))
                         context.draw(label, at: CGPoint(x: originX + CGFloat(col) * 26, y: y), anchor: .center)
                         y += 18
                     }
