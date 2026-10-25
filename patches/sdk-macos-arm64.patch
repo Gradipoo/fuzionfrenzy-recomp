@@ -49,7 +49,7 @@ index 15638ea..da84add 100644
      target_link_options(${target} PRIVATE -fuse-ld=lld -g)
      endif()
 diff --git a/runtime/app/main_sdl.cpp b/runtime/app/main_sdl.cpp
-index 2514392..63fc9b1 100644
+index 2514392..d7b456f 100644
 --- a/runtime/app/main_sdl.cpp
 +++ b/runtime/app/main_sdl.cpp
 @@ -21,7 +21,18 @@
@@ -110,7 +110,22 @@ index 2514392..63fc9b1 100644
  }
  
  int Instance() {
-@@ -399,7 +429,11 @@ bool CursorVisible() { return SDL_CursorVisible(); }
+@@ -356,8 +386,14 @@ void Pace() {
+     auto period = std::chrono::nanoseconds(1000000000ull / cap);
+     next += period;
+     if (next < now - period) next = now;
++#if defined(__APPLE__)
++    // The last two milliseconds used to be a yield spin. Sleep the whole wait.
++    // FIFO present already blocks in the driver when vsync is on.
++    if (now < next) std::this_thread::sleep_until(next);
++#else
+     while (clock::now() + std::chrono::milliseconds(2) < next) std::this_thread::sleep_for(std::chrono::milliseconds(1));
+     while (clock::now() < next) std::this_thread::yield();
++#endif
+ }
+ 
+ namespace platform {
+@@ -399,7 +435,11 @@ bool CursorVisible() { return SDL_CursorVisible(); }
  
  HdrInfo QueryHdr() {
      // No HDR swap chain exists in the Vulkan build; say so, never pretend.
@@ -122,7 +137,7 @@ index 2514392..63fc9b1 100644
  }
  
  }  // namespace platform
-@@ -407,6 +441,20 @@ HdrInfo QueryHdr() {
+@@ -407,6 +447,20 @@ HdrInfo QueryHdr() {
  }  // namespace app
  
  int main(int argc, char** argv) {
@@ -143,7 +158,7 @@ index 2514392..63fc9b1 100644
      app::g_argc = argc;
      app::g_argv = argv;
      // SA_SIGINFO so CrashHandler receives the fault address (see above); sigaction rather than
-@@ -452,7 +500,11 @@ int main(int argc, char** argv) {
+@@ -452,7 +506,11 @@ int main(int argc, char** argv) {
      app::CacheClientSize();
      app::g_focus = SDL_GetKeyboardFocus() == app::g_window;
      // HDR is honestly off on this platform, from the start.
@@ -408,7 +423,7 @@ index 95630b2..389a560 100644
      options.generateDebugInfo = false;
      options.optimizeSize = false;
 diff --git a/runtime/gpu/vulkan.cpp b/runtime/gpu/vulkan.cpp
-index c35896c..1b7b5ea 100644
+index c35896c..41e6e7f 100644
 --- a/runtime/gpu/vulkan.cpp
 +++ b/runtime/gpu/vulkan.cpp
 @@ -72,6 +72,9 @@ struct VkPerf {
@@ -462,7 +477,31 @@ index c35896c..1b7b5ea 100644
      return float4(c.rgb, opts.y > 0 ? c.a : 1); }
  )";
  const char* kDepthHlsl = R"(
-@@ -549,6 +563,17 @@ VkInstance VulkanInstance() {
+@@ -351,6 +365,9 @@ private:
+     void DeferDestroyImage(ImageRes r);
+     VkRenderPass RenderPassFor(VkFormat color, VkFormat depth, bool hasColor, bool hasDepth);
+     Frame& Cur() { return frames_[frame_ % kFrames]; }
++    bool InitFrame(Frame& f);
++    void RecordSwapCapture(VkImage image, uint32_t w, uint32_t h);
++    void WriteSwapCapture();
+     void EnsureRecording();
+     void CheckAllocGeneration(const char* what);
+     void EnsureSetRoom();
+@@ -440,6 +457,13 @@ private:
+     VkCommandPool pool_ = VK_NULL_HANDLE;
+     Frame frames_[kFrames];
+     uint64_t frame_ = 0, presents_ = 0;
++    bool lastSubmitOk_ = false;
++    bool swapTransfer_ = false;
++    VkBuffer swapCapBuf_ = VK_NULL_HANDLE;
++    VkDeviceMemory swapCapMem_ = VK_NULL_HANDLE;
++    uint32_t swapCapW_ = 0, swapCapH_ = 0;
++    bool swapCapCoherent_ = true;
++    uint64_t swapCapPresent_ = 0;
+     bool recording_ = false; uint64_t segmentGen_ = 0;  // bumped every time EnsureRecording opens a segment
+     // The open render pass. BeginTargetPass leaves it open and reuses it for the next draw on the same
+     // attachments; FlushPass ends it, and every command that may not be recorded inside a render pass
+@@ -549,6 +573,17 @@ VkInstance VulkanInstance() {
      std::vector<VkExtensionProperties> avail(count);
      vkEnumerateInstanceExtensionProperties(nullptr, &count, avail.data());
      for (auto& a : avail) if (!std::strcmp(a.extensionName, VK_KHR_GET_PHYSICAL_DEVICE_PROPERTIES_2_EXTENSION_NAME)) add(VK_KHR_GET_PHYSICAL_DEVICE_PROPERTIES_2_EXTENSION_NAME);
@@ -480,7 +519,7 @@ index c35896c..1b7b5ea 100644
      std::vector<const char*> layers;
      if (VkDebugEnabled()) {
          uint32_t lcount = 0; vkEnumerateInstanceLayerProperties(&lcount, nullptr);
-@@ -565,6 +590,9 @@ VkInstance VulkanInstance() {
+@@ -565,6 +600,9 @@ VkInstance VulkanInstance() {
      VkApplicationInfo appInfo{VK_STRUCTURE_TYPE_APPLICATION_INFO};
      appInfo.pApplicationName = "xbe-recomp"; appInfo.apiVersion = VK_API_VERSION_1_2;
      VkInstanceCreateInfo ci{VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO};
@@ -490,7 +529,136 @@ index c35896c..1b7b5ea 100644
      ci.pApplicationInfo = &appInfo; ci.enabledExtensionCount = uint32_t(exts.size()); ci.ppEnabledExtensionNames = exts.data();
      ci.enabledLayerCount = uint32_t(layers.size()); ci.ppEnabledLayerNames = layers.data();
      VkDebugUtilsMessengerCreateInfoEXT msgCi{VK_STRUCTURE_TYPE_DEBUG_UTILS_MESSENGER_CREATE_INFO_EXT};
-@@ -964,12 +992,51 @@ bool VulkanBackend::CreateDeviceAndSwap() {
+@@ -752,6 +790,7 @@ void VulkanBackend::DiscardRecordedLate() {
+     }
+ }
+ void VulkanBackend::Submit(bool wait, VkSemaphore waitSem, VkSemaphore signalSem) {
++    lastSubmitOk_ = false;
+     if (!recording_) { if (wait && device_) vkQueueWaitIdle(queue_); return; }
+     FlushPass();  // a segment may not end inside a render pass
+     Frame& f = Cur();
+@@ -782,9 +821,9 @@ void VulkanBackend::Submit(bool wait, VkSemaphore waitSem, VkSemaphore signalSem
+         range.memory = mem; range.offset = 0; range.size = VK_WHOLE_SIZE;
+         vkFlushMappedMemoryRanges(device_, 1, &range);
+     }
+-    VkPipelineStageFlags stage = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+     VkSubmitInfo si{VK_STRUCTURE_TYPE_SUBMIT_INFO};
+     si.commandBufferCount = 1; si.pCommandBuffers = &f.cmd;
++    VkPipelineStageFlags stage = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+     if (waitSem) { si.waitSemaphoreCount = 1; si.pWaitSemaphores = &waitSem; si.pWaitDstStageMask = &stage; }
+     if (signalSem) { si.signalSemaphoreCount = 1; si.pSignalSemaphores = &signalSem; }
+     VkResult submitR = vkQueueSubmit(queue_, 1, &si, f.fence);
+@@ -797,6 +836,7 @@ void VulkanBackend::Submit(bool wait, VkSemaphore waitSem, VkSemaphore signalSem
+     // D2: publish the submission only after vkQueueSubmit succeeded; DeliverLate
+     // (title thread) reads this atomic and the per-slot VkFence, never a shared map.
+     submitCounter_.fetch_add(1, std::memory_order_release);
++    lastSubmitOk_ = true;
+     if (wait) { WaitFrame(f); f.used = 0; }
+ }
+ void VulkanBackend::Flush() { Submit(true); }
+@@ -828,6 +868,50 @@ VulkanBackend::Alloc VulkanBackend::UploadAlloc(uint64_t size, uint64_t align) {
+     g_vkPerf.upload += size;
+     return {buf, 0, static_cast<uint8_t*>(p)};
+ }
++bool VulkanBackend::InitFrame(Frame& f) {
++    VkCommandBufferAllocateInfo ai{VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO};
++    ai.commandPool = pool_; ai.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY; ai.commandBufferCount = 1;
++    vkAllocateCommandBuffers(device_, &ai, &f.cmd);
++    VkFenceCreateInfo fi{VK_STRUCTURE_TYPE_FENCE_CREATE_INFO}; fi.flags = VK_FENCE_CREATE_SIGNALED_BIT;
++    vkCreateFence(device_, &fi, nullptr, &f.fence);
++    VkSemaphoreCreateInfo si{VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO};
++    vkCreateSemaphore(device_, &si, nullptr, &f.imageAvailable);
++    vkCreateSemaphore(device_, &si, nullptr, &f.renderFinished);
++    // kSetsPerSegment sets of the one layout (2 uniform + 4 combined + 4
++    // sampler descriptors each), so the set count is the only limit
++    VkDescriptorPoolSize sizes[3] = {{VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 2 * kSetsPerSegment}, {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 4 * kSetsPerSegment}, {VK_DESCRIPTOR_TYPE_SAMPLER, 4 * kSetsPerSegment}};
++    VkDescriptorPoolCreateInfo di{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
++    di.maxSets = kSetsPerSegment; di.poolSizeCount = 3; di.pPoolSizes = sizes;
++    vkCreateDescriptorPool(device_, &di, nullptr, &f.pool);
++    VkBufferCreateInfo bi{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
++    bi.size = kUploadSize;
++    bi.usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_INDEX_BUFFER_BIT | VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT;
++    // D6: a ring that cannot be created, allocated, bound or mapped fails Init
++    // outright; otherwise UploadAlloc would hand out f.map + o on a null map and
++    // the first draw's memcpy would fault. Partial handles are destroyed and
++    // nulled so Destroy does not touch them again.
++    if (vkCreateBuffer(device_, &bi, nullptr, &f.upload) != VK_SUCCESS) {
++        LOGE("vulkan: upload ring buffer creation failed; Init fails (D6)");
++        return false;
++    }
++    VkMemoryRequirements mr; vkGetBufferMemoryRequirements(device_, f.upload, &mr);
++    VkMemoryAllocateInfo mai{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
++    mai.allocationSize = mr.size; mai.memoryTypeIndex = FindHostMemory(mr.memoryTypeBits, f.uploadCoherent);
++    if (mai.memoryTypeIndex == UINT32_MAX || vkAllocateMemory(device_, &mai, nullptr, &f.uploadMem) != VK_SUCCESS) {
++        LOGE("vulkan: upload ring allocation failed (no host-visible memory type or out of memory); Init fails (D6)");
++        vkDestroyBuffer(device_, f.upload, nullptr); f.upload = VK_NULL_HANDLE;
++        return false;
++    }
++    if (vkBindBufferMemory(device_, f.upload, f.uploadMem, 0) != VK_SUCCESS ||
++        vkMapMemory(device_, f.uploadMem, 0, VK_WHOLE_SIZE, 0, reinterpret_cast<void**>(&f.map)) != VK_SUCCESS || !f.map) {
++        LOGE("vulkan: upload ring bind/map failed; Init fails (D6)");
++        f.map = nullptr;
++        vkDestroyBuffer(device_, f.upload, nullptr); f.upload = VK_NULL_HANDLE;
++        vkFreeMemory(device_, f.uploadMem, nullptr); f.uploadMem = VK_NULL_HANDLE;
++        return false;
++    }
++    return true;
++}
+ // ---- Init ----
+ bool VulkanBackend::Init(uint32_t width, uint32_t height) {
+     guestW_ = width; guestH_ = height;
+@@ -851,49 +935,7 @@ bool VulkanBackend::Init(uint32_t width, uint32_t height) {
+         VkCommandPoolCreateInfo ci{VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO};
+         ci.flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT; ci.queueFamilyIndex = qfamily_;
+         vkCreateCommandPool(device_, &ci, nullptr, &pool_);
+-        VkSemaphoreCreateInfo si{VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO};
+-        for (auto& f : frames_) {
+-            VkCommandBufferAllocateInfo ai{VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO};
+-            ai.commandPool = pool_; ai.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY; ai.commandBufferCount = 1;
+-            vkAllocateCommandBuffers(device_, &ai, &f.cmd);
+-            VkFenceCreateInfo fi{VK_STRUCTURE_TYPE_FENCE_CREATE_INFO}; fi.flags = VK_FENCE_CREATE_SIGNALED_BIT;
+-            vkCreateFence(device_, &fi, nullptr, &f.fence);
+-            vkCreateSemaphore(device_, &si, nullptr, &f.imageAvailable);
+-            vkCreateSemaphore(device_, &si, nullptr, &f.renderFinished);
+-            // kSetsPerSegment sets of the one layout (2 uniform + 4 combined + 4
+-            // sampler descriptors each), so the set count is the only limit
+-            VkDescriptorPoolSize sizes[3] = {{VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 2 * kSetsPerSegment}, {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 4 * kSetsPerSegment}, {VK_DESCRIPTOR_TYPE_SAMPLER, 4 * kSetsPerSegment}};
+-            VkDescriptorPoolCreateInfo di{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
+-            di.maxSets = kSetsPerSegment; di.poolSizeCount = 3; di.pPoolSizes = sizes;
+-            vkCreateDescriptorPool(device_, &di, nullptr, &f.pool);
+-            VkBufferCreateInfo bi{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
+-            bi.size = kUploadSize;
+-            bi.usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_INDEX_BUFFER_BIT | VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT;
+-            // D6: a ring that cannot be created, allocated, bound or mapped fails Init
+-            // outright; otherwise UploadAlloc would hand out f.map + o on a null map and
+-            // the first draw's memcpy would fault. Partial handles are destroyed and
+-            // nulled so Destroy does not touch them again.
+-            if (vkCreateBuffer(device_, &bi, nullptr, &f.upload) != VK_SUCCESS) {
+-                LOGE("vulkan: upload ring buffer creation failed; Init fails (D6)");
+-                return false;
+-            }
+-            VkMemoryRequirements mr; vkGetBufferMemoryRequirements(device_, f.upload, &mr);
+-            VkMemoryAllocateInfo mai{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
+-            mai.allocationSize = mr.size; mai.memoryTypeIndex = FindHostMemory(mr.memoryTypeBits, f.uploadCoherent);
+-            if (mai.memoryTypeIndex == UINT32_MAX || vkAllocateMemory(device_, &mai, nullptr, &f.uploadMem) != VK_SUCCESS) {
+-                LOGE("vulkan: upload ring allocation failed (no host-visible memory type or out of memory); Init fails (D6)");
+-                vkDestroyBuffer(device_, f.upload, nullptr); f.upload = VK_NULL_HANDLE;
+-                return false;
+-            }
+-            if (vkBindBufferMemory(device_, f.upload, f.uploadMem, 0) != VK_SUCCESS ||
+-                vkMapMemory(device_, f.uploadMem, 0, VK_WHOLE_SIZE, 0, reinterpret_cast<void**>(&f.map)) != VK_SUCCESS || !f.map) {
+-                LOGE("vulkan: upload ring bind/map failed; Init fails (D6)");
+-                f.map = nullptr;
+-                vkDestroyBuffer(device_, f.upload, nullptr); f.upload = VK_NULL_HANDLE;
+-                vkFreeMemory(device_, f.uploadMem, nullptr); f.uploadMem = VK_NULL_HANDLE;
+-                return false;
+-            }
+-        }
++        for (auto& f : frames_) if (!InitFrame(f)) return false;
+     }
+     nullImage_ = CreateImage(1, 1, kBgra, VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT, VK_IMAGE_ASPECT_COLOR_BIT);
+     {
+@@ -964,12 +1006,51 @@ bool VulkanBackend::CreateDeviceAndSwap() {
      anisotropy_ = feats.samplerAnisotropy; fillNonSolid_ = feats.fillModeNonSolid; bc_ = feats.textureCompressionBC;
      std::vector<const char*> exts;
      if (surface_) exts.push_back(VK_KHR_SWAPCHAIN_EXTENSION_NAME);
@@ -543,9 +711,12 @@ index c35896c..1b7b5ea 100644
      if (vkCreateDevice(physical_, &ci, nullptr, &device_) != VK_SUCCESS) { LOGE("vulkan: vkCreateDevice failed"); return false; }
      vkGetDeviceQueue(device_, qfamily_, 0, &queue_);
      for (VkFormat f : {VK_FORMAT_D24_UNORM_S8_UINT, VK_FORMAT_D32_SFLOAT_S8_UINT, VK_FORMAT_D16_UNORM}) {
-@@ -1012,7 +1079,11 @@ bool VulkanBackend::CreateSwapchain() {
+@@ -1011,8 +1092,14 @@ bool VulkanBackend::CreateSwapchain() {
+     VkSwapchainCreateInfoKHR ci{VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR};
      ci.surface = surface_; ci.minImageCount = imageCount; ci.imageFormat = chosen.format; ci.imageColorSpace = chosen.colorSpace;
      ci.imageExtent = swapExtent_; ci.imageArrayLayers = 1; ci.imageUsage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
++    swapTransfer_ = (caps.supportedUsageFlags & VK_IMAGE_USAGE_TRANSFER_SRC_BIT) != 0;
++    if (swapTransfer_) ci.imageUsage |= VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
      ci.imageSharingMode = VK_SHARING_MODE_EXCLUSIVE; ci.preTransform = caps.currentTransform;
 -    ci.compositeAlpha = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR; ci.presentMode = mode; ci.clipped = VK_TRUE;
 +    VkCompositeAlphaFlagBitsKHR alpha = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR;
@@ -556,7 +727,7 @@ index c35896c..1b7b5ea 100644
      if (vkCreateSwapchainKHR(device_, &ci, nullptr, &swapchain_) != VK_SUCCESS) { LOGE("vulkan: no swapchain"); return false; }
      uint32_t n = 0; vkGetSwapchainImagesKHR(device_, swapchain_, &n, nullptr);
      swapImages_.resize(n); vkGetSwapchainImagesKHR(device_, swapchain_, &n, swapImages_.data());
-@@ -1334,14 +1405,17 @@ void VulkanBackend::UploadTexImage(Tex& tx, const TextureDesc& d, const FormatIn
+@@ -1334,14 +1421,17 @@ void VulkanBackend::UploadTexImage(Tex& tx, const TextureDesc& d, const FormatIn
          uint32_t pitch = 0; DecodeLevel(d, l, f, p, colours, px, pitch);
          if (px.empty()) continue;
          g_vkPerf.texups++; g_vkPerf.texupBytes += px.size();
@@ -577,7 +748,7 @@ index c35896c..1b7b5ea 100644
          vkCmdCopyBufferToImage(Cmd(), a.buffer, tx.res.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
      }
      Transition(tx.res, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
-@@ -1370,6 +1444,7 @@ VkImageView VulkanBackend::BindGuestTexture(const State& s, int stage, const Tex
+@@ -1370,6 +1460,7 @@ VkImageView VulkanBackend::BindGuestTexture(const State& s, int stage, const Tex
          if (sig != tx.sig || !same) { tx.sig = sig; UploadTexImage(tx, d, fi, p, palette.va ? palette.colours : nullptr); }
      }
      if (fi.depth) info.shadow = ShadowDepthKind(d.format);
@@ -585,7 +756,7 @@ index c35896c..1b7b5ea 100644
      return tx.res.SampleView();
  }
  ImageRes VulkanBackend::Feedback(Target& t) {
-@@ -1396,10 +1471,10 @@ VkImageView VulkanBackend::BindTargetTexture(const State& s, int stage, const Te
+@@ -1396,10 +1487,10 @@ VkImageView VulkanBackend::BindTargetTexture(const State& s, int stage, const Te
      Target* rt = FindTarget(s.rt, false);
      float k = float(t.w) / (t.gw * stages.k[stage]);
      if (!t.depth && box && k > 1.01f && rt && rt != &t && (t.gw > rt->gw || t.gh > rt->gh)) { stages.wide[stage] = k; info.flags |= kTexWide; }
@@ -598,7 +769,7 @@ index c35896c..1b7b5ea 100644
  }
  VkImageView VulkanBackend::BindTexture(const State& s, int stage, DrawTextures& stages) {
      TexInfo& info = stages.info[stage]; info = {};
-@@ -1429,8 +1504,19 @@ VkSampler VulkanBackend::StageSamplerFor(const State& s, int i, const DrawTextur
+@@ -1429,8 +1520,19 @@ VkSampler VulkanBackend::StageSamplerFor(const State& s, int i, const DrawTextur
      ci.addressModeU = AddressMode(clampCoords && t[kTssAddressU] == 1 ? 3 : t[kTssAddressU]);
      ci.addressModeV = AddressMode(clampCoords && t[kTssAddressV] == 1 ? 3 : t[kTssAddressV]);
      ci.addressModeW = AddressMode(t[kTssAddressW]);
@@ -620,7 +791,7 @@ index c35896c..1b7b5ea 100644
      float bc[4]; ColorF(t[kTssBorderColor], bc);
      ci.borderColor = (bc[0] || bc[1] || bc[2] || bc[3]) ? VK_BORDER_COLOR_FLOAT_OPAQUE_WHITE : VK_BORDER_COLOR_FLOAT_TRANSPARENT_BLACK;
      bool anisoWanted = t[kTssMinFilter] == 3 || t[kTssMagFilter] == 3;
-@@ -1655,6 +1741,7 @@ uint64_t VertexKeyOf(const State& s, const Assembled& a, const DrawShaders& sh)
+@@ -1655,6 +1757,7 @@ uint64_t VertexKeyOf(const State& s, const Assembled& a, const DrawShaders& sh)
  void BuildPsoKey(const State& s, const Assembled& a, uint64_t vh, uint64_t ph, Target* rt, Target* ds, PsoKey& k) {
      std::memset(&k, 0, sizeof(k)); k.vs = vh; k.ps = ph; k.regs = a.regs;
      for (int r = 0; r < 16; r++) if ((a.regs >> r) & 1) { const VertexElement& e = a.elements[size_t(r)]; k.elements[r] = e.format | uint32_t(e.buffer) << 8 | uint32_t(e.offset) << 16; }
@@ -628,23 +799,23 @@ index c35896c..1b7b5ea 100644
      k.topo = uint32_t(a.topology); k.strip = a.strip; k.has_rt = rt != nullptr; k.has_ds = ds != nullptr; k.rtfmt = rt ? uint32_t(kBgra) : 0;
      k.sref = SimpleState(s, kMStencilRef) & 0xFF;
      k.blend = SimpleState(s, kMBlendEnable) != 0;
-@@ -1850,6 +1937,15 @@ void VulkanBackend::LogDraw(const State& s, uint32_t prim, uint32_t count, const
+@@ -1850,6 +1953,15 @@ void VulkanBackend::LogDraw(const State& s, uint32_t prim, uint32_t count, const
  void VulkanBackend::Draw(const State& s, uint32_t prim, uint32_t start, uint32_t count, const uint8_t* indices) {
      VkPerfScope perfDraw{g_vkPerf.draw};
      g_vkPerf.draws++;
 +    uint32_t frameDraw = ++g_vkFrameDraws;
 +#if defined(__APPLE__)
-+    // A frame that records many thousands of draws into one command buffer makes
-+    // MoltenVK fault a GPU read (device lost) even though each draw is in range.
-+    // The same frame split across submits does not. 1024 stays under the
-+    // 8192-set segment and under the upload ring. A cap test kept the device
-+    // alive at 2745 draws in one buffer and lost it near 8500.
-+    if (recording_ && frameDraw > 1 && (frameDraw % 1024) == 1) Flush();
++    // One MoltenVK command buffer of ~8500 draws page-faults a GPU read even
++    // though each draw is in range. 2745 in one buffer stayed up. 4096 stays
++    // under the 8192-set pool. The submit waits: handing the chunk to another
++    // command buffer without a CPU fence faulted image-view encode on this
++    // driver (MVKImageView plane pointer 0xaa0003f3aa0103f4, every run).
++    if (recording_ && frameDraw > 1 && (frameDraw % 4096) == 1) Flush();
 +#endif
      if (cap_) CapStep(s.rt);
      if (DepthCopyDraw(s)) return;
      Assembled& a = asm_;
-@@ -2016,10 +2112,22 @@ void VulkanBackend::BlitToImage(VkFormat rtvFormat, uint32_t w, uint32_t h, Imag
+@@ -2016,10 +2128,22 @@ void VulkanBackend::BlitToImage(VkFormat rtvFormat, uint32_t w, uint32_t h, Imag
      std::array<VkSampler, 4> samplers{nullSampler_, nullSampler_, nullSampler_, nullSampler_};
      { VkSamplerCreateInfo si{VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO}; si.magFilter = si.minFilter = VK_FILTER_LINEAR; si.addressModeU = si.addressModeV = si.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE; si.maxLod = VK_LOD_CLAMP_NONE; samplers[0] = GetSampler(si);
        si.magFilter = si.minFilter = VK_FILTER_NEAREST; si.mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST; samplers[1] = GetSampler(si); }
@@ -671,7 +842,67 @@ index c35896c..1b7b5ea 100644
      vkCmdBindPipeline(Cmd(), VK_PIPELINE_BIND_POINT_GRAPHICS, pipe);
      vkCmdBindDescriptorSets(Cmd(), VK_PIPELINE_BIND_POINT_GRAPHICS, pipelineLayout_, 0, 1, &set, 0, nullptr);
      if (viewportRect) {
-@@ -2255,9 +2363,9 @@ void VulkanBackend::LogPerf() {
+@@ -2043,6 +2167,59 @@ ImageRes VulkanBackend::ShrinkImage(ImageRes& src, uint32_t w, uint32_t h, uint3
+     float uv[4] = {0, 0, 1, 1}; BlitInto(tmp, src, uv, false, true, taps, mul, false);
+     down = tmp.res; if (reuse) *reuse = down; return down;
+ }
++void VulkanBackend::RecordSwapCapture(VkImage image, uint32_t w, uint32_t h) {
++    if (!image || !w || !h || swapCapBuf_) return;
++    VkBufferCreateInfo ci{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
++    ci.size = uint64_t(w) * h * 4; ci.usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT;
++    VkBuffer buf = VK_NULL_HANDLE; VkDeviceMemory mem = VK_NULL_HANDLE;
++    if (vkCreateBuffer(device_, &ci, nullptr, &buf) != VK_SUCCESS) return;
++    VkMemoryRequirements mr; vkGetBufferMemoryRequirements(device_, buf, &mr);
++    VkMemoryAllocateInfo ai{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO}; ai.allocationSize = mr.size;
++    bool coherent = true;
++    ai.memoryTypeIndex = FindHostMemory(mr.memoryTypeBits, coherent);
++    if (ai.memoryTypeIndex == UINT32_MAX || vkAllocateMemory(device_, &ai, nullptr, &mem) != VK_SUCCESS ||
++        vkBindBufferMemory(device_, buf, mem, 0) != VK_SUCCESS) {
++        vkDestroyBuffer(device_, buf, nullptr); if (mem) vkFreeMemory(device_, mem, nullptr); return;
++    }
++    VkImageMemoryBarrier b{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
++    b.srcQueueFamilyIndex = b.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
++    b.image = image; b.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
++    b.oldLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR; b.newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
++    b.srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT; b.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
++    vkCmdPipelineBarrier(Cmd(), VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0, nullptr, 1, &b);
++    VkBufferImageCopy region{}; region.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT; region.imageSubresource.layerCount = 1; region.imageExtent = {w, h, 1};
++    vkCmdCopyImageToBuffer(Cmd(), image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, buf, 1, &region);
++    b.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL; b.newLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
++    b.srcAccessMask = VK_ACCESS_TRANSFER_READ_BIT; b.dstAccessMask = 0;
++    vkCmdPipelineBarrier(Cmd(), VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, 0, 0, nullptr, 0, nullptr, 1, &b);
++    swapCapBuf_ = buf; swapCapMem_ = mem; swapCapW_ = w; swapCapH_ = h; swapCapCoherent_ = coherent; swapCapPresent_ = presents_;
++}
++void VulkanBackend::WriteSwapCapture() {
++    if (!swapCapBuf_ || !swapCapMem_) return;
++    void* p = nullptr;
++    bool mapped = vkMapMemory(device_, swapCapMem_, 0, VK_WHOLE_SIZE, 0, &p) == VK_SUCCESS && p;
++    if (mapped && !swapCapCoherent_) {
++        VkMappedMemoryRange range{VK_STRUCTURE_TYPE_MAPPED_MEMORY_RANGE};
++        range.memory = swapCapMem_; range.offset = 0; range.size = VK_WHOLE_SIZE;
++        if (vkInvalidateMappedMemoryRanges(device_, 1, &range) != VK_SUCCESS) mapped = false;
++    }
++    if (mapped) {
++        std::error_code ec;
++        std::filesystem::path dir = std::filesystem::weakly_canonical(app::ExeDir() / diag::CaptureDir(), ec);
++        std::filesystem::create_directories(dir, ec);
++        char name[64]; std::snprintf(name, sizeof(name), "swap_%05llu.bmp", (unsigned long long)swapCapPresent_);
++        FILE* f = std::fopen((dir / name).string().c_str(), "wb");
++        if (f) {
++            uint32_t bytes = swapCapW_ * swapCapH_ * 4;
++            uint8_t hd[54] = {'B', 'M'}; auto put = [&](int o, uint32_t v) { std::memcpy(hd + o, &v, 4); };
++            put(2, 54 + bytes); put(10, 54); put(14, 40); put(18, swapCapW_); put(22, uint32_t(-int32_t(swapCapH_))); hd[26] = 1; hd[28] = 32; put(34, bytes);
++            std::fwrite(hd, 1, 54, f); std::fwrite(p, 1, bytes, f); std::fclose(f);
++        }
++        vkUnmapMemory(device_, swapCapMem_);
++    }
++    vkDestroyBuffer(device_, swapCapBuf_, nullptr); vkFreeMemory(device_, swapCapMem_, nullptr);
++    swapCapBuf_ = VK_NULL_HANDLE; swapCapMem_ = VK_NULL_HANDLE;
++}
+ bool VulkanBackend::ReadBackImage(ImageRes& src, uint32_t w, uint32_t h, std::vector<uint8_t>& out) {
+     Transition(src, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
+     VkBuffer buf = VK_NULL_HANDLE; VkDeviceMemory mem = VK_NULL_HANDLE;
+@@ -2255,9 +2432,9 @@ void VulkanBackend::LogPerf() {
      VkPerf& p = g_vkPerf;
      double n = double(perfFrames_);
      double host = p.draw + p.present + p.clear + p.copy;
@@ -683,7 +914,7 @@ index c35896c..1b7b5ea 100644
           "resource %.2f fence %.2f flush %.2f copy %.2f, next frame %.2f) | in XDK draws %.2f (of it sendstate %.2f) | read-backs waited for: %.1f lock, "
           "%.1f NOOVERWRITE",
           g_perf_capture_ns.exchange(0) / n / 1e6, g_perf_wait_ns.exchange(0) / n / 1e6,
-@@ -2267,7 +2375,7 @@ void VulkanBackend::LogPerf() {
+@@ -2267,7 +2444,7 @@ void VulkanBackend::LogPerf() {
           g_perf_wait_kind_ns[5].exchange(0) / n / 1e6, g_perf_hle_ns.exchange(0) / n / 1e6,
           g_perf_sendstate_ns.exchange(0) / n / 1e6, g_perf_sync_block.exchange(0) / n,
           g_perf_sync_late.exchange(0) / n);
@@ -692,7 +923,7 @@ index c35896c..1b7b5ea 100644
           "%.1f tex uploads %.2f MB, %.1f new tex, %.1f new targets, %.1f target uploads, %.1f read-backs | %llu shaders %llu psos this second | %.0f clears %.0f copies per frame",
           p.draws / n, p.raw / n, p.skipped / n, p.nopipeline / n, p.nopipeShader / n, p.nopipePso / n, p.nopipeSet / n, (unsigned long long)p.staleAlloc, p.verts / n / 1000.0, p.upload / n / 1048576.0, p.overflow / n,
           p.texups / n, p.texupBytes / n / 1048576.0, p.newtex / n, p.targets / n, p.rtups / n, p.syncs / n,
-@@ -2335,7 +2443,7 @@ void VulkanBackend::Present(const Surface& front) {
+@@ -2335,7 +2512,7 @@ void VulkanBackend::Present(const Surface& front) {
              // the acquire failed, so its semaphore was not signalled and this submit
              // must not wait on it.
              if (recording_) Submit(true);
@@ -701,7 +932,7 @@ index c35896c..1b7b5ea 100644
          }
          if (imageIndex >= swapFbs_.size()) {
              LOGE("vulkan: acquire returned image %u of %zu", imageIndex, swapFbs_.size());
-@@ -2346,7 +2454,7 @@ void VulkanBackend::Present(const Surface& front) {
+@@ -2346,7 +2523,7 @@ void VulkanBackend::Present(const Surface& front) {
              // when none is open so there is a submission to consume it with.
              if (!recording_) EnsureRecording();
              Submit(true, Cur().imageAvailable);
@@ -710,7 +941,24 @@ index c35896c..1b7b5ea 100644
          }
          waitSem = Cur().imageAvailable;
      }
-@@ -2379,6 +2487,7 @@ void VulkanBackend::Present(const Surface& front) {
+@@ -2361,7 +2538,16 @@ void VulkanBackend::Present(const Surface& front) {
+     else LOG_FIRST(8, "vulkan: present with no guest front target, clearing swap image %u only", imageIndex);
+     RenderUi(Cmd());
+     vkCmdEndRenderPass(Cmd());
++    bool grabSwap = false;
++    if (haveSwap && !diag::CaptureDir().empty()) {
++        static const uint32_t every = [] { const char* v = std::getenv("XBE_VK_CAPTURE_EVERY"); return v ? uint32_t(std::strtoul(v, nullptr, 10)) : 0u; }();
++        if (every && presents_ % every == 0) {
++            if (swapTransfer_) { grabSwap = true; RecordSwapCapture(swapImages_[imageIndex], bbW_, bbH_); }
++            else LOG_FIRST(1, "vulkan: swapchain has no TRANSFER_SRC, present image not captured");
++        }
++    }
+     Submit(false, waitSem, haveSwap ? Cur().renderFinished : VK_NULL_HANDLE);
++    if (grabSwap && lastSubmitOk_) { WaitFrame(Cur()); WriteSwapCapture(); }
+     if (haveSwap) {
+         VkPresentInfoKHR pi{VK_STRUCTURE_TYPE_PRESENT_INFO_KHR};
+         pi.waitSemaphoreCount = 1; pi.pWaitSemaphores = &Cur().renderFinished; pi.swapchainCount = 1; pi.pSwapchains = &swapchain_; pi.pImageIndices = &imageIndex;
+@@ -2379,6 +2565,7 @@ void VulkanBackend::Present(const Surface& front) {
               (unsigned long long)presents_, imageIndex, t->data, t->gw, t->gh, t->w, t->h, scale_, widen_, app::TargetAspect(), aspect, bbW_, bbH_, sx, sy, sw, sh, v0, dv, (float(bbW_) - vw) / 2, (float(bbH_) - vh) / 2, vw, vh, int(gamma_));
      }
      presents_++; presentsSeen_.store(presents_); frame_++;
@@ -718,6 +966,37 @@ index c35896c..1b7b5ea 100644
      ReleaseOldTextures();
      { Frame& f = Cur(); if (f.fencePending) WaitFrame(f); }
      CountFps(); ApplySettings();
+@@ -2547,6 +2734,8 @@ void VulkanBackend::Destroy() {
+     textures_.clear();
+     for (auto& [k, l] : late_) { DestroyImage(l.down); for (int i = 0; i < kFrames; i++) if (l.rb[i]) { vkDestroyBuffer(device_, l.rb[i], nullptr); vkFreeMemory(device_, l.rbm[i], nullptr); } }
+     DestroyImage(lut_); DestroyImage(nullImage_);
++    if (swapCapBuf_) { vkDestroyBuffer(device_, swapCapBuf_, nullptr); swapCapBuf_ = VK_NULL_HANDLE; }
++    if (swapCapMem_) { vkFreeMemory(device_, swapCapMem_, nullptr); swapCapMem_ = VK_NULL_HANDLE; }
+     if (offscreenFb_) vkDestroyFramebuffer(device_, offscreenFb_, nullptr);
+     DestroyImage(offscreen_); DestroySwapchain();
+     if (swapPass_ && surface_) vkDestroyRenderPass(device_, swapPass_, nullptr);  // headless: swapPass_ is in passes_
+@@ -2558,11 +2747,16 @@ void VulkanBackend::Destroy() {
+     if (nullSampler_) vkDestroySampler(device_, nullSampler_, nullptr);
+     if (pipelineCache_) { SavePipelineCache(); vkDestroyPipelineCache(device_, pipelineCache_, nullptr); }
+     if (imguiPool_) vkDestroyDescriptorPool(device_, imguiPool_, nullptr);
+-    for (auto& f : frames_) {
+-        vkDestroyDescriptorPool(device_, f.pool, nullptr); vkUnmapMemory(device_, f.uploadMem);
+-        vkDestroyBuffer(device_, f.upload, nullptr); vkFreeMemory(device_, f.uploadMem, nullptr);
+-        vkDestroySemaphore(device_, f.imageAvailable, nullptr); vkDestroySemaphore(device_, f.renderFinished, nullptr); vkDestroyFence(device_, f.fence, nullptr);
+-    }
++    auto destroyFrame = [&](Frame& f) {
++        if (f.pool) vkDestroyDescriptorPool(device_, f.pool, nullptr);
++        if (f.map) vkUnmapMemory(device_, f.uploadMem);
++        if (f.upload) vkDestroyBuffer(device_, f.upload, nullptr);
++        if (f.uploadMem) vkFreeMemory(device_, f.uploadMem, nullptr);
++        if (f.imageAvailable) vkDestroySemaphore(device_, f.imageAvailable, nullptr);
++        if (f.renderFinished) vkDestroySemaphore(device_, f.renderFinished, nullptr);
++        if (f.fence) vkDestroyFence(device_, f.fence, nullptr);
++    };
++    for (auto& f : frames_) destroyFrame(f);
+     vkDestroyPipelineLayout(device_, pipelineLayout_, nullptr); vkDestroyDescriptorSetLayout(device_, setLayout_, nullptr);
+     vkDestroyCommandPool(device_, pool_, nullptr); vkDestroyDevice(device_, nullptr); device_ = VK_NULL_HANDLE;
+     if (surface_) { vkDestroySurfaceKHR(instance_, surface_, nullptr); surface_ = VK_NULL_HANDLE; std::lock_guard lock(g_handover_lock); g_surface = VK_NULL_HANDLE; }
 diff --git a/runtime/kernel/boot.cpp b/runtime/kernel/boot.cpp
 index 9fc79d1..2c50340 100644
 --- a/runtime/kernel/boot.cpp
@@ -976,3 +1255,22 @@ index 56fadb8..5e60004 100644
  #else
      pthread_setname_np(pthread_self(), name);
  #endif
+diff --git a/runtime/kernel/xboxkrnl.cpp b/runtime/kernel/xboxkrnl.cpp
+index 86cf14a..be43da8 100644
+--- a/runtime/kernel/xboxkrnl.cpp
++++ b/runtime/kernel/xboxkrnl.cpp
+@@ -250,8 +250,14 @@ KERNEL_EXPORT(127, KeQueryPerformanceFrequency, 0) {
+ }
+ 
+ KERNEL_EXPORT(151, KeStallExecutionProcessor, 1) {
++#if defined(__APPLE__)
++    // The Xbox call busy-waits. Sleeping the requested interval keeps the core
++    // idle; a zero stall stays a no-op.
++    if (a[0]) std::this_thread::sleep_for(std::chrono::microseconds(a[0]));
++#else
+     auto until = std::chrono::steady_clock::now() + std::chrono::microseconds(a[0]);
+     while (std::chrono::steady_clock::now() < until) std::this_thread::yield();
++#endif
+     return 0;
+ }
+ 
