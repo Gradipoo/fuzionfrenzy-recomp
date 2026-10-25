@@ -346,7 +346,7 @@ index 5b8aa22..b62ce91 100644
          for (;;) {
              Batch* b;
 diff --git a/runtime/gpu/spirv.cpp b/runtime/gpu/spirv.cpp
-index 95630b2..2cf0bb5 100644
+index 95630b2..389a560 100644
 --- a/runtime/gpu/spirv.cpp
 +++ b/runtime/gpu/spirv.cpp
 @@ -13,6 +13,7 @@
@@ -357,7 +357,22 @@ index 95630b2..2cf0bb5 100644
  #include <cstring>
  #include <dlfcn.h>
  #include <fstream>
-@@ -121,8 +122,15 @@ using DxcCreateInstanceFn = HRESULT (*)(REFCLSID rclsid, REFIID riid, LPVOID* pp
+@@ -50,7 +51,13 @@ std::string g_compiler = "none";
+ 
+ uint64_t CacheKey(const std::string& hlsl, const char* entry, bool fragment) {
+     uint64_t key = Hash(entry, std::strlen(entry), fragment ? 0x7073ull : 0x7673ull);
+-    return Hash(hlsl.data(), hlsl.size(), key);
++    key = Hash(hlsl.data(), hlsl.size(), key);
++#if defined(__APPLE__)
++    // mapIO() below changes the bindings of every module. Blobs compiled
++    // before that call must not be reused.
++    key ^= 0x6d6170696f5full;
++#endif
++    return key;
+ }
+ 
+ std::filesystem::path CacheFile(uint64_t key, bool fragment) {
+@@ -121,8 +128,15 @@ using DxcCreateInstanceFn = HRESULT (*)(REFCLSID rclsid, REFIID riid, LPVOID* pp
  DxcCreateInstanceFn DxcEntry() {
      static DxcCreateInstanceFn fn = [] {
          void* lib = dlopen("libdxcompiler.so", RTLD_NOW | RTLD_LOCAL);
@@ -373,11 +388,40 @@ index 95630b2..2cf0bb5 100644
          return lib ? reinterpret_cast<DxcCreateInstanceFn>(dlsym(lib, "DxcCreateInstance")) : nullptr;
      }();
      return fn;
+@@ -220,6 +234,18 @@ bool CompileGlslang(const std::string& hlsl, const char* entry, bool fragment, s
+         if (error) *error = std::string("glslang: ") + program.getInfoLog();
+         return false;
+     }
++#if defined(__APPLE__)
++    // setShiftBinding is recorded on the shader and applied by mapIO(), which
++    // is the step the glslang CLI runs and this path used to skip. Without it
++    // Homebrew glslang 16 leaves the HLSL register as the binding, so t0 and
++    // s0 are both binding 0 and t1 shares binding 1 with the cbuffer. MoltenVK
++    // then assigns both textures [[texture(0)]] and the present shader does
++    // not compile. The shifts match the descriptor set: t at 2..5, s at 6..9.
++    if (!program.mapIO()) {
++        if (error) *error = std::string("glslang: mapIO: ") + program.getInfoLog();
++        return false;
++    }
++#endif
+     glslang::SpvOptions options;
+     options.generateDebugInfo = false;
+     options.optimizeSize = false;
 diff --git a/runtime/gpu/vulkan.cpp b/runtime/gpu/vulkan.cpp
-index c35896c..3cb2461 100644
+index c35896c..644513b 100644
 --- a/runtime/gpu/vulkan.cpp
 +++ b/runtime/gpu/vulkan.cpp
-@@ -257,6 +257,7 @@ uint64_t TargetMapKey(uint32_t data, bool depth) { return uint64_t(data) << 1 |
+@@ -72,6 +72,9 @@ struct VkPerf {
+     uint64_t upload = 0, overflow = 0, texups = 0, texupBytes = 0, newtex = 0;
+     uint64_t targets = 0, rtups = 0, syncs = 0, shaders = 0, psos = 0, clears = 0, copies = 0;
+ };
++// Draws recorded since the last present. On Apple, Draw() submits every 1024
++// draws so one MoltenVK command buffer does not hold the whole frame.
++uint32_t g_vkFrameDraws = 0;
+ VkPerf g_vkPerf;
+ struct VkPerfScope {
+     double& acc;
+@@ -257,6 +260,7 @@ uint64_t TargetMapKey(uint32_t data, bool depth) { return uint64_t(data) << 1 |
  struct DrawTextures {
      TexInfo info[4]; VkImageView view[4] = {}; TextureDesc desc[4]; bool hasDesc[4] = {};
      bool rt[4] = {}; float k[4] = {1,1,1,1}; float wide[4] = {};
@@ -385,7 +429,18 @@ index c35896c..3cb2461 100644
  };
  struct DrawShaders {
      bool prog = false, quad = false, fixed_transform = false; FixedKey fk;
-@@ -549,6 +550,17 @@ VkInstance VulkanInstance() {
+@@ -268,6 +272,10 @@ struct PsoKey {
+     uint64_t vs, ps; uint32_t regs, topo, strip, has_rt, has_ds; uint32_t elements[16];
+     uint32_t blend, src, dst, op, wmask, zen, zwrite, zfunc, sten, sfunc, smask, swmask, sfail, szfail, spass, cull, ccw, fill;
+     int32_t zbias; float zslope; uint32_t rtfmt; uint32_t sref;
++    // Vulkan bakes the vertex stride into the pipeline. The key used to ignore it, so a later
++    // draw with the same elements and a shorter stride reused the first pipeline. MoltenVK
++    // then fetched at the longer stride and read off the end of the upload (GPU page fault).
++    uint32_t stride[16];
+ };
+ uint32_t SimpleState(const State& s, uint32_t method) { return s.simple[method >> 2]; }
+ const char* kBlitHlsl = R"(
+@@ -549,6 +557,17 @@ VkInstance VulkanInstance() {
      std::vector<VkExtensionProperties> avail(count);
      vkEnumerateInstanceExtensionProperties(nullptr, &count, avail.data());
      for (auto& a : avail) if (!std::strcmp(a.extensionName, VK_KHR_GET_PHYSICAL_DEVICE_PROPERTIES_2_EXTENSION_NAME)) add(VK_KHR_GET_PHYSICAL_DEVICE_PROPERTIES_2_EXTENSION_NAME);
@@ -403,7 +458,7 @@ index c35896c..3cb2461 100644
      std::vector<const char*> layers;
      if (VkDebugEnabled()) {
          uint32_t lcount = 0; vkEnumerateInstanceLayerProperties(&lcount, nullptr);
-@@ -565,6 +577,9 @@ VkInstance VulkanInstance() {
+@@ -565,6 +584,9 @@ VkInstance VulkanInstance() {
      VkApplicationInfo appInfo{VK_STRUCTURE_TYPE_APPLICATION_INFO};
      appInfo.pApplicationName = "xbe-recomp"; appInfo.apiVersion = VK_API_VERSION_1_2;
      VkInstanceCreateInfo ci{VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO};
@@ -413,7 +468,7 @@ index c35896c..3cb2461 100644
      ci.pApplicationInfo = &appInfo; ci.enabledExtensionCount = uint32_t(exts.size()); ci.ppEnabledExtensionNames = exts.data();
      ci.enabledLayerCount = uint32_t(layers.size()); ci.ppEnabledLayerNames = layers.data();
      VkDebugUtilsMessengerCreateInfoEXT msgCi{VK_STRUCTURE_TYPE_DEBUG_UTILS_MESSENGER_CREATE_INFO_EXT};
-@@ -964,12 +979,51 @@ bool VulkanBackend::CreateDeviceAndSwap() {
+@@ -964,12 +986,51 @@ bool VulkanBackend::CreateDeviceAndSwap() {
      anisotropy_ = feats.samplerAnisotropy; fillNonSolid_ = feats.fillModeNonSolid; bc_ = feats.textureCompressionBC;
      std::vector<const char*> exts;
      if (surface_) exts.push_back(VK_KHR_SWAPCHAIN_EXTENSION_NAME);
@@ -466,7 +521,7 @@ index c35896c..3cb2461 100644
      if (vkCreateDevice(physical_, &ci, nullptr, &device_) != VK_SUCCESS) { LOGE("vulkan: vkCreateDevice failed"); return false; }
      vkGetDeviceQueue(device_, qfamily_, 0, &queue_);
      for (VkFormat f : {VK_FORMAT_D24_UNORM_S8_UINT, VK_FORMAT_D32_SFLOAT_S8_UINT, VK_FORMAT_D16_UNORM}) {
-@@ -1012,7 +1066,11 @@ bool VulkanBackend::CreateSwapchain() {
+@@ -1012,7 +1073,11 @@ bool VulkanBackend::CreateSwapchain() {
      ci.surface = surface_; ci.minImageCount = imageCount; ci.imageFormat = chosen.format; ci.imageColorSpace = chosen.colorSpace;
      ci.imageExtent = swapExtent_; ci.imageArrayLayers = 1; ci.imageUsage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
      ci.imageSharingMode = VK_SHARING_MODE_EXCLUSIVE; ci.preTransform = caps.currentTransform;
@@ -479,7 +534,7 @@ index c35896c..3cb2461 100644
      if (vkCreateSwapchainKHR(device_, &ci, nullptr, &swapchain_) != VK_SUCCESS) { LOGE("vulkan: no swapchain"); return false; }
      uint32_t n = 0; vkGetSwapchainImagesKHR(device_, swapchain_, &n, nullptr);
      swapImages_.resize(n); vkGetSwapchainImagesKHR(device_, swapchain_, &n, swapImages_.data());
-@@ -1334,14 +1392,17 @@ void VulkanBackend::UploadTexImage(Tex& tx, const TextureDesc& d, const FormatIn
+@@ -1334,14 +1399,17 @@ void VulkanBackend::UploadTexImage(Tex& tx, const TextureDesc& d, const FormatIn
          uint32_t pitch = 0; DecodeLevel(d, l, f, p, colours, px, pitch);
          if (px.empty()) continue;
          g_vkPerf.texups++; g_vkPerf.texupBytes += px.size();
@@ -500,7 +555,7 @@ index c35896c..3cb2461 100644
          vkCmdCopyBufferToImage(Cmd(), a.buffer, tx.res.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
      }
      Transition(tx.res, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
-@@ -1370,6 +1431,7 @@ VkImageView VulkanBackend::BindGuestTexture(const State& s, int stage, const Tex
+@@ -1370,6 +1438,7 @@ VkImageView VulkanBackend::BindGuestTexture(const State& s, int stage, const Tex
          if (sig != tx.sig || !same) { tx.sig = sig; UploadTexImage(tx, d, fi, p, palette.va ? palette.colours : nullptr); }
      }
      if (fi.depth) info.shadow = ShadowDepthKind(d.format);
@@ -508,7 +563,7 @@ index c35896c..3cb2461 100644
      return tx.res.SampleView();
  }
  ImageRes VulkanBackend::Feedback(Target& t) {
-@@ -1396,10 +1458,10 @@ VkImageView VulkanBackend::BindTargetTexture(const State& s, int stage, const Te
+@@ -1396,10 +1465,10 @@ VkImageView VulkanBackend::BindTargetTexture(const State& s, int stage, const Te
      Target* rt = FindTarget(s.rt, false);
      float k = float(t.w) / (t.gw * stages.k[stage]);
      if (!t.depth && box && k > 1.01f && rt && rt != &t && (t.gw > rt->gw || t.gh > rt->gh)) { stages.wide[stage] = k; info.flags |= kTexWide; }
@@ -521,7 +576,7 @@ index c35896c..3cb2461 100644
  }
  VkImageView VulkanBackend::BindTexture(const State& s, int stage, DrawTextures& stages) {
      TexInfo& info = stages.info[stage]; info = {};
-@@ -1429,8 +1491,19 @@ VkSampler VulkanBackend::StageSamplerFor(const State& s, int i, const DrawTextur
+@@ -1429,8 +1498,19 @@ VkSampler VulkanBackend::StageSamplerFor(const State& s, int i, const DrawTextur
      ci.addressModeU = AddressMode(clampCoords && t[kTssAddressU] == 1 ? 3 : t[kTssAddressU]);
      ci.addressModeV = AddressMode(clampCoords && t[kTssAddressV] == 1 ? 3 : t[kTssAddressV]);
      ci.addressModeW = AddressMode(t[kTssAddressW]);
@@ -543,7 +598,31 @@ index c35896c..3cb2461 100644
      float bc[4]; ColorF(t[kTssBorderColor], bc);
      ci.borderColor = (bc[0] || bc[1] || bc[2] || bc[3]) ? VK_BORDER_COLOR_FLOAT_OPAQUE_WHITE : VK_BORDER_COLOR_FLOAT_TRANSPARENT_BLACK;
      bool anisoWanted = t[kTssMinFilter] == 3 || t[kTssMagFilter] == 3;
-@@ -2255,9 +2328,9 @@ void VulkanBackend::LogPerf() {
+@@ -1655,6 +1735,7 @@ uint64_t VertexKeyOf(const State& s, const Assembled& a, const DrawShaders& sh)
+ void BuildPsoKey(const State& s, const Assembled& a, uint64_t vh, uint64_t ph, Target* rt, Target* ds, PsoKey& k) {
+     std::memset(&k, 0, sizeof(k)); k.vs = vh; k.ps = ph; k.regs = a.regs;
+     for (int r = 0; r < 16; r++) if ((a.regs >> r) & 1) { const VertexElement& e = a.elements[size_t(r)]; k.elements[r] = e.format | uint32_t(e.buffer) << 8 | uint32_t(e.offset) << 16; }
++    for (uint32_t b = 0; b < a.buffer_count && b < 16; b++) k.stride[b] = a.buffers[b].stride;
+     k.topo = uint32_t(a.topology); k.strip = a.strip; k.has_rt = rt != nullptr; k.has_ds = ds != nullptr; k.rtfmt = rt ? uint32_t(kBgra) : 0;
+     k.sref = SimpleState(s, kMStencilRef) & 0xFF;
+     k.blend = SimpleState(s, kMBlendEnable) != 0;
+@@ -1850,6 +1931,15 @@ void VulkanBackend::LogDraw(const State& s, uint32_t prim, uint32_t count, const
+ void VulkanBackend::Draw(const State& s, uint32_t prim, uint32_t start, uint32_t count, const uint8_t* indices) {
+     VkPerfScope perfDraw{g_vkPerf.draw};
+     g_vkPerf.draws++;
++    uint32_t frameDraw = ++g_vkFrameDraws;
++#if defined(__APPLE__)
++    // A frame that records many thousands of draws into one command buffer makes
++    // MoltenVK fault a GPU read (device lost) even though each draw is in range.
++    // The same frame split across submits does not. 1024 stays under the
++    // 8192-set segment and under the upload ring. A cap test kept the device
++    // alive at 2745 draws in one buffer and lost it near 8500.
++    if (recording_ && frameDraw > 1 && (frameDraw % 1024) == 1) Flush();
++#endif
+     if (cap_) CapStep(s.rt);
+     if (DepthCopyDraw(s)) return;
+     Assembled& a = asm_;
+@@ -2255,9 +2345,9 @@ void VulkanBackend::LogPerf() {
      VkPerf& p = g_vkPerf;
      double n = double(perfFrames_);
      double host = p.draw + p.present + p.clear + p.copy;
@@ -555,7 +634,7 @@ index c35896c..3cb2461 100644
           "resource %.2f fence %.2f flush %.2f copy %.2f, next frame %.2f) | in XDK draws %.2f (of it sendstate %.2f) | read-backs waited for: %.1f lock, "
           "%.1f NOOVERWRITE",
           g_perf_capture_ns.exchange(0) / n / 1e6, g_perf_wait_ns.exchange(0) / n / 1e6,
-@@ -2267,7 +2340,7 @@ void VulkanBackend::LogPerf() {
+@@ -2267,7 +2357,7 @@ void VulkanBackend::LogPerf() {
           g_perf_wait_kind_ns[5].exchange(0) / n / 1e6, g_perf_hle_ns.exchange(0) / n / 1e6,
           g_perf_sendstate_ns.exchange(0) / n / 1e6, g_perf_sync_block.exchange(0) / n,
           g_perf_sync_late.exchange(0) / n);
@@ -564,6 +643,32 @@ index c35896c..3cb2461 100644
           "%.1f tex uploads %.2f MB, %.1f new tex, %.1f new targets, %.1f target uploads, %.1f read-backs | %llu shaders %llu psos this second | %.0f clears %.0f copies per frame",
           p.draws / n, p.raw / n, p.skipped / n, p.nopipeline / n, p.nopipeShader / n, p.nopipePso / n, p.nopipeSet / n, (unsigned long long)p.staleAlloc, p.verts / n / 1000.0, p.upload / n / 1048576.0, p.overflow / n,
           p.texups / n, p.texupBytes / n / 1048576.0, p.newtex / n, p.targets / n, p.rtups / n, p.syncs / n,
+@@ -2335,7 +2425,7 @@ void VulkanBackend::Present(const Surface& front) {
+             // the acquire failed, so its semaphore was not signalled and this submit
+             // must not wait on it.
+             if (recording_) Submit(true);
+-            presents_++; presentsSeen_.store(presents_); frame_++; if (diag::Perf()) LogPerf(); return;
++            presents_++; presentsSeen_.store(presents_); frame_++; g_vkFrameDraws = 0; if (diag::Perf()) LogPerf(); return;
+         }
+         if (imageIndex >= swapFbs_.size()) {
+             LOGE("vulkan: acquire returned image %u of %zu", imageIndex, swapFbs_.size());
+@@ -2346,7 +2436,7 @@ void VulkanBackend::Present(const Surface& front) {
+             // when none is open so there is a submission to consume it with.
+             if (!recording_) EnsureRecording();
+             Submit(true, Cur().imageAvailable);
+-            presents_++; presentsSeen_.store(presents_); frame_++; return;
++            presents_++; presentsSeen_.store(presents_); frame_++; g_vkFrameDraws = 0; return;
+         }
+         waitSem = Cur().imageAvailable;
+     }
+@@ -2379,6 +2469,7 @@ void VulkanBackend::Present(const Surface& front) {
+              (unsigned long long)presents_, imageIndex, t->data, t->gw, t->gh, t->w, t->h, scale_, widen_, app::TargetAspect(), aspect, bbW_, bbH_, sx, sy, sw, sh, v0, dv, (float(bbW_) - vw) / 2, (float(bbH_) - vh) / 2, vw, vh, int(gamma_));
+     }
+     presents_++; presentsSeen_.store(presents_); frame_++;
++    g_vkFrameDraws = 0;
+     ReleaseOldTextures();
+     { Frame& f = Cur(); if (f.fencePending) WaitFrame(f); }
+     CountFps(); ApplySettings();
 diff --git a/runtime/kernel/boot.cpp b/runtime/kernel/boot.cpp
 index 9fc79d1..2c50340 100644
 --- a/runtime/kernel/boot.cpp

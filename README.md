@@ -18,9 +18,10 @@ reaches a minigame in play with zero shader failures. Audio has never been verif
 floor shades flat white - a known, unfixed defect recorded in `docs/render-defect.md`.
 
 On Apple Silicon the same tree builds natively (arm64, MoltenVK, no Rosetta). It boots, opens a
-borderless window, and draws the intro and then a rendered scene at about 60 fps. About 53 seconds
-in, the GPU page-faults and MoltenVK loses the device, so menus and minigames are not confirmed on
-macOS yet. `HANDOFF.md` has the run notes.
+borderless window, and draws past the point where MoltenVK used to lose the device (about 53
+seconds, one command buffer holding ~8500 draws). A scripted run stayed up through 99 seconds,
+including the pad's play phase and a heavier ~10000-draw scene at about 40 fps. Menus and a
+minigame are not confirmed from a picture. `HANDOFF.md` has the run notes.
 
 The exact state, with evidence, is in `docs/status.md`; the first boot and what it proved is in
 `docs/boot-crash.md`.
@@ -78,7 +79,7 @@ two real XDK builds (`ret` identical in 171/171 names, `regs` in 175/175, byte l
 | Recompilation | done - 10,587 functions, 633,913 instructions, 2,165,441 of 2,368,328 code bytes (91.4%) |
 | Kernel import coverage (`tools/kernel_coverage.py`) | done - 111 of 111 (`docs/kernel-coverage.md`) |
 | Native Linux build (Vulkan + SDL3) | done - builds, links, boots |
-| Native macOS arm64 build (Vulkan via MoltenVK + SDL3) | boots and draws at ~60 fps; GPU page fault at ~53 s (`HANDOFF.md`) |
+| Native macOS arm64 build (Vulkan via MoltenVK + SDL3) | boots and draws past 90 s; heavy scenes ~40 fps (`HANDOFF.md`) |
 | Windows build (D3D12 + XAudio2), cross-compiled on Linux | done - builds and links; **never run on Windows** |
 | Picture on screen | **not reached** |
 | Audio | **not reached** |
@@ -247,8 +248,8 @@ You supply the game: the USA Xbox release, as either
 
    A release run is quiet unless something fails. `XBE_PERF=1` prints a `perf:` line once a
    second (the macOS patch logs those at report level, so they show up in a Release build).
-   `XBE_MUTE=1` silences SDL audio. The process currently loses the Vulkan device about 53
-   seconds in; that is written up in `HANDOFF.md`.
+   `XBE_MUTE=1` silences SDL audio. How far a run gets, and what is still open, is in
+   `HANDOFF.md`.
 
    The same `settings.toml`, `logs/` and `hdd/` as on Linux are created beside the executable.
    HDR settings are ignored. Keyboard and pad mapping is the table above.

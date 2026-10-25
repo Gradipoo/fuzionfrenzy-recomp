@@ -45,9 +45,25 @@ Applied by `tools/apply-macos-sdk.sh` (also from the top of `CMakeLists.txt` on 
   exist on Darwin, so image handover will not work. This title is one XBE.
 - Vulkan: `VK_KHR_portability_enumeration` and `VK_INSTANCE_CREATE_ENUMERATE_PORTABILITY_BIT_KHR`,
   device extension `VK_KHR_portability_subset`, and the first supported composite alpha
-  (MoltenVK often lacks `OPAQUE`). When `VK_EXT_robustness2` is advertised, image and buffer
-  robustness are enabled. On this Mac that is image-only (`robustBufferAccess2` is not
-  advertised). It does not stop the page fault below.
+  (MoltenVK often lacks `OPAQUE`). Core `robustBufferAccess` is enabled when the device
+  advertises it. `VK_EXT_robustness2` is image-only here (`robustBufferAccess2` and
+  `nullDescriptor` are not advertised).
+- MoltenVK copies of a BC mip use the image's mip extent. Rounding that copy up to a
+  4-texel block makes the copy larger than the subresource, and MoltenVK reads off the
+  allocation. Sampler LOD is clamped to the bound view's mip count, and the LOD bias is
+  clamped to `maxSamplerLodBias`.
+- The Vulkan pipeline bakes the vertex stride. The pipeline key includes each buffer's
+  stride, so a later draw with a shorter stride does not reuse a pipeline that fetches
+  at the longer one.
+- On Apple, `Draw()` calls `Flush()` before draws 1025, 2049, and so on. One command
+  buffer that records ~8500 draws faults a GPU read even when each draw is in range.
+  The same draws split across submits do not. 1024 stays under the 8192-set segment
+  and the upload ring. Metal argument buffers stay enabled.
+- glslang's `setShiftBinding` is applied by `mapIO()`, which this path was not calling.
+  Without it, HLSL registers are the bindings (`t0` and `s0` both binding 0). The
+  present shader then fails in MoltenVK with both textures at `[[texture(0)]]`.
+  `mapIO()` puts textures at bindings 2..5 and samplers at 6..9, which is the
+  descriptor set the draws already write. The SPIR-V cache key changed with that call.
 - Cocoa: `SDL_PumpEvents` is not called from the guest input thread. AppKit aborts if it is.
   The main thread already pumps. `SDL_PeepEvents` still drains gamepad add/remove.
 - `ucontext.h` needs `_XOPEN_SOURCE` before it is included. `sysctlbyname`'s last argument is
@@ -78,11 +94,16 @@ OpenSSL 3. No LunarG SDK, so shaders go through glslang. `file` on the linked bi
 - The process starts, finds `assets/default.xbe`, and creates a MoltenVK device named
   "Apple M3". The window is borderless and covers the display.
 - The first seconds are one draw per frame at about 30 fps (a full-frame upload of about
-  1.2 MB, consistent with the intro movie). From about 13 s the title is a rendered scene:
-  hundreds to a few thousand draws per frame, about 60 fps, GPU time about 3 ms. A
-  host-resolution readback of that scene was a picture, not a black frame. The guest-sized
-  readback of the same present was all zeros; that capture path is wrong, the blit source
-  was not.
+  1.2 MB, consistent with the intro movie). From about 13 s the title is a rendered scene
+  at about 60 fps until the old fault point.
+- With the 1024-draw split, a run on 2026-10-25 stayed up through 99 s. The frame that
+  used to kill the device (~53 s, about 8500 draws) ran at about 45–50 fps. After the
+  scripted pad's 75 s play phase the draw count dropped to about 600 at 60 fps, then a
+  heavier scene held about 10000 draws at about 40 fps. No `VK_ERROR_DEVICE_LOST`, no
+  skipped draws, no pipeline failures, no upload overflow. That run is perf counters
+  only. Menus and a minigame were not confirmed from a picture. The host-target readback
+  from an earlier, pre-fix scene was a picture; the guest-sized readback of that same
+  present was all zeros.
 - The title opened its music package while this was running. The test set `XBE_MUTE=1`, so
   playback was not listened to.
 - Guest threads run. The main thread stays in the Cocoa event loop. An earlier build aborted
@@ -90,23 +111,20 @@ OpenSSL 3. No LunarG SDK, so shaders go through glslang. `file` on the linked bi
 
 ## What is broken / open
 
-- At about 53 s, every run so far, the GPU resets. MoltenVK logs
-  `VK_ERROR_OUT_OF_DEVICE_MEMORY` / lost device, and the Metal callback is
-  `kIOGPUCommandBufferCallbackErrorInnocentVictim` ("Discarded (victim of GPU error/recovery)").
-  The guilty command buffer is not in that line. A `gpuEvent` report for one of the runs says
-  `restart_reason_desc` "BIF0 page fault" (a read). After that, `vkQueueSubmit` returns
-  `VK_ERROR_DEVICE_LOST` (-4) and present time in the perf log collapses, while the guest
-  keeps scheduling frames that no longer display. Robust image access is on and did not
-  prevent it, so this is an unmapped GPU address (a freed or never-bound resource, or a
-  buffer read — `robustBufferAccess2` is not advertised on this device), not an in-range
-  image sample.
-- Menus and minigames are not confirmed. `FUZION_AUTOSTART` only switches to stick-and-A
-  play at 75 s, which is after the device is already lost. The 60 fps scene before the fault
-  is still the opening, not a confirmed minigame.
+- The heavy scene after 75 s runs at about 40 fps. Each 1024-draw `Flush()` waits for the
+  GPU, so a 10000-draw frame pays several stalls. 2745 draws in one buffer stayed alive in
+  a cap test; 8500 did not. 1024 is the split that was measured with the full draw count.
+- The present shader logged `cannot reserve 'texture' resource location at index 0` on the
+  run that survived to 99 s (both textures and both samplers assigned Metal index 0).
+  Present times stayed non-zero, and that binary still created pipelines. `mapIO()` is in
+  this revision so those bindings are distinct. Re-check that the MoltenVK line is gone
+  and that a host readback of a post-53 s frame is not a blank image.
+- Menus and a minigame are not confirmed from a picture. Draw counts move the way a title
+  does when the scripted pad leaves the opening and enters play, and the device stays up
+  through that. The window itself was not captured (screen recording is blocked here).
 - MoltenVK does not implement every feature the Linux backend uses (some BC layouts,
   `D24_UNORM_S8`, RGB32 float images, non-solid fill). The device only enables features it
-  advertises; the depth format falls through the existing loop. This run's shaders and
-  pipelines were created (no `vkCreate*` errors before the page fault).
+  advertises; the depth format falls through the existing loop.
 - 16 KB protection is coarser than the guest's 4 KB commits. A title that depends on a fault
   from a 4 KB hole inside a committed host page will not fault. This run did not hit that.
 - No HDR. No image-to-image handover (no abstract-namespace sockets, no `pidfd`). This title
@@ -151,18 +169,69 @@ Useful environment variables are the ones in the README (`XBE_PERF`, `XBE_MUTE`,
 `FUZION_AUTOSTART`). Leave `XBE_VK_DEBUG` unset unless you mean to; the README records that
 the validation layer has frozen a machine.
 
+## References for the GPU fault
+
+Ideas only. Nothing from these trees was copied. DirectXbox-Recomp is GPL-3.0. xemu and
+black-macos-runtime's NV2A renderer are GPL as well.
+
+- [phobos665/DirectXbox-Recomp](https://github.com/phobos665/DirectXbox-Recomp) and
+  [split2-recomp](https://github.com/phobos665/split2-recomp). Apple Silicon via MoltenVK
+  1.4.2. Their Vulkan notes (`docs/technical/vulkan-backend.md`, section 10) and
+  `src/d3d/rhi_vulkan.c` are the port that already ships this stack:
+  - Portability enumeration, `VK_KHR_portability_subset`, and preferring MoltenVK when
+    KosmicKrisp is also installed. This tree already does the first two.
+  - Argument buffers stay on. They bind with push descriptors, and a TimeSplitters 2 or
+    Burnout frame is a few hundred draws, so one command buffer never holds the residency
+    set that faults here. Disabling argument buffers is not their fix. Turning them off
+    here makes the present shader fail to compile.
+  - Vertex stride is set on the draw (`vkCmdBindVertexBuffers2`), so a shorter stride
+    cannot reuse a pipeline that fetches the longer one. This backend bakes stride into
+    the pipeline, so the key now includes it.
+  - Base vertex is passed through. Apple Silicon supports a non-zero base. The frames
+    that faulted here were unindexed strips with base 0.
+  - Cube images are cube-compatible 2D arrays. Volume images are `VK_IMAGE_TYPE_3D`.
+    This title bound neither on the faulting run or the surviving one.
+  - BC uploads copy the real mip extent, with the row size in blocks. Component swizzle
+    (forced alpha, A8) is on the view. Morton swizzle happens on the CPU before upload.
+    Sampler LOD bias is left at 0 because Metal has no per-sampler bias. This port clamps
+    the bias and the LOD to the view instead.
+- [elpetese/black-macos-runtime](https://github.com/elpetese/black-macos-runtime) presents
+  xemu's NV2A renderer (`RECOMP_XEMU_GPU=1`) through a Cocoa framebuffer. That path is
+  OpenGL, not MoltenVK, so it does not hit this fault. Their port notes describe boot,
+  menus, and the first mission, and the serious bugs they hit were in the recompiler and
+  the kernel, not in texture upload.
+- xemu's Vulkan renderer ([PR 1701](https://github.com/xemu-project/xemu/pull/1701)) is
+  Linux and Windows. MoltenVK is still blocked there on geometry shaders. The macOS FPS
+  regression ([issue 2506](https://github.com/xemu-project/xemu/issues/2506)) is OpenGL
+  geometry-shader cost. [CosmicSnow/xemu-for-macos](https://github.com/CosmicSnow/xemu-for-macos)
+  emulates quads, strips, line loops, and provoking vertex on the CPU and turns on the
+  portability extensions. That is a different renderer. It did not suggest the split.
+- MoltenVK reports with the same address-fault signature:
+  [#2480](https://github.com/KhronosGroup/MoltenVK/issues/2480) (UnleashedRecomp, argument-buffer
+  texture heaps and buffer-to-texture copies, M1/M2 since macOS 15.4; M3/M4 were fine, and
+  this machine is an M3), [#2453](https://github.com/KhronosGroup/MoltenVK/issues/2453) /
+  PR 2482 (a variable-length argument-buffer array of size 1; the workaround is argument
+  buffers off, which this present shader cannot use),
+  [#2705](https://github.com/KhronosGroup/MoltenVK/issues/2705) (an imported `MTLTexture`
+  left non-resident; this port does not import textures),
+  [#2278](https://github.com/KhronosGroup/MoltenVK/issues/2278) (descriptor indexing).
+  The Metal rule that matches the measurement: with argument buffers the driver does not
+  see every resource, and a command buffer that outruns its residency set page-faults a
+  read. Splitting the submits is what kept this device alive.
+
 ## Next steps
 
-1. Identify the resource behind the BIF0 page fault at ~53 s. The MoltenVK line is only the
-   innocent command buffer. A Metal GPU capture, or shader validation
-   (`MTL_SHADER_VALIDATION=1`) if the fault is actually a bounds error, should name it.
-   Suspects: a texture or buffer destroyed while the GPU still reads it, or a buffer read
-   past its allocation (`robustBufferAccess2` is unavailable here). Do not treat a guest CPU
-   fault as the first theory; this run did not log one.
-2. Once the device stays up past 75 s, rerun with `FUZION_AUTOSTART=1` and confirm menus and
-   a minigame the same way Linux did. `XBE_PERF=1` is enough to see fps and draw counts.
-3. The guest-sized frame dump (`front_NNNNN.bmp` from `XBE_VK_CAPTURE_EVERY`) came back
+1. Confirm the present shader compiles after `mapIO()` (no `cannot reserve 'texture'`
+   line) and that a host readback past 53 s is not a blank frame. Delete the bmp. Do not
+   commit it.
+2. A host-resolution picture of the post-75 s scene is what would confirm a minigame.
+   Draw counts already show that scene running with the device up. Leave
+   `FUZION_AUTOSTART_PLAY_MS` at 75000; that default is shared with Linux.
+3. If the heavy scene needs to be faster, try a split of 2048 draws. Do not jump to 4096
+   without a run: 2745 in one buffer survived a cap test of an earlier scene, and ~8500
+   did not.
+4. The guest-sized frame dump (`front_NNNNN.bmp` from `XBE_VK_CAPTURE_EVERY`) came back
    black while `front_NNNNN_host.bmp` had the picture. Fix that readback only if you need
    guest-resolution captures. Keep capture output outside the repo and delete it.
-4. Keep the patch the only SDK delta. Do not commit a new `sdk` gitlink, and do not commit
+5. Keep the patch the only SDK delta. Do not commit a new `sdk` gitlink, and do not commit
    `generated/`, `assets/`, `logs/`, or pictures.
