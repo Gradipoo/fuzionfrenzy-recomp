@@ -14,6 +14,7 @@ final class LauncherModel: ObservableObject {
     @Published var busy = false
     @Published var error: String?
     @Published var gameRunning = false
+    @Published var page: MenuPage = .play
 
     let cli = CLI.parse()
     private var bootstrapped = false
@@ -137,12 +138,30 @@ final class LauncherModel: ObservableObject {
             if logLines.count > 400 {
                 logLines.removeFirst(logLines.count - 400)
             }
+            appendBuildLog(line)
         case .stage(let name):
             stage = name
+            appendBuildLog("== \(name)")
         case .progress(let value):
             progress = value
         case .failed(let message):
             error = message
+            appendBuildLog("FAILED: \(message)")
+        }
+    }
+
+    private func appendBuildLog(_ line: String) {
+        let url = supportURL.appendingPathComponent("build.log")
+        try? FileManager.default.createDirectory(at: supportURL, withIntermediateDirectories: true)
+        if !FileManager.default.fileExists(atPath: url.path) {
+            FileManager.default.createFile(atPath: url.path, contents: nil)
+        }
+        if let handle = try? FileHandle(forWritingTo: url) {
+            handle.seekToEndOfFile()
+            if let data = (line + "\n").data(using: .utf8) {
+                handle.write(data)
+            }
+            try? handle.close()
         }
     }
 

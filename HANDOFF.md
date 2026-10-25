@@ -274,6 +274,69 @@ black-macos-runtime's NV2A renderer are GPL as well.
   SPIR-V image type. Game shaders that sample four textures at bindings 2..5 compile.
   Nothing from the GPL trees was copied into the blit.
 
+## Launcher
+
+`macos/launcher/package-dmg.sh` compiles the SwiftUI app with the Command Line Tools
+`swiftc` (arm64, macOS 14 deployment target, `-parse-as-library`) and packs
+`macos/launcher/dist/Fuzion Frenzy.app` plus
+`macos/launcher/dist/FuzionFrenzy-macos-launcher.dmg`. The script copies tracked files
+with `git ls-files`, then replaces `sdk/` with `git archive` of the pinned commit so the
+image does not carry this machine's patched worktree. `tools/apply-macos-sdk.sh` applies
+the patch at build time, and if that sdk has no `.git` it runs `git init` first. The
+packaging check refuses an xbe, an iso, recompiled guest sources, or a `FuzionFrenzy`
+binary inside the app. The product directory and `*.dmg` are gitignored, and the
+pre-commit hook refuses them. Ad-hoc `codesign` only. Notarization is future work.
+`hdiutil create -format UDZO` warns that it is deprecated and still writes the image.
+
+The app bundle id is `local.fuzionfrenzy.launcher`. The executable is
+`FuzionFrenzyLauncher`, so it does not collide with the game. There is no sandbox, so
+the chosen path is stored as a string (`launcher.json` in the support folder). A
+security-scoped bookmark is best-effort.
+
+Support folder: `~/Library/Application Support/FuzionFrenzy`, or `--support` for a test
+directory. Layout: `src/` (port copy), `src/assets` as a symlink to the chosen folder
+or to `disc/` after an iso extract, `src/out/build/macos-release/FuzionFrenzy` with
+`settings.toml` beside it, `logs/fuzion.log`, `launcher.json`, `build.log`,
+`built-version`. The game walks up from the executable to find `assets/`. Children get
+`/opt/homebrew/bin` and `/usr/local/bin` on `PATH`. `GIT_TERMINAL_PROMPT=0`.
+
+USA check: SHA-1 of `default.xbe` equals `c6fb6082900532cde5fa8dbb7de8dfa202f0fdad`,
+magic `XBEH`, and at least one other non-iso file in the folder. A lone xbe is
+rejected. An `.iso` is accepted, extracted with the bundled `tools/xiso_extract.py`,
+then checked the same way. No disc image was on this machine, so that extract was not
+run against a real iso. Prerequisites are detected and not bundled: arm64, clang, git,
+cmake >= 3.25, ninja, python3, the MoltenVK ICD, and the glslang header plus its three
+libraries. openssl is not required. Capstone is unused. The install line is
+`brew install cmake ninja glslang molten-vk vulkan-loader vulkan-headers`.
+
+Version stamp is `PORT_VERSION` (`1`) plus the short git sha. A dirty worktree appends
+`-dirty`, ignoring the `sdk` submodule line. A mismatch, a missing binary, or Rebuild
+copies the port again and deletes `generated/` and `out/` before `build.sh macos-release`.
+`config/game.toml` sets `partitions = 64`, so the compile is about 403 ninja steps.
+The first configure downloads SDL and Zydis.
+
+Settings match `settings.cpp`. Defaults follow the game: borderless, desktop size,
+render 100, fps cap 60, vsync on, anisotropic 0, aspect auto, ultrawide flag on.
+`--windowed` with a zero size writes 1280×720. Sound off is `XBE_MUTE=1`, not a toml
+key. Scripted pad is `FUZION_AUTOSTART=1` and defaults off. HDR keys are written off.
+The keyboard map is the fixed table in `src/common/input_kbm.cpp`. Controllers follow
+SDL plug order. There is no 4K movie path; `docs/movie-path.md` records 640×480 Bink.
+
+The window is a black field. The wordmark is the two words in a heavy system face,
+yellow, with a yellow rule and a plain yellow ring. Menu rows are lowercase. The
+current one is white and the rest are a dusty blue. Faint blue digits and a few
+outlined shapes sit on the right. A thin yellow bar shows compile progress. The
+selected page lives on the model (`@Published`) because the Command Line Tools
+`swiftc` has no SwiftUI macro plugin, so `@State` does not compile here.
+
+A full play through the previous launcher binary, with `--disc` pointed at this
+machine's extracted `assets/`, `--fps 30`, `--windowed`, `--mute`, and `--perf`,
+wrote `display_mode = "windowed"`, 1280×720, `fps_cap = 30`, `vsync` on. The game
+log showed those values. 122 `perf:` samples ran from 3.7 to 31.7, none over 35.
+Dropping the first eight left a mean of 26.3 and a max of 30.2. The mean sits under
+30 because the intro movie runs near 25 fps. The 30 fps cap is the one that held.
+The menu restyle does not change that writer. Linux and Windows were not rebuilt.
+
 ## Next steps
 
 1. The heavy scene is at the vsync budget most seconds. The dips are host draw past
@@ -285,4 +348,6 @@ black-macos-runtime's NV2A renderer are GPL as well.
 3. A root `powermetrics` sample would separate GPU and package power. The battery
    gauge above is the number this machine could produce without root.
 4. Keep the patch the only SDK delta. Do not commit a new `sdk` gitlink, and do not commit
-   `generated/`, `assets/`, `logs/`, or pictures.
+   `generated/`, `assets/`, `logs/`, pictures, or the launcher disk image.
+5. The launcher's iso extract has not been run against a real disc image on this machine.
+   Notarization is still future work. MoltenVK, cmake, and ninja stay detected, not bundled.

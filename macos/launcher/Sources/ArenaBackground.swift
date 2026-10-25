@@ -1,82 +1,63 @@
 import SwiftUI
 
-/// Original arena drawing: a perspective floor, a bowl, and three glowing orbs.
-/// Nothing here is taken from the disc.
+/// Black field, a faint blue digital pattern, a few outlined shapes.
+/// Drawn here. Nothing from the disc.
 struct ArenaBackground: View {
     var body: some View {
         ZStack {
-            LinearGradient(
-                colors: [Color(red: 0.02, green: 0.01, blue: 0.05), Arena.ink, Color(red: 0.02, green: 0.04, blue: 0.10)],
-                startPoint: .top,
-                endPoint: .bottom
-            )
+            Arena.black
             Canvas { context, size in
-                let vanish = CGPoint(x: size.width * 0.42, y: size.height * 0.58)
-                var grid = Path()
-                for i in 0...22 {
-                    let x = size.width * CGFloat(i) / 22
-                    grid.move(to: vanish)
-                    grid.addLine(to: CGPoint(x: x, y: size.height + 8))
+                let ink = GraphicsContext.Shading.color(Arena.hud.opacity(0.22))
+                let cols = 7
+                let originX = size.width * 0.78
+                for col in 0..<cols {
+                    var state = UInt32(90 + col * 37)
+                    var y: CGFloat = 28
+                    while y < size.height - 16 {
+                        state = state &* 1664525 &+ 1013904223
+                        let bit = (state >> 28) & 1
+                        let label = Text(bit == 0 ? "0" : "1")
+                            .font(.system(size: 11, weight: .regular, design: .monospaced))
+                            .foregroundColor(Arena.hud.opacity(0.22))
+                        context.draw(label, at: CGPoint(x: originX + CGFloat(col) * 26, y: y), anchor: .center)
+                        y += 18
+                    }
                 }
-                for i in 1...9 {
-                    let t = CGFloat(i) / 10
-                    let y = vanish.y + (size.height - vanish.y) * t * t
-                    let spread = (y - vanish.y) / max(size.height - vanish.y, 1)
-                    grid.move(to: CGPoint(x: vanish.x - size.width * spread, y: y))
-                    grid.addLine(to: CGPoint(x: vanish.x + size.width * spread, y: y))
-                }
-                context.stroke(grid, with: .color(Arena.cyan.opacity(0.16)), lineWidth: 1)
-
-                var hex = Path()
-                let center = CGPoint(x: size.width * 0.34, y: size.height * 0.42)
-                let radius: CGFloat = min(size.width, size.height) * 0.16
-                for i in 0..<6 {
-                    let angle = (CGFloat(i) / 6) * .pi * 2 - .pi / 2
-                    let point = CGPoint(x: center.x + cos(angle) * radius, y: center.y + sin(angle) * radius * 0.55)
-                    if i == 0 { hex.move(to: point) } else { hex.addLine(to: point) }
-                }
-                hex.closeSubpath()
-                context.stroke(hex, with: .color(Arena.magenta.opacity(0.55)), lineWidth: 1.5)
+                var shapes = Path()
+                let right = size.width - 48
+                shapes.addRect(CGRect(x: right - 28, y: 70, width: 34, height: 16))
+                shapes.addEllipse(in: CGRect(x: right - 18, y: 110, width: 18, height: 18))
+                shapes.addRect(CGRect(x: right - 40, y: 156, width: 22, height: 10))
+                shapes.addEllipse(in: CGRect(x: right - 8, y: 190, width: 10, height: 10))
+                shapes.addRect(CGRect(x: right - 36, y: size.height * 0.55, width: 40, height: 14))
+                context.stroke(shapes, with: ink, lineWidth: 1)
             }
-            Orb(color: Arena.cyan, diameter: 168)
-                .offset(x: -250, y: -90)
-            Orb(color: Arena.magenta, diameter: 112)
-                .offset(x: -40, y: 70)
-            Orb(color: Arena.amber, diameter: 54)
-                .offset(x: -310, y: 130)
-            Ellipse()
-                .fill(
-                    RadialGradient(
-                        colors: [Arena.magenta.opacity(0.22), .clear],
-                        center: .center,
-                        startRadius: 10,
-                        endRadius: 220
-                    )
-                )
-                .frame(width: 520, height: 160)
-                .offset(x: -80, y: 180)
-                .allowsHitTesting(false)
+            .allowsHitTesting(false)
         }
         .ignoresSafeArea()
     }
 }
 
-private struct Orb: View {
-    var color: Color
-    var diameter: CGFloat
-
+struct Wordmark: View {
     var body: some View {
-        ZStack {
-            Circle()
-                .stroke(color.opacity(0.85), lineWidth: 2.5)
-            Circle()
-                .stroke(color.opacity(0.35), lineWidth: 8)
-                .blur(radius: 6)
-            Circle()
-                .fill(color.opacity(0.10))
+        HStack(alignment: .center, spacing: 14) {
+            VStack(alignment: .leading, spacing: -2) {
+                Text("FUZION")
+                Text("FRENZY")
+            }
+            .font(.system(size: 34, weight: .black))
+            .tracking(-0.4)
+            .foregroundStyle(Arena.yellow)
+            Rectangle()
+                .fill(Arena.yellow)
+                .frame(height: 3)
+                .frame(maxWidth: .infinity)
+            ZStack {
+                Circle().stroke(Arena.yellow, lineWidth: 4)
+                Circle().fill(Arena.yellow).frame(width: 10, height: 10)
+            }
+            .frame(width: 30, height: 30)
         }
-        .frame(width: diameter, height: diameter)
-        .shadow(color: color.opacity(0.75), radius: 16)
-        .allowsHitTesting(false)
+        .frame(height: 78)
     }
 }

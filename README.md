@@ -83,7 +83,7 @@ two real XDK builds (`ret` identical in 171/171 names, `regs` in 175/175, byte l
 | Recompilation | done - 10,587 functions, 633,913 instructions, 2,165,441 of 2,368,328 code bytes (91.4%) |
 | Kernel import coverage (`tools/kernel_coverage.py`) | done - 111 of 111 (`docs/kernel-coverage.md`) |
 | Native Linux build (Vulkan + SDL3) | done - builds, links, boots |
-| Native macOS arm64 build (Vulkan via MoltenVK + SDL3) | boots, menus, and a minigame; heavy scenes ~58 fps (`HANDOFF.md`) |
+| Native macOS arm64 build (Vulkan via MoltenVK + SDL3) | boots, menus, and a minigame; heavy scenes ~58 fps. A local launcher builds the game from the player's disc (`HANDOFF.md`) |
 | Windows build (D3D12 + XAudio2), cross-compiled on Linux | done - builds and links; **never run on Windows** |
 | Picture on screen | **not reached** |
 | Audio | **not reached** |
@@ -255,6 +255,28 @@ You supply the game: the USA Xbox release, as either
    `XBE_MUTE=1` silences SDL audio. How far a run gets, and what is still open, is in
    `HANDOFF.md`.
 
+   `macos/launcher/package-dmg.sh` builds a player app and a compressed disk image at
+   `macos/launcher/dist/` (gitignored). The image holds the SwiftUI launcher and this
+   port's sources. The player points it at their own USA disc image or extracted folder.
+   The launcher checks the `default.xbe` SHA-1, copies the port into
+   `~/Library/Application Support/FuzionFrenzy`, applies the Darwin patch, and runs
+   `./build.sh macos-release` there. The game binary and `settings.toml` stay in that
+   folder and are rebuilt when the port version inside the app changes. MoltenVK, cmake,
+   and ninja are detected, with the Homebrew line above when one is missing. The first
+   compile downloads SDL. The app is ad-hoc signed. Notarization is future work.
+
+   The window is black. A yellow two-line wordmark is set in a system face, with a yellow
+   rule that ends in a plain ring. The menu is a vertical list: the current row is white
+   and the others are a dusty blue, with faint blue digits along the right edge. The
+   drawing is original. The pages are play, picture, sound, controls, and disc.
+
+   Picture writes `display_mode`, size, `fps_cap` (30 is the low-power cap, 60 is the
+   default), `vsync`, `render_percent`, `aspect_ratio`, the ultrawide flag (extra-wide
+   drawing still waits on `SIMSBO_HORPLUS`), and `anisotropic_filtering`. Sound off sets
+   `XBE_MUTE=1`. The scripted pad is off unless chosen, and then sets `FUZION_AUTOSTART=1`
+   without touching `FUZION_AUTOSTART_PLAY_MS`. System link writes `join_ip`. The keyboard
+   map is the table above and is shown as fixed. HDR stays off. Disc movies stay 640×480.
+
    The same `settings.toml`, `logs/` and `hdd/` as on Linux are created beside the executable.
    HDR settings are ignored. Keyboard and pad mapping is the table above.
 
@@ -280,7 +302,8 @@ git config core.hooksPath tools/hooks
 ```
 
 or `ln -sfn ../../tools/hooks/pre-commit .git/hooks/pre-commit`. The hook refuses `assets/`,
-`generated/`, build output, recompiled guest sources, and `*.xbe` / `*.iso` / `*.xiso` / dumps.
+`generated/`, build output, recompiled guest sources, `macos/launcher/dist/`, and
+`*.xbe` / `*.iso` / `*.xiso` / dumps / `*.dmg`.
 `core.hooksPath` replaces any other hooks in `.git/hooks`. This repository ships no other hooks.
 
 The SDK is MIT licensed; see `sdk/LICENSE` and `sdk/THIRD_PARTY.txt`. This repository adds no

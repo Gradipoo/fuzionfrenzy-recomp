@@ -1,347 +1,325 @@
 import SwiftUI
 
+enum MenuPage: String, CaseIterable {
+    case play, picture, sound, controls, disc
+}
+
 struct ContentView: View {
     @ObservedObject private var model = LauncherModel.shared
 
     var body: some View {
-        ZStack {
+        ZStack(alignment: .topLeading) {
             ArenaBackground()
-            HStack(alignment: .top, spacing: 28) {
-                brand
-                    .frame(width: 320)
-                panel
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+            VStack(alignment: .leading, spacing: 0) {
+                Wordmark()
+                    .padding(.top, 28)
+                if model.verdict?.ok == true {
+                    HStack(alignment: .top, spacing: 72) {
+                        menu
+                            .frame(width: 260)
+                        detail
+                            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+                    }
+                    .padding(.top, 36)
+                } else {
+                    welcome
+                        .padding(.top, 48)
+                }
+                Spacer(minLength: 12)
+                status
             }
-            .padding(.horizontal, 28)
-            .padding(.top, 36)
-            .padding(.bottom, 24)
+            .padding(.horizontal, 64)
+            .padding(.bottom, 28)
         }
-        .frame(minWidth: 1040, minHeight: 680)
+        .frame(minWidth: 1100, minHeight: 640)
         .preferredColorScheme(.dark)
+        .background(Arena.black)
         .onAppear {
             NSApplication.shared.activate()
             model.bootstrap()
         }
-    }
-
-    private var brand: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Spacer()
-            Text("FUZION")
-                .font(.system(size: 54, weight: .black, design: .rounded))
-                .tracking(8)
-                .foregroundStyle(Arena.text)
-            Text("ARENA")
-                .font(.system(size: 28, weight: .semibold, design: .rounded))
-                .tracking(16)
-                .foregroundStyle(Arena.cyan)
-            Text("A host for your own disc.")
-                .font(.system(size: 13, weight: .medium, design: .rounded))
-                .foregroundStyle(Arena.dim)
-                .padding(.top, 4)
-            Text(model.toolsReady ? "Tools are on this Mac." : "Some build tools are missing.")
-                .font(.system(size: 12, design: .rounded))
-                .foregroundStyle(model.toolsReady ? Arena.amber : Arena.magenta)
-                .padding(.top, 10)
-        }
-        .padding(.bottom, 12)
-    }
-
-    private var panel: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            if let verdict = model.verdict, verdict.ok {
-                settingsBody(verdict)
-            } else {
-                welcome
-            }
-        }
-        .padding(22)
-        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-        .background(
-            RoundedRectangle(cornerRadius: 22)
-                .fill(Color.black.opacity(0.55))
-        )
-        .overlay(
-            RoundedRectangle(cornerRadius: 22)
-                .stroke(
-                    LinearGradient(colors: [Arena.cyan.opacity(0.85), Arena.magenta.opacity(0.75)], startPoint: .topLeading, endPoint: .bottomTrailing),
-                    lineWidth: 1
-                )
-        )
-    }
-
-    private var welcome: some View {
-        VStack(alignment: .leading, spacing: 16) {
-            Text("BRING YOUR DISC")
-                .font(.system(size: 12, weight: .bold, design: .rounded))
-                .tracking(3)
-                .foregroundStyle(Arena.cyan)
-            Text("This app does not include the game. Point it at your own USA disc image, or at a folder where that disc is already extracted.")
-                .font(.system(size: 15, weight: .regular, design: .rounded))
-                .foregroundStyle(Arena.text)
-                .fixedSize(horizontal: false, vertical: true)
-            Text("An .iso works. So does a folder that contains default.xbe together with the rest of the disc. The executable on its own is not enough.")
-                .font(.system(size: 13))
-                .foregroundStyle(Arena.dim)
-                .fixedSize(horizontal: false, vertical: true)
-            if let error = model.error {
-                Text(error)
-                    .font(.system(size: 13, weight: .medium, design: .rounded))
-                    .foregroundStyle(Arena.magenta)
-                    .textSelection(.enabled)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
-            NeonButton(title: "Choose your disc", prominent: true) { model.browse() }
-                .frame(width: 260)
-            if !model.toolsReady {
-                tools
-            }
-            Spacer()
-        }
-    }
-
-    private func settingsBody(_ verdict: DiscCheck.Verdict) -> some View {
-        VStack(alignment: .leading, spacing: 10) {
-            HStack(alignment: .firstTextBaseline) {
-                VStack(alignment: .leading, spacing: 4) {
-                    Text(verdict.confirmed ? "USA RELEASE" : "DISC IMAGE")
-                        .font(.system(size: 12, weight: .bold, design: .rounded))
-                        .tracking(3)
-                        .foregroundStyle(verdict.confirmed ? Arena.cyan : Arena.amber)
-                    Text(verdict.detail)
-                        .font(.system(size: 12))
-                        .foregroundStyle(Arena.dim)
-                        .textSelection(.enabled)
-                    if let path = modelPath(verdict) {
-                        Text(model.pretty(path: path))
-                            .font(.system(size: 11, design: .monospaced))
-                            .foregroundStyle(Arena.dim)
-                            .lineLimit(1)
-                            .truncationMode(.middle)
-                    }
-                }
-                Spacer()
-                Button("Change disc") { model.browse() }
-                    .buttonStyle(.plain)
-                    .foregroundStyle(Arena.cyan)
-                    .disabled(model.busy)
-            }
-            ScrollView {
-                VStack(alignment: .leading, spacing: 4) {
-                    section("Picture")
-                    SettingRow(label: "Window", hint: "Borderless follows the display.") {
-                        Picker("Window", selection: $model.settings.displayMode) {
-                            ForEach(Array(zip(GameSettings.modes, GameSettings.modeNames)), id: \.0) { mode, name in
-                                Text(name).tag(mode)
-                            }
-                        }
-                        .labelsHidden()
-                        .pickerStyle(.menu)
-                    }
-                    SettingRow(label: "Resolution", hint: model.settings.displayMode == "borderless" ? "Used when you leave borderless." : "Windowed and fullscreen size.") {
-                        Picker("Resolution", selection: resolutionTag) {
-                            ForEach(GameSettings.resolutions, id: \.2) { width, height, name in
-                                Text(name).tag("\(width)x\(height)")
-                            }
-                        }
-                        .labelsHidden()
-                        .pickerStyle(.menu)
-                        .disabled(model.settings.displayMode == "borderless")
-                    }
-                    SettingRow(label: "Frame cap", hint: "30 keeps the chip cooler. 60 is the game's pace.") {
-                        Picker("Frame cap", selection: $model.settings.fpsCap) {
-                            ForEach(GameSettings.caps, id: \.0) { cap, name in
-                                Text(name).tag(cap)
-                            }
-                        }
-                        .labelsHidden()
-                        .pickerStyle(.menu)
-                    }
-                    SettingRow(label: "VSync") {
-                        Toggle("VSync", isOn: $model.settings.vsync).labelsHidden().tint(Arena.cyan)
-                    }
-                    SettingRow(label: "Render scale") {
-                        Picker("Render scale", selection: $model.settings.renderPercent) {
-                            ForEach(GameSettings.renderSteps, id: \.self) { step in
-                                Text("\(step)%").tag(step)
-                            }
-                        }
-                        .labelsHidden()
-                        .pickerStyle(.menu)
-                    }
-                    SettingRow(label: "Aspect") {
-                        Picker("Aspect", selection: $model.settings.aspect) {
-                            ForEach(GameSettings.aspects, id: \.self) { Text($0).tag($0) }
-                        }
-                        .labelsHidden()
-                        .pickerStyle(.menu)
-                    }
-                    SettingRow(label: "Ultrawide flag", hint: "Stored for the game. Extra-wide drawing stays off unless SIMSBO_HORPLUS is set.") {
-                        Toggle("Ultrawide", isOn: $model.settings.ultrawide).labelsHidden().tint(Arena.cyan)
-                    }
-                    SettingRow(label: "Anisotropic") {
-                        Picker("Anisotropic", selection: $model.settings.aniso) {
-                            ForEach(GameSettings.anisoValues, id: \.self) { value in
-                                Text(value == 0 ? "As the game asks" : "\(value)×").tag(value)
-                            }
-                        }
-                        .labelsHidden()
-                        .pickerStyle(.menu)
-                    }
-
-                    section("Sound and play")
-                    SettingRow(label: "Sound", hint: "Off silences the game. There is no volume slider in this port.") {
-                        Toggle("Sound", isOn: $model.settings.sound).labelsHidden().tint(Arena.cyan)
-                    }
-                    SettingRow(label: "Scripted pad", hint: "Off for a person. On, the port's self-test presses Start, Up, and A through the intro, then walks. You can skip the intro yourself with Start or Enter.") {
-                        Toggle("Scripted pad", isOn: $model.settings.scriptedPad).labelsHidden().tint(Arena.cyan)
-                    }
-                    SettingRow(label: "System-link host", hint: "Optional address for co-op. Empty stays on the local network.") {
-                        TextField("host", text: $model.settings.joinIP)
-                            .textFieldStyle(.roundedBorder)
-                    }
-
-                    section("Controls")
-                    Text("The game reads an Xbox pad. A controller is used in the order it was plugged in. This port has no button remapper. The keyboard is fixed:")
-                        .font(.system(size: 12))
-                        .foregroundStyle(Arena.dim)
-                        .fixedSize(horizontal: false, vertical: true)
-                        .padding(.bottom, 4)
-                    LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible())], alignment: .leading, spacing: 4) {
-                        ForEach(KeyboardMap.rows, id: \.0) { key, pad in
-                            Text("\(key)  →  \(pad)")
-                                .font(.system(size: 11, design: .monospaced))
-                                .foregroundStyle(Arena.text.opacity(0.85))
-                        }
-                    }
-
-                    section("Not on this Mac")
-                    Text("HDR is a Windows setting and stays off here. The disc's movies are 640×480. This port has no 4K movie option.")
-                        .font(.system(size: 12))
-                        .foregroundStyle(Arena.dim)
-                        .fixedSize(horizontal: false, vertical: true)
-
-                    if !model.toolsReady {
-                        section("Tools")
-                        tools
-                    }
-                }
-                .padding(.trailing, 8)
-            }
-            if model.busy || !model.logLines.isEmpty {
-                log
-            }
-            if let error = model.error, model.verdict?.ok == true {
-                Text(error)
-                    .font(.system(size: 12, weight: .medium))
-                    .foregroundStyle(Arena.magenta)
-                    .textSelection(.enabled)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
-            HStack(spacing: 10) {
-                NeonButton(title: model.gameRunning ? "Running" : (model.busy ? model.stage : "Play"), prominent: true, enabled: model.canPlay) {
-                    model.play()
-                }
-                NeonButton(title: "Rebuild", enabled: model.canPlay) { model.rebuild() }
-                    .frame(width: 140)
-            }
-            Text(model.busy ? model.stage : (model.gameRunning ? "The game is open. Settings were written beside it." : "Play compiles on this Mac the first time, then launches."))
-                .font(.system(size: 11))
-                .foregroundStyle(Arena.dim)
-        }
         .onChange(of: model.settings) { _, _ in model.persist() }
     }
 
-    private var resolutionTag: Binding<String> {
-        Binding(
-            get: { "\(model.settings.width)x\(model.settings.height)" },
-            set: { tag in
-                let parts = tag.split(separator: "x")
-                if parts.count == 2, let w = Int(parts[0]), let h = Int(parts[1]) {
-                    model.settings.width = w
-                    model.settings.height = h
+    private var menu: some View {
+        VStack(alignment: .leading, spacing: 2) {
+            ForEach(MenuPage.allCases, id: \.self) { item in
+                MenuLink(title: item.rawValue, active: model.page == item) { model.page = item }
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var detail: some View {
+        switch model.page {
+        case .play: playPage
+        case .picture: picturePage
+        case .sound: soundPage
+        case .controls: controlsPage
+        case .disc: discPage
+        }
+    }
+
+    private var welcome: some View {
+        VStack(alignment: .leading, spacing: 18) {
+            MenuLink(title: "choose disc", active: true) { model.browse() }
+            Text("Point this at your own USA disc image, or at a folder that already holds the extracted disc. The executable on its own is not enough. This app does not include the game.")
+                .font(.system(size: 15))
+                .foregroundStyle(Arena.ghost.opacity(0.9))
+                .frame(maxWidth: 520, alignment: .leading)
+                .fixedSize(horizontal: false, vertical: true)
+            if let error = model.error {
+                Text(error)
+                    .font(.system(size: 15))
+                    .foregroundStyle(Arena.yellow)
+                    .textSelection(.enabled)
+                    .frame(maxWidth: 560, alignment: .leading)
+            }
+            if !model.toolsReady {
+                tools
+                    .padding(.top, 8)
+            }
+        }
+    }
+
+    private var playPage: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            if let verdict = model.verdict {
+                Text(verdict.confirmed ? "usa release" : "disc image")
+                    .font(.system(size: 15))
+                    .foregroundStyle(Arena.ghost)
+                Text(verdict.detail)
+                    .font(.system(size: 13))
+                    .foregroundStyle(Arena.ghost.opacity(0.75))
+                    .textSelection(.enabled)
+                    .frame(maxWidth: 460, alignment: .leading)
+            }
+            MenuLink(
+                title: model.gameRunning ? "running" : (model.busy ? model.stage.lowercased() : "play"),
+                active: true,
+                enabled: model.canPlay
+            ) { model.play() }
+            .padding(.top, 8)
+            Text(model.gameRunning
+                 ? "The game is open. Settings were written beside it."
+                 : "The first play compiles from your disc on this Mac. Later plays reuse that build.")
+                .font(.system(size: 13))
+                .foregroundStyle(Arena.ghost.opacity(0.75))
+                .frame(maxWidth: 460, alignment: .leading)
+        }
+    }
+
+    private var picturePage: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 0) {
+                GroupLabel(title: "window")
+                ForEach(Array(zip(GameSettings.modes, GameSettings.modeNames)), id: \.0) { mode, name in
+                    Choice(title: name.lowercased(), on: model.settings.displayMode == mode) {
+                        model.settings.displayMode = mode
+                    }
+                }
+                Text(model.settings.displayMode == "borderless"
+                     ? "Borderless follows the display. The size below is kept for the other modes."
+                     : "Windowed and fullscreen use the size below.")
+                    .font(.system(size: 12))
+                    .foregroundStyle(Arena.ghost.opacity(0.65))
+                    .padding(.top, 4)
+
+                GroupLabel(title: "size")
+                ForEach(GameSettings.resolutions, id: \.2) { width, height, name in
+                    Choice(title: name.lowercased(), on: model.settings.width == width && model.settings.height == height) {
+                        model.settings.width = width
+                        model.settings.height = height
+                    }
+                }
+
+                GroupLabel(title: "frame cap")
+                ForEach(GameSettings.caps, id: \.0) { cap, name in
+                    Choice(title: name.lowercased(), on: model.settings.fpsCap == cap) {
+                        model.settings.fpsCap = cap
+                    }
+                }
+                Text("30 is the cooler cap. 60 is the game's pace.")
+                    .font(.system(size: 12))
+                    .foregroundStyle(Arena.ghost.opacity(0.65))
+
+                GroupLabel(title: "vsync")
+                Choice(title: "on", on: model.settings.vsync) { model.settings.vsync = true }
+                Choice(title: "off", on: !model.settings.vsync) { model.settings.vsync = false }
+
+                GroupLabel(title: "render scale")
+                ForEach(GameSettings.renderSteps, id: \.self) { step in
+                    Choice(title: "\(step)%", on: model.settings.renderPercent == step) {
+                        model.settings.renderPercent = step
+                    }
+                }
+
+                GroupLabel(title: "aspect")
+                ForEach(GameSettings.aspects, id: \.self) { aspect in
+                    Choice(title: aspect, on: model.settings.aspect == aspect) {
+                        model.settings.aspect = aspect
+                    }
+                }
+
+                GroupLabel(title: "ultrawide flag")
+                Choice(title: "on", on: model.settings.ultrawide) { model.settings.ultrawide = true }
+                Choice(title: "off", on: !model.settings.ultrawide) { model.settings.ultrawide = false }
+                Text("Stored for the game. Extra-wide drawing stays off unless SIMSBO_HORPLUS is set.")
+                    .font(.system(size: 12))
+                    .foregroundStyle(Arena.ghost.opacity(0.65))
+
+                GroupLabel(title: "anisotropic")
+                ForEach(GameSettings.anisoValues, id: \.self) { value in
+                    Choice(title: value == 0 ? "as the game asks" : "\(value)x", on: model.settings.aniso == value) {
+                        model.settings.aniso = value
+                    }
+                }
+
+                GroupLabel(title: "not on this mac")
+                Text("HDR is a Windows setting and stays off. The disc's movies are 640×480. There is no 4K movie option.")
+                    .font(.system(size: 13))
+                    .foregroundStyle(Arena.ghost.opacity(0.8))
+                    .frame(maxWidth: 420, alignment: .leading)
+                    .padding(.bottom, 12)
+            }
+        }
+    }
+
+    private var soundPage: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            GroupLabel(title: "sound")
+            Choice(title: "on", on: model.settings.sound) { model.settings.sound = true }
+            Choice(title: "off", on: !model.settings.sound) { model.settings.sound = false }
+            Text("Off silences the game. This port has no volume slider.")
+                .font(.system(size: 12))
+                .foregroundStyle(Arena.ghost.opacity(0.65))
+
+            GroupLabel(title: "scripted pad")
+            Choice(title: "off", on: !model.settings.scriptedPad) { model.settings.scriptedPad = false }
+            Choice(title: "on", on: model.settings.scriptedPad) { model.settings.scriptedPad = true }
+            Text("Leave this off to play. On, the port's self-test drives Start, Up, and A through the intro, then walks. You skip the intro yourself with Start or Enter.")
+                .font(.system(size: 12))
+                .foregroundStyle(Arena.ghost.opacity(0.65))
+                .frame(maxWidth: 440, alignment: .leading)
+                .padding(.top, 4)
+
+            GroupLabel(title: "system-link host")
+            TextField("address", text: $model.settings.joinIP)
+                .textFieldStyle(.plain)
+                .font(.system(size: 18))
+                .foregroundStyle(Arena.white)
+                .frame(maxWidth: 280)
+                .padding(.vertical, 4)
+                .overlay(alignment: .bottom) { Rectangle().fill(Arena.yellow).frame(height: 1) }
+            Text("Empty stays on the local network.")
+                .font(.system(size: 12))
+                .foregroundStyle(Arena.ghost.opacity(0.65))
+                .padding(.top, 6)
+        }
+    }
+
+    private var controlsPage: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text("A controller is an Xbox pad, in the order controllers are plugged in. This port has no button remapper. The keyboard is fixed.")
+                .font(.system(size: 14))
+                .foregroundStyle(Arena.ghost)
+                .frame(maxWidth: 460, alignment: .leading)
+            LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible())], alignment: .leading, spacing: 6) {
+                ForEach(KeyboardMap.rows, id: \.0) { key, pad in
+                    Text("\(key)   \(pad)")
+                        .font(.system(size: 13, design: .monospaced))
+                        .foregroundStyle(Arena.ghost.opacity(0.9))
                 }
             }
-        )
+            .padding(.top, 8)
+        }
     }
 
-    private func modelPath(_ verdict: DiscCheck.Verdict) -> String? {
-        verdict.iso?.path ?? verdict.folder?.path
-    }
-
-    private func section(_ title: String) -> some View {
-        Text(title.uppercased())
-            .font(.system(size: 11, weight: .bold, design: .rounded))
-            .tracking(2)
-            .foregroundStyle(Arena.cyan)
-            .padding(.top, 10)
+    private var discPage: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            if let path = model.verdict?.iso?.path ?? model.verdict?.folder?.path {
+                Text(model.pretty(path: path))
+                    .font(.system(size: 13, design: .monospaced))
+                    .foregroundStyle(Arena.ghost)
+                    .lineLimit(2)
+                    .truncationMode(.middle)
+                    .frame(maxWidth: 460, alignment: .leading)
+            }
+            MenuLink(title: "change disc", active: true, enabled: !model.busy) { model.browse() }
+            MenuLink(title: "rebuild", active: false, enabled: model.canPlay) { model.rebuild() }
+            if !model.toolsReady {
+                tools.padding(.top, 12)
+            } else {
+                Text("Tools are on this Mac.")
+                    .font(.system(size: 13))
+                    .foregroundStyle(Arena.ghost.opacity(0.7))
+                    .padding(.top, 8)
+            }
+        }
     }
 
     private var tools: some View {
-        VStack(alignment: .leading, spacing: 6) {
+        VStack(alignment: .leading, spacing: 4) {
             ForEach(model.prereqs) { item in
                 HStack(alignment: .firstTextBaseline, spacing: 8) {
-                    Text(item.ok ? "●" : "○")
-                        .foregroundStyle(item.ok ? Arena.cyan : Arena.magenta)
+                    Circle()
+                        .fill(item.ok ? Arena.ghost.opacity(0.4) : Arena.yellow)
+                        .frame(width: 6, height: 6)
                     VStack(alignment: .leading, spacing: 1) {
-                        Text(item.title)
-                            .font(.system(size: 12, weight: .semibold, design: .rounded))
-                            .foregroundStyle(Arena.text)
+                        Text(item.title.lowercased())
+                            .font(.system(size: 14))
+                            .foregroundStyle(item.ok ? Arena.ghost : Arena.white)
                         Text(item.detail)
                             .font(.system(size: 11))
-                            .foregroundStyle(Arena.dim)
+                            .foregroundStyle(Arena.ghost.opacity(0.7))
                             .textSelection(.enabled)
                     }
                 }
             }
-            Button("Copy install commands") { model.copyInstallCommands() }
-                .buttonStyle(.plain)
-                .foregroundStyle(Arena.amber)
+            MenuLink(title: "copy install commands", active: false) { model.copyInstallCommands() }
                 .padding(.top, 4)
         }
     }
 
-    private var log: some View {
+    private var status: some View {
         VStack(alignment: .leading, spacing: 6) {
-            HStack {
-                Text(model.stage.uppercased())
-                    .font(.system(size: 11, weight: .bold, design: .rounded))
-                    .tracking(1.5)
-                    .foregroundStyle(Arena.amber)
-                Spacer()
-                if let progress = model.progress {
-                    Text("\(Int(progress * 100))%")
-                        .font(.system(size: 11, design: .monospaced))
-                        .foregroundStyle(Arena.dim)
-                }
+            if let error = model.error, model.verdict?.ok == true {
+                Text(error)
+                    .font(.system(size: 13))
+                    .foregroundStyle(Arena.yellow)
+                    .textSelection(.enabled)
+                    .lineLimit(4)
             }
-            if let progress = model.progress {
-                ProgressView(value: progress).tint(Arena.cyan)
-            } else if model.busy {
-                ProgressView().controlSize(.small).tint(Arena.cyan)
-            }
-            ScrollViewReader { proxy in
-                ScrollView {
-                    LazyVStack(alignment: .leading, spacing: 1) {
-                        ForEach(Array(model.logLines.enumerated()), id: \.offset) { index, line in
-                            Text(line)
-                                .font(.system(size: 10, design: .monospaced))
-                                .foregroundStyle(Arena.text.opacity(0.8))
-                                .frame(maxWidth: .infinity, alignment: .leading)
-                                .id(index)
+            if model.busy || !model.logLines.isEmpty {
+                HStack(spacing: 10) {
+                    Text(model.stage.lowercased())
+                        .font(.system(size: 12))
+                        .foregroundStyle(Arena.ghost)
+                    GeometryReader { geo in
+                        ZStack(alignment: .leading) {
+                            Rectangle().fill(Arena.ghost.opacity(0.25))
+                            Rectangle()
+                                .fill(Arena.yellow)
+                                .frame(width: geo.size.width * CGFloat(model.progress ?? (model.busy ? 0.08 : 0)))
                         }
                     }
-                }
-                .frame(height: 120)
-                .onChange(of: model.logLines.count) { _, _ in
-                    if let last = model.logLines.indices.last {
-                        proxy.scrollTo(last, anchor: .bottom)
+                    .frame(height: 3)
+                    if let progress = model.progress {
+                        Text("\(Int(progress * 100))%")
+                            .font(.system(size: 12, design: .monospaced))
+                            .foregroundStyle(Arena.ghost)
                     }
+                }
+                .frame(height: 16)
+                if model.busy {
+                    Text(model.logLines.suffix(3).joined(separator: "   "))
+                        .font(.system(size: 11, design: .monospaced))
+                        .foregroundStyle(Arena.ghost.opacity(0.65))
+                        .lineLimit(2)
+                        .frame(maxWidth: .infinity, alignment: .leading)
                 }
             }
         }
-        .padding(8)
-        .background(RoundedRectangle(cornerRadius: 8).fill(Color.black.opacity(0.45)))
     }
 }
 
