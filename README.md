@@ -20,7 +20,7 @@ floor shades flat white - a known, unfixed defect recorded in `docs/render-defec
 On Apple Silicon the same tree builds natively (arm64, MoltenVK, no Rosetta). It boots, opens a
 borderless window, and draws past the point where MoltenVK used to lose the device (about 53
 seconds, one command buffer holding ~8500 draws). A scripted run stayed up through 99 seconds,
-including the pad's play phase and a heavier ~10000-draw scene at about 40 fps. The window blit
+including the pad's play phase and a heavier ~12000-draw scene at about 33 fps. The window blit
 is a single texture; MoltenVK would not compile the two-texture present shader. Menus and a
 minigame are not confirmed from a picture. `HANDOFF.md` has the run notes and the ports that
 were read for the fault.
@@ -81,7 +81,7 @@ two real XDK builds (`ret` identical in 171/171 names, `regs` in 175/175, byte l
 | Recompilation | done - 10,587 functions, 633,913 instructions, 2,165,441 of 2,368,328 code bytes (91.4%) |
 | Kernel import coverage (`tools/kernel_coverage.py`) | done - 111 of 111 (`docs/kernel-coverage.md`) |
 | Native Linux build (Vulkan + SDL3) | done - builds, links, boots |
-| Native macOS arm64 build (Vulkan via MoltenVK + SDL3) | boots and draws past 90 s; heavy scenes ~40 fps (`HANDOFF.md`) |
+| Native macOS arm64 build (Vulkan via MoltenVK + SDL3) | boots and draws past 100 s; heavy scenes ~33 fps (`HANDOFF.md`) |
 | Windows build (D3D12 + XAudio2), cross-compiled on Linux | done - builds and links; **never run on Windows** |
 | Picture on screen | **not reached** |
 | Audio | **not reached** |
