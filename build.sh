@@ -1,11 +1,16 @@
 #!/usr/bin/env bash
-# Fuzion Frenzy - native Linux build (Vulkan + SDL3, no Wine).
-# Mirrors build.bat: configure, build xbe_symbols and write config/game.toml
-# from assets/default.xbe on first run, then build the game.
+# Fuzion Frenzy - native build (Vulkan + SDL3).
+# Linux is the default preset there; macOS (Apple Silicon) defaults to
+# macos-release. Mirrors build.bat: configure, then build the game.
+# config/game.toml is already in the tree for this XBE.
 set -euo pipefail
 
-PRESET="${1:-linux-release}"
 cd "$(dirname "$0")"
+if [ "$(uname -s)" = "Darwin" ]; then
+    PRESET="${1:-macos-release}"
+else
+    PRESET="${1:-linux-release}"
+fi
 
 GAME_XBE="default.xbe"
 GAME_EXE="FuzionFrenzy"
@@ -35,6 +40,13 @@ if [ -n "$MISSING" ]; then
     exit 1
 fi
 clang++ --version | head -n 1
+if [ "$(uname -s)" = "Darwin" ]; then
+    if [ "$(uname -m)" != "arm64" ]; then
+        echo "  macOS build is native arm64. This machine is $(uname -m)." >&2
+        exit 1
+    fi
+    ./tools/apply-macos-sdk.sh
+fi
 
 # symbols
 echo "[2/3] XDK symbols"

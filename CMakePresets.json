@@ -48,6 +48,25 @@
          "inherits": "linux-base",
          "cacheVariables": {"CMAKE_BUILD_TYPE": "Release", "XBE_HOST_TOOLS_ONLY": "ON"}},
         {
+            "name": "macos-base",
+            "hidden": true,
+            "generator": "Ninja",
+            "binaryDir": "${sourceDir}/out/build/${presetName}",
+            "cacheVariables": {
+                "CMAKE_C_COMPILER": "clang",
+                "CMAKE_CXX_COMPILER": "clang++",
+                "CMAKE_OSX_ARCHITECTURES": "arm64",
+                "CMAKE_PREFIX_PATH": "/opt/homebrew"
+            },
+            "condition": {"type": "equals", "lhs": "${hostSystemName}", "rhs": "Darwin"}
+        },
+        {"name": "macos-debug", "displayName": "macOS arm64 Debug", "inherits": "macos-base",
+         "cacheVariables": {"CMAKE_BUILD_TYPE": "Debug"}},
+        {"name": "macos-release", "displayName": "macOS arm64 Release", "inherits": "macos-base",
+         "cacheVariables": {"CMAKE_BUILD_TYPE": "Release"}},
+        {"name": "macos-relwithdebinfo", "displayName": "macOS arm64 RelWithDebInfo", "inherits": "macos-base",
+         "cacheVariables": {"CMAKE_BUILD_TYPE": "RelWithDebInfo"}},
+        {
             "name": "windows-cross",
             "displayName": "Windows x64 Release, cross-compiled (clang-cl + lld-link + xwin; cmake/windows-cross.cmake)",
             "generator": "Ninja",
@@ -69,6 +88,9 @@
         {"name": "linux-relwithdebinfo", "configurePreset": "linux-relwithdebinfo"},
         {"name": "linux-verbose", "configurePreset": "linux-verbose"},
         {"name": "host-tools", "configurePreset": "host-tools"},
-        {"name": "windows-cross", "configurePreset": "windows-cross"}
+        {"name": "windows-cross", "configurePreset": "windows-cross"},
+        {"name": "macos-debug", "configurePreset": "macos-debug"},
+        {"name": "macos-release", "configurePreset": "macos-release"},
+        {"name": "macos-relwithdebinfo", "configurePreset": "macos-relwithdebinfo"}
     ]
 }

@@ -15,7 +15,12 @@
 /assets/
 /assets/movies_4k/
 *.iso
+*.xiso
 *.xbe
+*.dmp
+*.d3dcap
+*.dSYM
+*.metallib
 
 # downloaded media tools; tools/upscale_movies.py itself stays tracked
 /tools/bin/
