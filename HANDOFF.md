@@ -55,10 +55,23 @@ Applied by `tools/apply-macos-sdk.sh` (also from the top of `CMakeLists.txt` on 
 - The Vulkan pipeline bakes the vertex stride. The pipeline key includes each buffer's
   stride, so a later draw with a shorter stride does not reuse a pipeline that fetches
   at the longer one.
-- On Apple, `Draw()` calls `Flush()` before draws 1025, 2049, and so on. One command
+- On Apple, `Draw()` calls `Flush()` before draws 4097, 8193, and so on. One command
   buffer that records ~8500 draws faults a GPU read even when each draw is in range.
-  The same draws split across submits do not. 1024 stays under the 8192-set segment
-  and the upload ring. Metal argument buffers stay enabled.
+  The same draws split across submits do not. 4096 stays under the 8192-set segment
+  and the upload ring (a heavy frame uploads about 2.5–3.2 MB). The flush waits.
+  Handing that chunk to another command buffer without a CPU fence SIGSEGV'd in
+  MoltenVK image-view encode (`MVKImageView` plane pointer `0xaa0003f3aa0103f4`,
+  the same address on every run, from `vkQueueSubmit`). Metal argument buffers stay
+  enabled.
+- On Apple, `Pace()` sleeps the whole frame-cap wait. The non-Apple branch still
+  sleeps in 1 ms steps and yield-spins the last 2 ms. `KeStallExecutionProcessor`
+  sleeps the requested microseconds on Apple; the non-Apple branch still yield-spins.
+  A zero stall stays a no-op. `KeDelayExecutionThread` already slept on every platform.
+  `NtYieldExecution` is still a yield. Present is FIFO when vsync is on. The overlay
+  frame-cap list already includes 30 fps.
+- The swapchain requests `TRANSFER_SRC` when the device advertises it, so a present
+  image can be copied out. The copy runs only when `XBE_CAPTURE_DIR` is set and
+  `XBE_VK_CAPTURE_EVERY` is a non-zero interval. Those lines live in the Darwin patch.
 - glslang's `setShiftBinding` is applied by `mapIO()`, which this path was not calling.
   Without it, HLSL registers are the bindings (`t0` and `s0` both binding 0).
   `mapIO()` puts textures at bindings 2..5 and samplers at 6..9, which is the
@@ -101,25 +114,29 @@ OpenSSL 3. No LunarG SDK, so shaders go through glslang. `file` on the linked bi
 - The first seconds are one draw per frame at about 30 fps (a full-frame upload of about
   1.2 MB, consistent with the intro movie). From about 13 s the title is a rendered scene
   at about 60 fps until the old fault point.
-- With the 1024-draw split, a run on 2026-10-25 stayed up through 99 s. The frame that
-  used to kill the device (~53 s, about 8500 draws) ran at about 45–50 fps. After the
-  scripted pad's 75 s play phase the draw count dropped to about 600 at 60 fps, then a
-  heavier scene held about 10000 draws at about 40 fps. No `VK_ERROR_DEVICE_LOST`, no
-  skipped draws, no pipeline failures, no upload overflow.
-- A later run with `mapIO()` applied stayed up through at least 73 s. The ~53 s frame
-  dropped to about 48 fps and was back at 60 fps by 58 s. Render-target readbacks at
-  presents 1500 and 3000 were not blank, at host size and at guest size (present 0 is
-  still all zeros). Those files were deleted.
 - The one-texture present shader, with the pipeline cache removed first, logged no
-  `cannot reserve` line and no `lut`. At about 53 s the frame was about 9100 draws
-  at about 40 fps and the device stayed up. By 58 s it was back at 60 fps. From the
-  75 s play phase a heavier scene held about 11800 draws at about 33 fps through at
-  least 107 s. Zero skipped draws, zero pipeline misses, no device loss. A
-  render-target readback at present 2800 (just past that 53 s frame) was not blank
-  at guest size or host size. Present 0 was all zeros. Those files were deleted.
-  The swapchain itself was not read back.
-- Menus and a minigame were not confirmed from a picture. Draw counts move the way a
-  title does when the scripted pad leaves the opening and enters play.
+  `cannot reserve` line and no `lut`. An earlier 1024-draw blocking split kept the
+  device up and held the post-75 s scene at about 33 fps (about 11800 draws), because
+  each flush waited. Render-target readbacks past the old fault were not blank.
+  Present 0 is all zeros. Those files were deleted.
+- The split is now 4096 draws, still a blocking `Flush()`. The binary that ships does
+  not allocate the extra command-buffer rings tried for a pipelined submit. A run on
+  2026-10-25 with `FUZION_AUTOSTART=1` and no capture stayed up through 190 s. The old
+  fault frame (~53 s, about 9000 draws) was 60 fps. From 75 s through 190 s the mean
+  was 58.2 fps over 125 one-second samples (median about 59), at roughly 600–12800
+  draws. Host draw in that window averaged 13.9 ms. Fifteen of those seconds dipped
+  under 55 fps, the lowest 47.9, when host draw reached about 20 ms. Zero skipped
+  draws, zero pipeline misses, no upload overflow, no device loss, no signal 11.
+- Swapchain readbacks from the same 4096-draw wait, with the scripted pad on, were
+  looked at and then deleted. Present 0 was black. Later presents showed a
+  character-select screen with six portraits and a start prompt, a main menu whose
+  list includes a minigames entry, a character in blue standing on a platform under
+  a get-ready prompt, that character mid-jump in a bright arena of floating blocks
+  with a score and a timer counting, a round-over results screen with a score, a
+  time bonus, and a rank, then a return toward character select. The guest front
+  buffer matched the swapchain. Nothing blocked menus or a minigame once
+  `FUZION_AUTOSTART` was set. Unset, the intro movie does not skip, and the pad
+  hook is a no-op. `FUZION_AUTOSTART_PLAY_MS` is still 75000.
 - The title opened its music package while this was running. The test set `XBE_MUTE=1`, so
   playback was not listened to.
 - Guest threads run. The main thread stays in the Cocoa event loop. An earlier build aborted
@@ -127,17 +144,24 @@ OpenSSL 3. No LunarG SDK, so shaders go through glslang. `file` on the linked bi
 
 ## What is broken / open
 
-- The heavy scene after 75 s runs at about 33 fps (about 11800 draws). Each 1024-draw
-  `Flush()` waits for the GPU, so that frame pays several stalls. 2745 draws in one
-  buffer stayed alive in a cap test; 8500 did not. 1024 is the split that was measured
-  with the full draw count.
-- The window blit and the render target are different images. The readbacks above are
-  the render target. The swapchain itself was not read back, and screen recording is
-  blocked here.
-- Menus and a minigame are not confirmed from a picture. Draw counts through the 75 s
-  play phase and the following heavy scene are what show the title moving on. A couple
-  of shorter runs logged `Exit (0)` when the test shell was torn down: SDL turns that
-  signal into a quit. A process started in its own session kept drawing past 107 s.
+- The heavy scene sits on the vsync budget most seconds and still misses a few when
+  a second of ~12000 draws takes about 20 ms of host draw. The 4096-draw flush waits,
+  so the title thread spends several milliseconds blocked on that submit inside a
+  heavy frame. 2745 draws in one buffer stayed alive; ~8500 did not.
+- Non-blocking mid-frame submits are not safe on MoltenVK 1.4.2. Rotating the three
+  frame slots, and a separate command-buffer ring plus a timeline semaphore, both
+  SIGSEGV'd at ~53 s in image-view encode, at the same address. The shipped path
+  waits on each 4096-draw flush. Do not retry either handoff on this driver.
+- `powermetrics` must be root, and `sudo -n` is not available, so there is no package
+  or GPU watt sample. On battery, `ioreg` AppleSmartBattery during the 60 fps heavy
+  scene read 11.168 V and −1231 mA (13.7 W; the `BatteryPower` field was −13747 mW).
+  Process CPU was about 76% of one core (`ps` %cpu) and RSS about 195 MB. The earlier
+  1024-draw binary, at about 33 fps in the same scene, sat around 58–71% CPU with a
+  sticky gauge of about 7.0–7.4 W (11.45 V, −610 to −642 mA). The gauge is coarse and
+  the machine was discharging the whole session, so the watt change is not a clean
+  before/after. What the binary does for heat is sleep the frame cap, sleep guest
+  stalls, and finish the frame inside the vsync interval instead of a ~30 ms
+  serialized flush. A 30 fps cap is already in the overlay list.
 - MoltenVK does not implement every feature the Linux backend uses (some BC layouts,
   `D24_UNORM_S8`, RGB32 float images, non-solid fill). The device only enables features it
   advertises; the depth format falls through the existing loop.
@@ -145,10 +169,16 @@ OpenSSL 3. No LunarG SDK, so shaders go through glslang. `file` on the linked bi
   from a 4 KB hole inside a committed host page will not fault. This run did not hit that.
 - No HDR. No image-to-image handover (no abstract-namespace sockets, no `pidfd`). This title
   is one XBE, so handover is not on the boot path.
-- Screen recording is not permitted for this environment, so the window itself was not
-  captured. The picture check used the backend's own host-target readback, then those files
-  were deleted. Do not commit them.
-- Linux and Windows were not rebuilt here. Their sources are the unpatched submodule. A Linux
+- Screen recording is not permitted for this environment. The picture check copied the
+  swapchain (`swap_NNNNN.bmp`, next to the existing guest readbacks) into `/tmp`, then
+  those files were deleted. Do not commit them. With the capture env unset, no copy
+  runs. The swapchain still requests `TRANSFER_SRC` when the device advertises it;
+  that usage was on during the 60 fps run.
+- A couple of shorter runs logged `Exit (0)` when the test shell was torn down: SDL
+  turns that signal into a quit. A process started in its own session kept drawing.
+- Linux and Windows were not rebuilt here. Their sources are the unpatched submodule.
+  Inside the patch, the non-Apple `Pace()` and `KeStallExecutionProcessor` branches
+  are the previous yield spins, and the 4096-draw flush is under `__APPLE__`. A Linux
   configure is the check that the patch did not leak into the submodule SHA.
 - The Windows exe remains untested on Windows, as before.
 
@@ -182,8 +212,11 @@ Logs land in `out/build/macos-release/logs/`. That directory is gitignored. Do n
 screenshots, or anything under `generated/`.
 
 Useful environment variables are the ones in the README (`XBE_PERF`, `XBE_MUTE`,
-`FUZION_AUTOSTART`). Leave `XBE_VK_DEBUG` unset unless you mean to; the README records that
-the validation layer has frozen a machine.
+`FUZION_AUTOSTART`). `FUZION_AUTOSTART` has to be set or the scripted pad never runs.
+`XBE_VK_CAPTURE_EVERY`, with `XBE_CAPTURE_DIR` pointed outside the repo, copies the
+swapchain on those presents. Leave both unset for a normal run, and delete the files.
+Leave `XBE_VK_DEBUG` unset unless you mean to; the README records that the validation
+layer has frozen a machine.
 
 ## References for the GPU fault
 
@@ -243,12 +276,13 @@ black-macos-runtime's NV2A renderer are GPL as well.
 
 ## Next steps
 
-1. A host-resolution picture of the post-75 s scene is what would confirm a minigame.
-   Draw counts already show that scene running with the device up, at about 33 fps.
-   The present-2800 readback is the ~53 s frame, and it was not blank. Leave
-   `FUZION_AUTOSTART_PLAY_MS` at 75000; that default is shared with Linux.
-2. If the heavy scene needs to be faster, try a split of 2048 draws. Do not jump to 4096
-   without a run: 2745 in one buffer survived a cap test of an earlier scene, and ~8500
-   did not.
-3. Keep the patch the only SDK delta. Do not commit a new `sdk` gitlink, and do not commit
+1. The heavy scene is at the vsync budget most seconds. The dips are host draw past
+   16.7 ms, not a stuck flush. A faster path needs MoltenVK to survive a non-blocking
+   split. The two attempts here faulted image-view encode. Do not retry slot rotation
+   or a timeline submit on 1.4.2 without a new driver.
+2. Keep `FUZION_AUTOSTART_PLAY_MS` at 75000. That default is shared with Linux.
+   Set `FUZION_AUTOSTART=1` or the scripted pad never runs and the intro movie stays up.
+3. A root `powermetrics` sample would separate GPU and package power. The battery
+   gauge above is the number this machine could produce without root.
+4. Keep the patch the only SDK delta. Do not commit a new `sdk` gitlink, and do not commit
    `generated/`, `assets/`, `logs/`, or pictures.
