@@ -24,15 +24,16 @@ for f in $files; do
     case "$f" in
         assets|assets/*|generated|generated/*|out|out/*|build|build/*|\
         logs|logs/*|hdd|hdd/*|CrashDumps|CrashDumps/*|shadercache|shadercache/*|\
-        tools/bin|tools/bin/*|.toolchain|.toolchain/*)
+        tools/bin|tools/bin/*|.toolchain|.toolchain/*|\
+        macos/launcher/dist|macos/launcher/dist/*)
             echo "pre-commit: refusing game, asset, or build path: $f" >&2
             fail=1
             continue
             ;;
     esac
     case "$f" in
-        *.xbe|*.XBE|*.iso|*.ISO|*.xiso|*.XISO|*.dmp|*.DMP|*.d3dcap|*.pdb|*.exe)
-            echo "pre-commit: refusing disc, dump, or binary type: $f" >&2
+        *.xbe|*.XBE|*.iso|*.ISO|*.xiso|*.XISO|*.dmp|*.DMP|*.d3dcap|*.pdb|*.exe|*.dmg|*.DMG)
+            echo "pre-commit: refusing disc, dump, binary, or disk image: $f" >&2
             fail=1
             continue
             ;;
