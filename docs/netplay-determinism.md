@@ -41,7 +41,7 @@ That repeat rule is what gets past boot. `sub_0004C510` samples RDTSC, then spin
 | `KeQuerySystemTime`, `KeSystemTime`, `NtSetSystemTime`'s read | epoch + interrupt time. Epoch is 2026-01-01 00:00:00 UTC as 100 ns since 1601 (`134116992000000000`). |
 | `KeTickCount` | `(frame * 1000) / 60` milliseconds. The step alternates 16 and 17 and lands on 1000 at frame 60. |
 | `RDTSC` (`x86_rdtsc`) | `frame * 12222222` (733333333/60). `.text`, DSOUND, XGRPH, and WMADEC all come through this. |
-| `KeDelayExecutionThread`, `KeStallExecutionProcessor` | Consume the guest duration in whole ticks (a delay shorter than one tick does not move time), then return. No sleep. |
+| `KeDelayExecutionThread`, `KeStallExecutionProcessor` | On the thread that presents: consume the guest duration in whole ticks (a delay shorter than one tick does not move time), then return. On any other thread: block until sim time has covered the delay, and at least one tick, so a 1 ms loop cannot outrun the presenter. No wall-clock sleep. |
 | Timer DPCs | Deadline is guest 100 ns. The timer thread does not pop. Present fires due timers inline, in deadline order, on the present thread, then rearms a period by `period_ms * 10000` (100 ns). |
 | Vblank | The free-running thread does not increment. Present bumps the count once. `BlockUntilVerticalBlank` returns at once. |
 | `app::Pace` | Skipped, so the harness is not fps-capped. A Vulkan present can still wait on vsync. |

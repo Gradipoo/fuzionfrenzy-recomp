@@ -307,10 +307,10 @@ index b2cd099..1304c37 100644
          uintmax_t size = std::filesystem::file_size(exe, ec);
 diff --git a/runtime/core/determinism.cpp b/runtime/core/determinism.cpp
 new file mode 100644
-index 0000000..526eeb4
+index 0000000..dc54f3e
 --- /dev/null
 +++ b/runtime/core/determinism.cpp
-@@ -0,0 +1,625 @@
+@@ -0,0 +1,642 @@
 +// Frame-derived clocks, latched pads, and a per-present guest RAM checksum.
 +// Off unless a flag or env var is set. See docs/netplay-determinism.md.
 +#include "core/determinism.h"
@@ -324,6 +324,7 @@ index 0000000..526eeb4
 +#include <algorithm>
 +#include <atomic>
 +#include <chrono>
++#include <condition_variable>
 +#include <cstdio>
 +#include <cstdlib>
 +#include <cstring>
@@ -440,6 +441,8 @@ index 0000000..526eeb4
 +std::atomic<uint64_t> g_time{0};   // sim ticks. A present costs one. A held clock read costs one.
 +std::atomic<uint64_t> g_qpc{0}, g_rdtsc{0}, g_delay{0};
 +std::mutex g_time_mu;
++std::condition_variable g_time_cv;
++thread_local bool t_pacer = false;
 +bool g_have_qpc = false, g_have_rdtsc = false, g_have_interrupt = false;
 +uint64_t g_last_qpc = 0, g_last_rdtsc = 0, g_last_interrupt = 0;
 +bool g_logged_spin = false;
@@ -824,6 +827,7 @@ index 0000000..526eeb4
 +    if (!ticks) return;
 +    g_time.fetch_add(ticks, std::memory_order_relaxed);
 +    PublishTime();
++    g_time_cv.notify_all();
 +}
 +
 +uint64_t Hold(uint64_t& last, bool& have, uint64_t now) {
@@ -870,6 +874,18 @@ index 0000000..526eeb4
 +    AdvanceTicksLocked(ticks);
 +}
 +
++void NotePacer() { t_pacer = true; }
++bool OnPacer() { return t_pacer; }
++
++void WaitTicks(uint64_t ticks) {
++    if (!ticks) ticks = 1;
++    std::unique_lock<std::mutex> lock(g_time_mu);
++    uint64_t deadline = g_time.load(std::memory_order_relaxed) + ticks;
++    g_time_cv.wait(lock, [&] { return g_time.load(std::memory_order_relaxed) >= deadline; });
++}
++
++uint64_t WholeTicks(uint64_t hundred_ns) { return hundred_ns / kInterruptPerFrame; }
++
 +void WatchRng(uint32_t guest_va) { g_rng_va = guest_va; }
 +
 +void OnImageLoaded() {
@@ -907,6 +923,7 @@ index 0000000..526eeb4
 +    if (!c.fixed && !c.record && !c.replay && !c.state_log && !c.frames && !c.stall_ms) return;
 +    if (g_in_present) return;
 +    g_in_present = true;
++    NotePacer();
 +    LogMode();
 +    if (c.stall_ms) std::this_thread::sleep_for(std::chrono::milliseconds(c.stall_ms));
 +    if (FramePads()) xapi::PollPortsOnce();
@@ -938,10 +955,10 @@ index 0000000..526eeb4
 +}  // namespace det
 diff --git a/runtime/core/determinism.h b/runtime/core/determinism.h
 new file mode 100644
-index 0000000..46b96e4
+index 0000000..ff78c11
 --- /dev/null
 +++ b/runtime/core/determinism.h
-@@ -0,0 +1,48 @@
+@@ -0,0 +1,54 @@
 +#pragma once
 +// Lockstep determinism harness. Every entry is a no-op unless a flag or env var turns it on,
 +// so a normal launch keeps the clocks, the pads, the mixer and the frame pacing it has now.
@@ -988,6 +1005,12 @@ index 0000000..46b96e4
 +uint64_t ClockSystem();
 +// Relative waits. hundred_ns is a guest duration. Whole ticks are consumed, the rest dropped.
 +void Consume100ns(uint64_t hundred_ns);
++// The thread that presents owns sim time. Any other thread's KeDelay waits for that clock
++// instead of returning at once and spinning.
++void NotePacer();
++bool OnPacer();
++void WaitTicks(uint64_t ticks);
++uint64_t WholeTicks(uint64_t hundred_ns);
 +
 +}  // namespace det
 diff --git a/runtime/core/input.cpp b/runtime/core/input.cpp
@@ -2806,7 +2829,7 @@ index 56fadb8..5e60004 100644
      pthread_setname_np(pthread_self(), name);
  #endif
 diff --git a/runtime/kernel/xboxkrnl.cpp b/runtime/kernel/xboxkrnl.cpp
-index 86cf14a..af6229d 100644
+index 86cf14a..09d4992 100644
 --- a/runtime/kernel/xboxkrnl.cpp
 +++ b/runtime/kernel/xboxkrnl.cpp
 @@ -5,6 +5,7 @@
@@ -2873,12 +2896,13 @@ index 86cf14a..af6229d 100644
      using namespace std::chrono;
      static const auto start = steady_clock::now();
      uint64_t ns = uint64_t(duration_cast<nanoseconds>(steady_clock::now() - start).count());
-@@ -250,12 +270,28 @@ KERNEL_EXPORT(127, KeQueryPerformanceFrequency, 0) {
+@@ -250,12 +270,43 @@ KERNEL_EXPORT(127, KeQueryPerformanceFrequency, 0) {
  }
  
  KERNEL_EXPORT(151, KeStallExecutionProcessor, 1) {
 +    if (det::FixedStep()) {
-+        det::Consume100ns(uint64_t(a[0]) * 10ull);
++        if (det::OnPacer()) det::Consume100ns(uint64_t(a[0]) * 10ull);
++        else if (a[0]) det::WaitTicks(1);
 +        return 0;
 +    }
 +#if defined(__APPLE__)
@@ -2896,7 +2920,21 @@ index 86cf14a..af6229d 100644
 +    if (det::FixedStep()) {
 +        det::NoteDelay();
 +        int64_t interval = int64_t(R64(a[2]));
-+        if (interval < 0 && interval != INT64_MIN) det::Consume100ns(uint64_t(-interval));
++        uint64_t hundred = 0;
++        if (interval < 0 && interval != INT64_MIN) hundred = uint64_t(-interval);
++        if (det::OnPacer()) {
++            if (hundred) det::Consume100ns(hundred);
++        } else {
++            static bool logged = false;
++            if (!logged) {
++                logged = true;
++                LOGR("det: a guest thread other than the presenter is in KeDelay, return %08X interval %lld", R32(ctx.esp),
++                     (long long)interval);
++            }
++            // At least one sim tick, so a 1 ms loop cannot outrun the presenter.
++            uint64_t ticks = det::WholeTicks(hundred);
++            det::WaitTicks(ticks ? ticks : 1);
++        }
 +        return kSuccess;
 +    }
      int64_t interval = int64_t(R64(a[2]));
