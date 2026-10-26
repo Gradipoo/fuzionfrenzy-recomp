@@ -49,10 +49,10 @@ index 15638ea..da84add 100644
      target_link_options(${target} PRIVATE -fuse-ld=lld -g)
      endif()
 diff --git a/runtime/app/main_sdl.cpp b/runtime/app/main_sdl.cpp
-index 2514392..d7b456f 100644
+index 2514392..55a377b 100644
 --- a/runtime/app/main_sdl.cpp
 +++ b/runtime/app/main_sdl.cpp
-@@ -21,7 +21,18 @@
+@@ -21,10 +21,22 @@
  #include <thread>
  
  #include <unistd.h>
@@ -71,7 +71,11 @@ index 2514392..d7b456f 100644
  
  #include "app/app.h"
  #include "app/platform.h"
-@@ -128,7 +139,17 @@ void CrashHandler(int sig, siginfo_t* info, void* uc) {
++#include "core/determinism.h"
+ #include "common/input_kbm.h"  // kbm::NoteMouse (D11 mouse cache)
+ #include "core/input.h"
+ #include "core/log.h"
+@@ -128,7 +140,17 @@ void CrashHandler(int sig, siginfo_t* info, void* uc) {
          if (p >= base && p < base + (size_t{1} << 32))
              LOGE("fault at guest address %08X (host %p)", uint32_t(p - base), at);
      }
@@ -90,7 +94,17 @@ index 2514392..d7b456f 100644
      if (kernel::Thread* t = kernel::Current(); t && t->ctx) {
          LOGE("signal %d on guest thread %X", sig, t->id);
          kernel::LogGuestStack(*t->ctx, 256);
-@@ -281,10 +302,19 @@ bool HandleEvent(const SDL_Event& e) {  // window thread; true: quit
+@@ -198,7 +220,8 @@ void DoOpenGameWindow(bool apply) {
+     CloseSplash();
+     if (apply) ApplyNow();
+     SDL_ShowWindow(g_window);
+-    SDL_RaiseWindow(g_window);
++    if (det::Minimized()) SDL_MinimizeWindow(g_window);
++    else SDL_RaiseWindow(g_window);
+ }
+ 
+ // The Vulkan backend owns the device; once its Init has run (on a guest
+@@ -281,10 +304,19 @@ bool HandleEvent(const SDL_Event& e) {  // window thread; true: quit
  }  // namespace
  
  std::filesystem::path ExeDir() {
@@ -110,7 +124,7 @@ index 2514392..d7b456f 100644
  }
  
  int Instance() {
-@@ -356,8 +386,14 @@ void Pace() {
+@@ -356,8 +388,14 @@ void Pace() {
      auto period = std::chrono::nanoseconds(1000000000ull / cap);
      next += period;
      if (next < now - period) next = now;
@@ -125,7 +139,7 @@ index 2514392..d7b456f 100644
  }
  
  namespace platform {
-@@ -399,7 +435,11 @@ bool CursorVisible() { return SDL_CursorVisible(); }
+@@ -399,7 +437,11 @@ bool CursorVisible() { return SDL_CursorVisible(); }
  
  HdrInfo QueryHdr() {
      // No HDR swap chain exists in the Vulkan build; say so, never pretend.
@@ -137,7 +151,7 @@ index 2514392..d7b456f 100644
  }
  
  }  // namespace platform
-@@ -407,6 +447,20 @@ HdrInfo QueryHdr() {
+@@ -407,8 +449,24 @@ HdrInfo QueryHdr() {
  }  // namespace app
  
  int main(int argc, char** argv) {
@@ -157,8 +171,12 @@ index 2514392..d7b456f 100644
 +#endif
      app::g_argc = argc;
      app::g_argv = argv;
++    // Before any clock or pad read. A later first use of the harness caches these.
++    det::SetArgs(argc, argv);
      // SA_SIGINFO so CrashHandler receives the fault address (see above); sigaction rather than
-@@ -452,7 +506,11 @@ int main(int argc, char** argv) {
+     // std::signal, because only the former can ask for it.
+     struct sigaction crash{};
+@@ -452,7 +510,11 @@ int main(int argc, char** argv) {
      app::CacheClientSize();
      app::g_focus = SDL_GetKeyboardFocus() == app::g_window;
      // HDR is honestly off on this platform, from the start.
@@ -170,6 +188,14 @@ index 2514392..d7b456f 100644
  
      // Vulkan handshake: the backend owns the instance; SDL names the
      // extensions it needs, the backend creates it, SDL makes the surface.
+@@ -491,6 +553,7 @@ int main(int argc, char** argv) {
+     } else if (!splash) {
+         app::ApplyNow();
+         SDL_ShowWindow(app::g_window);
++        if (det::Minimized()) SDL_MinimizeWindow(app::g_window);
+     }
+     if (!kernel::Boot(std::move(game.xbe), IMAGE_XBE, game.dir.string(), (app::ExeDir() / hdd).string())) {
+         SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, app::Narrow(app::kGame.short_title).c_str(),
 diff --git a/runtime/app/system_info.cpp b/runtime/app/system_info.cpp
 index b2cd099..1304c37 100644
 --- a/runtime/app/system_info.cpp
@@ -279,11 +305,633 @@ index b2cd099..1304c37 100644
      } else {
          std::error_code ec;
          uintmax_t size = std::filesystem::file_size(exe, ec);
+diff --git a/runtime/core/determinism.cpp b/runtime/core/determinism.cpp
+new file mode 100644
+index 0000000..96578d6
+--- /dev/null
++++ b/runtime/core/determinism.cpp
+@@ -0,0 +1,564 @@
++// Frame-derived clocks, latched pads, and a per-present guest RAM checksum.
++// Off unless a flag or env var is set. See docs/netplay-determinism.md.
++#include "core/determinism.h"
++
++#include "core/input.h"
++#include "core/log.h"
++#include "kernel/kernel.h"
++#include "kernel/memory.h"
++#include "xbe/xbe.h"
++
++#include <algorithm>
++#include <atomic>
++#include <chrono>
++#include <cstdio>
++#include <cstdlib>
++#include <cstring>
++#include <fstream>
++#include <mutex>
++#include <string>
++#include <thread>
++#include <vector>
++
++namespace kernel {
++extern const xbe::Image* g_image;
++void SetDeterministicClocks(uint64_t interrupt_100ns, uint64_t system_100ns, uint32_t tick_ms);
++void FireDueTimers(X86Context& ctx);
++}  // namespace kernel
++
++namespace d3d {
++void VolatileSpans(void (*fn)(uint32_t va, uint32_t size, const char* name, void* user), void* user);
++void BumpVblank();
++}  // namespace d3d
++
++namespace xapi {
++void PollPortsOnce();
++}  // namespace xapi
++
++namespace dsound {
++void AdvanceFixed(X86Context& ctx, uint32_t frames);
++}  // namespace dsound
++
++namespace det {
++namespace {
++
++int g_argc = 0;
++char** g_argv = nullptr;
++
++const char* Option(const char* name) {
++    std::string flag = std::string("--") + name;
++    std::string pref = flag + "=";
++    for (int i = 1; i < g_argc; i++) {
++        const char* a = g_argv[i];
++        if (!a) continue;
++        if (std::strncmp(a, pref.c_str(), pref.size()) == 0) return a + pref.size();
++        if (flag == a && i + 1 < g_argc && g_argv[i + 1] && std::strncmp(g_argv[i + 1], "--", 2) != 0) return g_argv[i + 1];
++    }
++    return nullptr;
++}
++
++bool Switch(const char* name) {
++    std::string flag = std::string("--") + name;
++    for (int i = 1; i < g_argc; i++)
++        if (g_argv[i] && flag == g_argv[i]) return true;
++    return false;
++}
++
++const char* EnvOrOpt(const char* env, const char* opt) {
++    if (const char* v = Option(opt)) return v;
++    if (const char* v = std::getenv(env)) return v[0] ? v : nullptr;
++    return nullptr;
++}
++
++bool EnvOrSwitch(const char* env, const char* opt) {
++    if (Switch(opt)) return true;
++    const char* v = std::getenv(env);
++    return v && v[0] && std::strcmp(v, "0") != 0;
++}
++
++struct Cfg {
++    bool fixed = false;
++    bool minimized = false;
++    const char* record = nullptr;
++    const char* replay = nullptr;
++    const char* state_log = nullptr;
++    const char* dump_dir = nullptr;
++    const char* dump_region = nullptr;
++    int64_t dump_frame = -1;
++    uint64_t frames = 0;
++    uint32_t stall_ms = 0;
++    bool have_seed = false;
++    uint32_t seed = 1;
++};
++
++const Cfg& C() {
++    static const Cfg cfg = [] {
++        Cfg c;
++        c.fixed = EnvOrSwitch("FUZION_FIXED_STEP", "fixed-step");
++        c.minimized = EnvOrSwitch("FUZION_MINIMIZED", "minimized");
++        c.record = EnvOrOpt("FUZION_RECORD_INPUT", "record-input");
++        c.replay = EnvOrOpt("FUZION_REPLAY_INPUT", "replay-input");
++        c.state_log = EnvOrOpt("FUZION_STATE_LOG", "state-log");
++        c.dump_dir = EnvOrOpt("FUZION_STATE_DUMP", "state-dump");
++        c.dump_region = EnvOrOpt("FUZION_STATE_DUMP_REGION", "state-dump-region");
++        if (const char* v = EnvOrOpt("FUZION_STATE_DUMP_FRAME", "state-dump-frame")) c.dump_frame = std::atoll(v);
++        if (const char* v = EnvOrOpt("FUZION_FRAMES", "frames")) c.frames = std::strtoull(v, nullptr, 10);
++        if (const char* v = EnvOrOpt("FUZION_STALL_MS", "stall-ms")) c.stall_ms = uint32_t(std::strtoul(v, nullptr, 10));
++        if (const char* v = EnvOrOpt("FUZION_SEED", "seed")) {
++            c.have_seed = true;
++            c.seed = uint32_t(std::strtoul(v, nullptr, 0));
++        }
++        return c;
++    }();
++    return cfg;
++}
++
++// 2026-01-01 00:00:00 UTC as 100 ns ticks since 1601-01-01.
++constexpr uint64_t kEpoch100ns = 134116992000000000ull;
++constexpr uint64_t kPerfPerFrame = 3375000ull / 60ull;       // 56250, exactly 1/60 s
++constexpr uint64_t kInterruptPerFrame = 10000000ull / 60ull;  // 166666, 100 ns units
++constexpr uint64_t kRdtscHz = 733333333ull;
++constexpr uint64_t kHashPrime = 0x100000001B3ull;
++constexpr uint64_t kHashBasis = 14695981039346656037ull;
++constexpr uint32_t kAudioFrames = 48000 / 60;  // one sim frame of the mixer
++constexpr int kPorts = 4;
++
++std::atomic<uint64_t> g_frame{0};
++std::atomic<uint64_t> g_qpc{0}, g_rdtsc{0}, g_delay{0};
++std::mutex g_pad_lock;
++bool g_logged_mode = false;
++bool g_in_present = false;
++
++struct Sample {
++    bool connected = false;
++    uint16_t buttons = 0;
++    uint8_t analog[8] = {};
++    int16_t lx = 0, ly = 0, rx = 0, ry = 0;
++    explicit Sample(const input::Pad& p)
++        : connected(p.connected), buttons(p.buttons), lx(p.lx), ly(p.ly), rx(p.rx), ry(p.ry) {
++        std::memcpy(analog, p.analog, 8);
++    }
++    Sample() = default;
++    input::Pad Pad() const {
++        input::Pad p;
++        p.connected = connected;
++        p.buttons = buttons;
++        std::memcpy(p.analog, analog, 8);
++        p.lx = lx;
++        p.ly = ly;
++        p.rx = rx;
++        p.ry = ry;
++        return p;
++    }
++};
++
++Sample g_latched[kPorts];
++Sample g_pending[kPorts];
++bool g_seen[kPorts] = {};
++std::vector<Sample> g_replay;  // frame-major, 4 ports
++bool g_replay_loaded = false;
++bool g_replay_held = false;
++
++uint32_t g_rng_va = 0;
++FILE* g_state = nullptr;
++bool g_state_header = false;
++
++uint64_t Mix(uint64_t h, uint64_t v) { return (h ^ v) * kHashPrime; }
++
++uint64_t HashBytes(const uint8_t* p, size_t n, uint64_t h) {
++    size_t i = 0;
++    for (; i + 8 <= n; i += 8) {
++        uint64_t v;
++        std::memcpy(&v, p + i, 8);
++        h = Mix(h, v);
++    }
++    uint64_t tail = 0;
++    if (i < n) std::memcpy(&tail, p + i, n - i);
++    if (i < n) h = Mix(h, tail);
++    return h;
++}
++
++uint64_t HashZeros(size_t n, uint64_t h) {
++    uint64_t z = 0;
++    while (n >= 8) {
++        h = Mix(h, z);
++        n -= 8;
++    }
++    if (n) h = Mix(h, z);
++    return h;
++}
++
++struct Exc {
++    uint32_t va, end;
++    const char* name;
++};
++
++void AddExc(uint32_t va, uint32_t size, const char* name, void* user) {
++    if (!va || !size) return;
++    static_cast<std::vector<Exc>*>(user)->push_back({va, va + size, name});
++}
++
++bool Overlap(uint32_t a, uint32_t b, const Exc& e) { return a < e.end && e.va < b; }
++
++uint64_t HashVa(uint32_t va, uint32_t size, const std::vector<Exc>& exc, uint64_t h) {
++    uint32_t at = va;
++    const uint32_t end = va + size;
++    while (at < end) {
++        uint32_t run = end;
++        const Exc* hit = nullptr;
++        for (const Exc& e : exc) {
++            if (e.end <= at || e.va >= end) continue;
++            if (e.va <= at) {
++                hit = &e;
++                break;
++            }
++            if (e.va < run) run = e.va;
++        }
++        if (!hit) {
++            h = HashBytes(static_cast<const uint8_t*>(kernel::HostPtr(at)), run - at, h);
++            at = run;
++        } else {
++            uint32_t stop = std::min(hit->end, end);
++            h = HashZeros(stop - at, h);
++            at = stop;
++        }
++    }
++    return h;
++}
++
++void LoadReplay() {
++    if (g_replay_loaded) return;
++    g_replay_loaded = true;
++    const char* path = C().replay;
++    if (!path) return;
++    std::ifstream in(path);
++    if (!in) {
++        LOGE("det: replay file missing: %s", path);
++        kernel::Shutdown(1);
++    }
++    std::string line;
++    while (std::getline(in, line)) {
++        if (line.empty() || line[0] == '#') continue;
++        unsigned frame = 0, port = 0, connected = 0, buttons = 0;
++        int lx = 0, ly = 0, rx = 0, ry = 0;
++        unsigned analog[8] = {};
++        int n = std::sscanf(line.c_str(), "%u %u %u %x %d %d %d %d %x %x %x %x %x %x %x %x", &frame, &port, &connected,
++                            &buttons, &lx, &ly, &rx, &ry, &analog[0], &analog[1], &analog[2], &analog[3], &analog[4],
++                            &analog[5], &analog[6], &analog[7]);
++        if (n != 16 || port < 1 || port > 4) continue;
++        size_t need = (size_t(frame) + 1) * kPorts;
++        if (g_replay.size() < need) g_replay.resize(need);
++        Sample& s = g_replay[size_t(frame) * kPorts + (port - 1)];
++        s.connected = connected != 0;
++        s.buttons = uint16_t(buttons);
++        s.lx = int16_t(lx);
++        s.ly = int16_t(ly);
++        s.rx = int16_t(rx);
++        s.ry = int16_t(ry);
++        for (int i = 0; i < 8; i++) s.analog[i] = uint8_t(analog[i]);
++    }
++    LOGR("det: replay %s, %zu frames", path, g_replay.size() / kPorts);
++}
++
++Sample ReplayAt(uint64_t frame, int port) {
++    LoadReplay();
++    if (g_replay.empty()) return {};
++    uint64_t last = g_replay.size() / kPorts - 1;
++    if (frame > last) {
++        if (!g_replay_held) {
++            g_replay_held = true;
++            LOGR("det: replay held at frame %llu (file ends at %llu)", (unsigned long long)last, (unsigned long long)last);
++        }
++        frame = last;
++    }
++    return g_replay[size_t(frame) * kPorts + port];
++}
++
++void WritePads(uint64_t frame) {
++    if (!C().record) return;
++    static FILE* f = nullptr;
++    static bool opened = false;
++    if (!opened) {
++        opened = true;
++        f = std::fopen(C().record, "w");
++        if (!f) {
++            LOGE("det: cannot write %s", C().record);
++            return;
++        }
++        std::fprintf(f, "# fuzion-input 1\n");
++        std::fprintf(f, "# frame port connected buttons lx ly rx ry a b x y black white lt rt\n");
++        std::fprintf(f, "# ports are 1..4. buttons and analog bytes are hex. sticks are signed.\n");
++    }
++    if (!f) return;
++    for (int p = 0; p < kPorts; p++) {
++        const Sample& s = g_latched[p];
++        std::fprintf(f, "%llu %d %u %04x %d %d %d %d %02x %02x %02x %02x %02x %02x %02x %02x\n", (unsigned long long)frame,
++                     p + 1, s.connected ? 1u : 0u, s.buttons, int(s.lx), int(s.ly), int(s.rx), int(s.ry), s.analog[0],
++                     s.analog[1], s.analog[2], s.analog[3], s.analog[4], s.analog[5], s.analog[6], s.analog[7]);
++    }
++    std::fflush(f);
++}
++
++void LatchNext() {
++    for (int p = 0; p < kPorts; p++) g_latched[p] = g_pending[p];
++}
++
++uint32_t RngNow() {
++    if (!g_rng_va) return 0;
++    return kernel::R32(g_rng_va);
++}
++
++void OpenState() {
++    if (g_state || !C().state_log) return;
++    g_state = std::fopen(C().state_log, "w");
++    if (!g_state) {
++        LOGE("det: cannot write %s", C().state_log);
++        return;
++    }
++}
++
++void StateHeader(const std::vector<Exc>& exc) {
++    if (!g_state || g_state_header) return;
++    g_state_header = true;
++    std::fprintf(g_state, "# det 1\n");
++    std::fprintf(g_state, "# fixed=%d seed=%s stall_ms=%u\n", C().fixed ? 1 : 0, C().have_seed ? "set" : "unset", C().stall_ms);
++    std::fprintf(g_state, "# clock qpc_per_frame=%llu interrupt_100ns_per_frame=%llu rdtsc_per_frame=%llu\n",
++                 (unsigned long long)kPerfPerFrame, (unsigned long long)kInterruptPerFrame,
++                 (unsigned long long)(kRdtscHz / 60ull));
++    std::fprintf(g_state, "# epoch_100ns=%llu rng_global=%08x\n", (unsigned long long)kEpoch100ns, g_rng_va);
++    std::fprintf(g_state, "# excluded from phys (zeroed in the hash):\n");
++    for (const Exc& e : exc)
++        std::fprintf(g_state, "# exclude %08x %08x %s\n", e.va, e.end - e.va, e.name ? e.name : "?");
++    std::fprintf(g_state, "# stacks at D0000000 are not hashed. system is committed pages at B0000000.\n");
++    std::fprintf(g_state, "# user slices are 4MB from 00000000 through 7FFE0000. index 0 starts at 00010000.\n");
++    std::fprintf(g_state, "# F frame total data phys system user seed qpc rdtsc delay\n");
++    std::fprintf(g_state, "# P frame 64 hashes of 1MB physical slices from 80000000\n");
++    std::fprintf(g_state, "# D frame section=hash. U frame index=hash for committed user slices.\n");
++}
++
++void DumpRegion(uint64_t frame, const char* name, uint32_t va, uint32_t size, const std::vector<Exc>& exc) {
++    const Cfg& c = C();
++    if (!c.dump_dir || c.dump_frame < 0 || uint64_t(c.dump_frame) != frame) return;
++    if (c.dump_region && c.dump_region[0] && std::strcmp(c.dump_region, name) != 0) return;
++    std::string path = std::string(c.dump_dir) + "/frame_" + std::to_string(frame) + "_" + name + ".bin";
++    FILE* f = std::fopen(path.c_str(), "wb");
++    if (!f) {
++        LOGE("det: cannot write %s", path.c_str());
++        return;
++    }
++    std::vector<uint8_t> buf(4096);
++    for (uint32_t at = va; at < va + size;) {
++        uint32_t n = std::min<uint32_t>(4096, va + size - at);
++        bool gap = false;
++        for (const Exc& e : exc)
++            if (Overlap(at, at + n, e)) gap = true;
++        if (gap || !mem::IsCommitted(at)) std::memset(buf.data(), 0, n);
++        else std::memcpy(buf.data(), kernel::HostPtr(at), n);
++        std::fwrite(buf.data(), 1, n, f);
++        at += n;
++    }
++    std::fclose(f);
++    LOGR("det: dumped %s", path.c_str());
++}
++
++void WriteState(uint64_t frame) {
++    OpenState();
++    std::vector<Exc> exc;
++    d3d::VolatileSpans(AddExc, &exc);
++    std::sort(exc.begin(), exc.end(), [](const Exc& a, const Exc& b) { return a.va < b.va; });
++    StateHeader(exc);
++
++    uint64_t data_h = kHashBasis;
++    if (kernel::g_image) {
++        if (g_state) std::fprintf(g_state, "D %llu", (unsigned long long)frame);
++        for (const xbe::Section& s : kernel::g_image->sections) {
++            if (!(s.flags & xbe::kWritable) || !s.vsize) continue;
++            uint64_t h = HashVa(s.va, s.vsize, exc, kHashBasis);
++            data_h = Mix(data_h, h);
++            if (g_state) std::fprintf(g_state, " %s=%016llx", s.name.c_str(), (unsigned long long)h);
++            DumpRegion(frame, s.name.c_str(), s.va, s.vsize, exc);
++        }
++        if (g_state) std::fprintf(g_state, "\n");
++    }
++
++    uint64_t phys_h = kHashBasis;
++    uint64_t slices[64];
++    for (int i = 0; i < 64; i++) {
++        uint32_t va = 0x80000000u + uint32_t(i) * 0x100000u;
++        slices[i] = HashVa(va, 0x100000u, exc, kHashBasis);
++        phys_h = Mix(phys_h, slices[i]);
++        char name[16];
++        std::snprintf(name, sizeof name, "phys_%02d", i);
++        DumpRegion(frame, name, va, 0x100000u, exc);
++    }
++
++    uint64_t system_h = kHashBasis;
++    for (uint32_t va = mem::kSystemBase; va < mem::kSystemBase + mem::kSystemSize; va += mem::kPage) {
++        if (!mem::IsCommitted(va)) continue;
++        system_h = Mix(system_h, va);
++        system_h = HashBytes(static_cast<const uint8_t*>(kernel::HostPtr(va)), mem::kPage, system_h);
++    }
++    if (C().dump_region && std::strcmp(C().dump_region, "system") == 0)
++        DumpRegion(frame, "system", mem::kSystemBase, mem::kSystemSize, {});
++
++    // The whole user window, not only addresses above the image. Early heap sits just past .data.
++    uint64_t user_h = kHashBasis;
++    std::string user_line;
++    for (uint32_t base = 0; base < mem::kUserHigh; base += 0x400000u) {
++        uint32_t from = std::max(base, mem::kUserLow);
++        uint32_t to = std::min(base + 0x400000u, mem::kUserHigh);
++        bool any = false;
++        uint64_t h = kHashBasis;
++        for (uint32_t va = from; va < to; va += mem::kPage) {
++            if (!mem::IsCommitted(va)) continue;
++            any = true;
++            h = Mix(h, va);
++            h = HashBytes(static_cast<const uint8_t*>(kernel::HostPtr(va)), mem::kPage, h);
++        }
++        if (!any) continue;
++        user_h = Mix(user_h, h);
++        uint32_t index = base / 0x400000u;
++        char piece[64];
++        std::snprintf(piece, sizeof piece, " %u=%016llx", index, (unsigned long long)h);
++        user_line += piece;
++        char name[16];
++        std::snprintf(name, sizeof name, "user_%u", index);
++        if (C().dump_region && std::strcmp(C().dump_region, name) == 0) DumpRegion(frame, name, from, to - from, {});
++    }
++
++    uint64_t total = kHashBasis;
++    total = Mix(total, data_h);
++    total = Mix(total, phys_h);
++    total = Mix(total, system_h);
++    total = Mix(total, user_h);
++    uint32_t seed = RngNow();
++    if (g_state) {
++        std::fprintf(g_state, "P %llu", (unsigned long long)frame);
++        for (uint64_t s : slices) std::fprintf(g_state, " %016llx", (unsigned long long)s);
++        std::fprintf(g_state, "\n");
++        if (!user_line.empty()) std::fprintf(g_state, "U %llu%s\n", (unsigned long long)frame, user_line.c_str());
++        std::fprintf(g_state,
++                     "F %llu total=%016llx data=%016llx phys=%016llx system=%016llx user=%016llx seed=%08x qpc=%llu "
++                     "rdtsc=%llu delay=%llu\n",
++                     (unsigned long long)frame, (unsigned long long)total, (unsigned long long)data_h,
++                     (unsigned long long)phys_h, (unsigned long long)system_h, (unsigned long long)user_h, seed,
++                     (unsigned long long)g_qpc.load(), (unsigned long long)g_rdtsc.load(),
++                     (unsigned long long)g_delay.load());
++        std::fflush(g_state);
++    }
++    static uint32_t last_seed = 0;
++    static bool have_last = false;
++    if (!have_last || seed != last_seed) {
++        LOGR("det: rng seed at frame %llu is %08x", (unsigned long long)frame, seed);
++        last_seed = seed;
++        have_last = true;
++    }
++    if ((frame % 60ull) == 0)
++        LOGR("det: frame %llu total %016llx seed %08x", (unsigned long long)frame, (unsigned long long)total, seed);
++}
++
++void LogMode() {
++    if (g_logged_mode) return;
++    g_logged_mode = true;
++    const Cfg& c = C();
++    LOGR("det: fixed=%d record=%s replay=%s frames=%llu stall_ms=%u seed=%s state=%s", c.fixed ? 1 : 0,
++         c.record ? c.record : "-", c.replay ? c.replay : "-", (unsigned long long)c.frames, c.stall_ms,
++         c.have_seed ? "set" : "unset", c.state_log ? c.state_log : "-");
++    if (c.fixed) {
++        LOGR("det: clocks are frame-derived (qpc +%llu, interrupt +%llu 100ns, rdtsc +%llu, tick ms = frame*1000/60)",
++             (unsigned long long)kPerfPerFrame, (unsigned long long)kInterruptPerFrame,
++             (unsigned long long)(kRdtscHz / 60ull));
++        LOGR("det: KeDelayExecutionThread returns at once, vblank advances on present, mixer advances %u samples",
++             kAudioFrames);
++    }
++}
++
++}  // namespace
++
++void SetArgs(int argc, char** argv) {
++    g_argc = argc;
++    g_argv = argv;
++}
++
++bool FixedStep() { return C().fixed; }
++bool Recording() { return C().record != nullptr; }
++bool Replaying() { return C().replay != nullptr; }
++bool Minimized() { return C().minimized; }
++bool FramePads() { return C().fixed || C().record || C().replay; }
++
++void NoteQpc() { g_qpc.fetch_add(1, std::memory_order_relaxed); }
++void NoteRdtsc() { g_rdtsc.fetch_add(1, std::memory_order_relaxed); }
++void NoteDelay() { g_delay.fetch_add(1, std::memory_order_relaxed); }
++
++uint64_t PerfCounter() { return g_frame.load(std::memory_order_relaxed) * kPerfPerFrame; }
++uint64_t InterruptTime100ns() { return g_frame.load(std::memory_order_relaxed) * kInterruptPerFrame; }
++uint64_t SystemTime100ns() { return kEpoch100ns + InterruptTime100ns(); }
++uint64_t Rdtsc() { return g_frame.load(std::memory_order_relaxed) * (kRdtscHz / 60ull); }
++uint32_t TickMs() { return uint32_t((g_frame.load(std::memory_order_relaxed) * 1000ull) / 60ull); }
++
++void WatchRng(uint32_t guest_va) { g_rng_va = guest_va; }
++
++void OnImageLoaded() {
++    if (!C().fixed && !C().have_seed && !C().record && !C().replay && !C().state_log) return;
++    LogMode();
++    if (!g_rng_va) return;
++    uint32_t cur = kernel::R32(g_rng_va);
++    LOGR("det: rng global %08x holds %08x at image load", g_rng_va, cur);
++    if (C().have_seed) {
++        kernel::W32(g_rng_va, C().seed);
++        LOGR("det: rng global %08x forced to %08x (a later srand can replace it; the frame log shows that)", g_rng_va,
++             C().seed);
++    }
++}
++
++void FilterPad(int port, input::Pad& pad) {
++    if (port < 0 || port >= kPorts) return;
++    std::lock_guard<std::mutex> lock(g_pad_lock);
++    if (C().replay) {
++        pad = ReplayAt(g_frame.load(std::memory_order_relaxed), port).Pad();
++        return;
++    }
++    if (C().record || C().fixed) {
++        g_pending[port] = Sample(pad);
++        if (!g_seen[port]) {
++            g_latched[port] = g_pending[port];
++            g_seen[port] = true;
++        }
++        pad = g_latched[port].Pad();
++    }
++}
++
++void OnPresented(X86Context& ctx) {
++    const Cfg& c = C();
++    if (!c.fixed && !c.record && !c.replay && !c.state_log && !c.frames && !c.stall_ms) return;
++    if (g_in_present) return;
++    g_in_present = true;
++    LogMode();
++    if (c.stall_ms) std::this_thread::sleep_for(std::chrono::milliseconds(c.stall_ms));
++    if (FramePads()) xapi::PollPortsOnce();
++    if (c.fixed) dsound::AdvanceFixed(ctx, kAudioFrames);
++    if (c.fixed) kernel::FireDueTimers(ctx);
++
++    uint64_t frame = g_frame.load(std::memory_order_relaxed);
++    if (c.state_log || c.dump_dir) WriteState(frame);
++    {
++        std::lock_guard<std::mutex> lock(g_pad_lock);
++        if (c.record) WritePads(frame);
++        if (c.record || c.fixed) LatchNext();
++    }
++    uint64_t next = frame + 1;
++    g_frame.store(next, std::memory_order_relaxed);
++    if (c.fixed) {
++        kernel::SetDeterministicClocks(next * kInterruptPerFrame, kEpoch100ns + next * kInterruptPerFrame,
++                                       uint32_t((next * 1000ull) / 60ull));
++        d3d::BumpVblank();
++    }
++    g_in_present = false;
++    if (c.frames && next >= c.frames) {
++        if (g_state) std::fflush(g_state);
++        LOGR("det: reached %llu frames", (unsigned long long)c.frames);
++        kernel::Shutdown(0);
++    }
++}
++
++}  // namespace det
+diff --git a/runtime/core/determinism.h b/runtime/core/determinism.h
+new file mode 100644
+index 0000000..8f35f18
+--- /dev/null
++++ b/runtime/core/determinism.h
+@@ -0,0 +1,38 @@
++#pragma once
++// Lockstep determinism harness. Every entry is a no-op unless a flag or env var turns it on,
++// so a normal launch keeps the clocks, the pads, the mixer and the frame pacing it has now.
++#include <cstdint>
++
++struct X86Context;
++
++namespace input {
++struct Pad;
++}
++
++namespace det {
++
++void SetArgs(int argc, char** argv);
++
++bool FixedStep();   // --fixed-step / FUZION_FIXED_STEP
++bool Recording();   // --record-input / FUZION_RECORD_INPUT
++bool Replaying();   // --replay-input / FUZION_REPLAY_INPUT
++bool Minimized();   // --minimized / FUZION_MINIMIZED
++// Port scan and pad latch run from the frame edge instead of a wall-clock thread.
++bool FramePads();
++
++void FilterPad(int port, input::Pad& pad);
++void WatchRng(uint32_t guest_va);  // MSVC rand global, logged and optionally overwritten
++void OnImageLoaded();
++void OnPresented(X86Context& ctx);
++
++void NoteQpc();
++void NoteRdtsc();
++void NoteDelay();
++
++uint64_t PerfCounter();
++uint64_t InterruptTime100ns();
++uint64_t SystemTime100ns();
++uint64_t Rdtsc();
++uint32_t TickMs();
++
++}  // namespace det
 diff --git a/runtime/core/input.cpp b/runtime/core/input.cpp
-index 8a0f1d0..a059d06 100644
+index 8a0f1d0..ad19511 100644
 --- a/runtime/core/input.cpp
 +++ b/runtime/core/input.cpp
-@@ -44,7 +44,13 @@ void UpdatePads() {
+@@ -8,6 +8,7 @@
+ #include <SDL3/SDL.h>
+ 
+ #include "app/app.h"
++#include "core/determinism.h"
+ #include "core/log.h"
+ 
+ namespace input {
+@@ -44,7 +45,13 @@ void UpdatePads() {
      uint64_t now = SDL_GetTicks();
      if (!g_sdl || now == last) return;
      last = now;
@@ -297,11 +945,25 @@ index 8a0f1d0..a059d06 100644
      SDL_Event e;
      while (SDL_PeepEvents(&e, 1, SDL_GETEVENT, SDL_EVENT_FIRST, SDL_EVENT_LAST) == 1) {
          if (e.type == SDL_EVENT_GAMEPAD_ADDED) AddPad(e.gdevice.which);
+@@ -108,6 +115,7 @@ Pad Poll(int port) {
+         }
+     }
+     if (app::kGame.pad) app::kGame.pad(port, p);
++    if (det::FramePads()) det::FilterPad(port, p);
+     return p;
+ }
+ 
 diff --git a/runtime/cpu/dispatch.cpp b/runtime/cpu/dispatch.cpp
-index 1169944..9517a58 100644
+index 1169944..869e350 100644
 --- a/runtime/cpu/dispatch.cpp
 +++ b/runtime/cpu/dispatch.cpp
-@@ -13,7 +13,7 @@
+@@ -8,12 +8,13 @@
+ #include <vector>
+ 
+ #include "core/log.h"
++#include "core/determinism.h"
+ #include "cpu/x86_ops.h"
+ #include "kernel/kernel.h"
  
  #ifdef _WIN32
  #include <intrin.h>
@@ -310,6 +972,17 @@ index 1169944..9517a58 100644
  #include <x86intrin.h>
  #endif
  
+@@ -238,6 +239,10 @@ void x86_debug_service(X86Context& ctx, uint8_t* base, uint32_t va) {
+ 
+ // the guest measured time against a 733.33 MHz time stamp counter
+ uint64_t x86_rdtsc() {
++    if (det::FixedStep()) {
++        det::NoteRdtsc();
++        return det::Rdtsc();
++    }
+     using namespace std::chrono;
+     static const auto start = steady_clock::now();
+     auto ns = duration_cast<nanoseconds>(steady_clock::now() - start).count();
 diff --git a/runtime/gpu/render_thread.cpp b/runtime/gpu/render_thread.cpp
 index 5b8aa22..b62ce91 100644
 --- a/runtime/gpu/render_thread.cpp
@@ -1682,10 +2355,18 @@ index c35896c..939d623 100644
      vkDestroyCommandPool(device_, pool_, nullptr); vkDestroyDevice(device_, nullptr); device_ = VK_NULL_HANDLE;
      if (surface_) { vkDestroySurfaceKHR(instance_, surface_, nullptr); surface_ = VK_NULL_HANDLE; std::lock_guard lock(g_handover_lock); g_surface = VK_NULL_HANDLE; }
 diff --git a/runtime/kernel/boot.cpp b/runtime/kernel/boot.cpp
-index 9fc79d1..2c50340 100644
+index 9fc79d1..97642d1 100644
 --- a/runtime/kernel/boot.cpp
 +++ b/runtime/kernel/boot.cpp
-@@ -29,6 +29,14 @@
+@@ -4,6 +4,7 @@
+ #include <fstream>
+ 
+ #include "app/app.h"
++#include "core/determinism.h"
+ #include "kernel/kernel.h"
+ 
+ #ifdef _WIN32
+@@ -29,6 +30,14 @@
  #include <fcntl.h>
  #include <poll.h>
  #include <unistd.h>
@@ -1700,7 +2381,15 @@ index 9fc79d1..2c50340 100644
  #endif
  #include "xbe/xbe.h"
  
-@@ -222,12 +230,26 @@ void Relaunch(const char* exe) {
+@@ -133,6 +142,7 @@ bool Boot(std::vector<uint8_t> xbe, const std::string& xbe_name, const std::stri
+         W32(sec_hdr + uint32_t(i) * 56 + 0x18, 1);
+     }
+     if (app::kGame.loaded) app::kGame.loaded();
++    det::OnImageLoaded();
+ 
+     InitKernelData();
+     dispatch::Init();
+@@ -222,12 +232,26 @@ void Relaunch(const char* exe) {
      std::_Exit(0);
  #else
      char self[4096] = {};
@@ -1727,7 +2416,7 @@ index 9fc79d1..2c50340 100644
      path = path.substr(0, path.find_last_of('/') + 1) + exe;
  
      // The new instance's argument vector: this one's, read back from
-@@ -322,6 +344,9 @@ void Relaunch(const char* exe) {
+@@ -322,6 +346,9 @@ void Relaunch(const char* exe) {
      } else if ((listener = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0)) < 0) {
          LOGE("relaunch: handover socket failed (%s)", std::strerror(errno));
      } else {
@@ -1737,7 +2426,7 @@ index 9fc79d1..2c50340 100644
          sockaddr_un addr{};
          addr.sun_family = AF_UNIX;
          addr.sun_path[0] = '\0';  // abstract namespace: the name is not a file
-@@ -333,8 +358,15 @@ void Relaunch(const char* exe) {
+@@ -333,8 +360,15 @@ void Relaunch(const char* exe) {
              LOGE("relaunch: handover listen failed (%s)", std::strerror(errno));
          } else {
              listening = true;
@@ -1753,7 +2442,7 @@ index 9fc79d1..2c50340 100644
          }
      }
  
-@@ -384,7 +416,12 @@ void Relaunch(const char* exe) {
+@@ -384,7 +418,12 @@ void Relaunch(const char* exe) {
              }
              if (!(fds[0].revents & (POLLIN | POLLERR | POLLHUP))) continue;
              if (conn < 0) {
@@ -1766,6 +2455,20 @@ index 9fc79d1..2c50340 100644
                  if (conn < 0) {
                      if (errno == EINTR || errno == EAGAIN) continue;
                      LOGW("relaunch: handover accept failed (%s)", std::strerror(errno));
+diff --git a/runtime/kernel/kernel.h b/runtime/kernel/kernel.h
+index b00079f..fe0d3d1 100644
+--- a/runtime/kernel/kernel.h
++++ b/runtime/kernel/kernel.h
+@@ -139,6 +139,9 @@ int32_t ReleaseSemaphore(Object& o, int32_t count, uint32_t& status);
+ int32_t ReleaseMutant(Object& o, uint32_t& status);
+ int64_t Now100ns();                           // system time, 100 ns since 1601
+ int64_t ToDeadline(int64_t due_100ns);        // relative or absolute to a steady clock deadline in ns
++// Fixed-step harness: write the three kernel clocks, and fire timers whose guest deadline has passed.
++void SetDeterministicClocks(uint64_t interrupt_100ns, uint64_t system_100ns, uint32_t tick_ms);
++void FireDueTimers(X86Context& ctx);
+ void QueueDpc(uint32_t dpc, uint32_t arg1, uint32_t arg2);
+ struct Thread;
+ // apc_routine runs on apc_thread with (apc_context, due low, due high) each time the timer fires
 diff --git a/runtime/kernel/memory.cpp b/runtime/kernel/memory.cpp
 index e36cacd..cf36874 100644
 --- a/runtime/kernel/memory.cpp
@@ -1925,6 +2628,98 @@ index e36cacd..cf36874 100644
  }
  
  bool IsCommitted(uint32_t va) { return InPhysical(va) || g_committed[va >> 12] != 0; }
+diff --git a/runtime/kernel/objects.cpp b/runtime/kernel/objects.cpp
+index 9630759..2c81056 100644
+--- a/runtime/kernel/objects.cpp
++++ b/runtime/kernel/objects.cpp
+@@ -4,6 +4,7 @@
+ #include <map>
+ #include <queue>
+ 
++#include "core/determinism.h"
+ #include "kernel/kernel.h"
+ 
+ namespace kernel {
+@@ -192,6 +193,7 @@ static void Consume(Object& o, uint32_t me) {
+ }
+ 
+ int64_t Now100ns() {
++    if (det::FixedStep()) return int64_t(det::SystemTime100ns());
+     using namespace std::chrono;
+     // 1601 to 1970 in 100 ns units
+     auto t = duration_cast<nanoseconds>(system_clock::now().time_since_epoch()).count();
+@@ -384,6 +386,11 @@ static void TimerLoop() {
+             g_timer_cv.wait(lock);
+             continue;
+         }
++        if (det::FixedStep()) {
++            // Present fires due timers on the game thread. This thread must not pop them too.
++            g_timer_cv.wait_for(lock, milliseconds(200));
++            continue;
++        }
+         int64_t now = duration_cast<nanoseconds>(steady_clock::now().time_since_epoch()).count();
+         TimerEntry e = g_timers.top();
+         if (e.deadline > now) {
+@@ -424,10 +431,58 @@ void SetTimer(ObjectRef timer, int64_t due, int32_t period_ms, uint32_t dpc, std
+     }
+     uint64_t seq = g_seq++;
+     g_timer_seq[timer.get()] = seq;
+-    g_timers.push({ToDeadline(due), seq, timer, period_ms, dpc, apc_thread, apc_routine, apc_context});
++    int64_t deadline;
++    if (det::FixedStep()) {
++        int64_t now = det::SystemTime100ns();
++        deadline = due < 0 ? now + (due == INT64_MIN ? 0 : -due) : due;
++    } else {
++        deadline = ToDeadline(due);
++    }
++    g_timers.push({deadline, seq, timer, period_ms, dpc, apc_thread, apc_routine, apc_context});
+     g_timer_cv.notify_all();
+ }
+ 
++void FireDueTimers(X86Context& ctx) {
++    if (!det::FixedStep()) return;
++    std::vector<TimerEntry> due;
++    {
++        std::lock_guard<std::mutex> lock(g_timer_lock);
++        std::vector<TimerEntry> keep;
++        while (!g_timers.empty()) {
++            TimerEntry e = g_timers.top();
++            g_timers.pop();
++            auto it = g_timer_seq.find(e.timer.get());
++            if (it == g_timer_seq.end() || it->second != e.seq) continue;
++            if (e.deadline <= int64_t(det::SystemTime100ns())) due.push_back(e);
++            else keep.push_back(e);
++        }
++        for (TimerEntry& e : keep) g_timers.push(e);
++    }
++    for (TimerEntry& e : due) {
++        {
++            std::lock_guard<std::mutex> dl(g_dispatch);
++            SetSignal(*e.timer, 1);
++            g_cv.notify_all();
++        }
++        uint64_t now = det::SystemTime100ns();
++        if (e.dpc) {
++            uint32_t dpc = e.dpc;
++            G<uint8_t>(dpc + 2) = 0;
++            uint32_t routine = R32(dpc + 0x0C), context = R32(dpc + 0x10);
++            if (routine) CallGuest(ctx, routine, {dpc, context, uint32_t(now), uint32_t(now >> 32)});
++        }
++        if (auto t = e.apc_thread.lock(); t && e.apc_routine)
++            QueueApc(*t, e.apc_routine, e.apc_context, uint32_t(now), uint32_t(now >> 32));
++        std::lock_guard<std::mutex> lock(g_timer_lock);
++        if (e.period_ms > 0) {
++            e.deadline += int64_t(e.period_ms) * 10000;
++            g_timers.push(e);
++        } else {
++            g_timer_seq.erase(e.timer.get());
++        }
++    }
++}
++
+ bool CancelTimer(Object& timer) {
+     std::lock_guard<std::mutex> lock(g_timer_lock);
+     return g_timer_seq.erase(&timer) != 0;
 diff --git a/runtime/kernel/threads.cpp b/runtime/kernel/threads.cpp
 index 56fadb8..5e60004 100644
 --- a/runtime/kernel/threads.cpp
@@ -1940,13 +2735,78 @@ index 56fadb8..5e60004 100644
      pthread_setname_np(pthread_self(), name);
  #endif
 diff --git a/runtime/kernel/xboxkrnl.cpp b/runtime/kernel/xboxkrnl.cpp
-index 86cf14a..be43da8 100644
+index 86cf14a..9c8e41c 100644
 --- a/runtime/kernel/xboxkrnl.cpp
 +++ b/runtime/kernel/xboxkrnl.cpp
-@@ -250,8 +250,14 @@ KERNEL_EXPORT(127, KeQueryPerformanceFrequency, 0) {
+@@ -5,6 +5,7 @@
+ #include <ctime>
+ 
+ #include "app/app.h"
++#include "core/determinism.h"
+ #include "kernel/crypto.h"
+ #include "kernel/exports.h"
+ #include "xbe/xbe.h"
+@@ -106,6 +107,11 @@ void InitKernelData() {
+     std::thread([] {
+         auto start = std::chrono::steady_clock::now();
+         for (;;) {
++            // Fixed step owns these three. A wall-clock writer would race the frame clock.
++            if (det::FixedStep()) {
++                std::this_thread::sleep_for(std::chrono::milliseconds(10));
++                continue;
++            }
+             auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - start).count();
+             W32(g_tick_count_va, uint32_t(ms));
+             PutSystemTime(DataAddress(120), InterruptTime());
+@@ -113,6 +119,14 @@ void InitKernelData() {
+             std::this_thread::sleep_for(std::chrono::milliseconds(1));
+         }
+     }).detach();
++    if (det::FixedStep()) SetDeterministicClocks(det::InterruptTime100ns(), det::SystemTime100ns(), det::TickMs());
++}
++
++void SetDeterministicClocks(uint64_t interrupt_100ns, uint64_t system_100ns, uint32_t tick_ms) {
++    if (!g_tick_count_va) return;
++    W32(g_tick_count_va, tick_ms);
++    PutSystemTime(DataAddress(120), interrupt_100ns);
++    PutSystemTime(DataAddress(154), system_100ns);
+ }
+ 
+ // critical sections
+@@ -217,13 +231,13 @@ KERNEL_EXPORT(103, KeGetCurrentIrql, 0) { return Irql(); }
+ KERNEL_EXPORT(121, KeIsExecutingDpc, 0) { return 0; }
+ 
+ KERNEL_EXPORT(125, KeQueryInterruptTime, 0) {
+-    uint64_t t = InterruptTime();
++    uint64_t t = det::FixedStep() ? det::InterruptTime100ns() : InterruptTime();
+     ctx.edx = uint32_t(t >> 32);
+     return uint32_t(t);
+ }
+ 
+ KERNEL_EXPORT(128, KeQuerySystemTime, 1) {
+-    W64(a[0], uint64_t(Now100ns()));
++    W64(a[0], det::FixedStep() ? det::SystemTime100ns() : uint64_t(Now100ns()));
+     return 0;
+ }
+ 
+@@ -236,6 +250,12 @@ KERNEL_EXPORT(228, NtSetSystemTime, 2) {
+ constexpr uint64_t kPerfFrequency = 3375000;
+ 
+ KERNEL_EXPORT(126, KeQueryPerformanceCounter, 0) {
++    if (det::FixedStep()) {
++        det::NoteQpc();
++        uint64_t v = det::PerfCounter();
++        ctx.edx = uint32_t(v >> 32);
++        return uint32_t(v);
++    }
+     using namespace std::chrono;
+     static const auto start = steady_clock::now();
+     uint64_t ns = uint64_t(duration_cast<nanoseconds>(steady_clock::now() - start).count());
+@@ -250,12 +270,23 @@ KERNEL_EXPORT(127, KeQueryPerformanceFrequency, 0) {
  }
  
  KERNEL_EXPORT(151, KeStallExecutionProcessor, 1) {
++    if (det::FixedStep()) return 0;
 +#if defined(__APPLE__)
 +    // The Xbox call busy-waits. Sleeping the requested interval keeps the core
 +    // idle; a zero stall stays a no-op.
@@ -1958,3 +2818,216 @@ index 86cf14a..be43da8 100644
      return 0;
  }
  
+ KERNEL_EXPORT(99, KeDelayExecutionThread, 3) {
++    if (det::FixedStep()) {
++        det::NoteDelay();
++        return kSuccess;
++    }
+     int64_t interval = int64_t(R64(a[2]));
+     bool alertable = a[1] & 0xFF;
+     Thread* t = Current();
+diff --git a/runtime/xdk/d3d8.cpp b/runtime/xdk/d3d8.cpp
+index 8c6c913..cfee2a2 100644
+--- a/runtime/xdk/d3d8.cpp
++++ b/runtime/xdk/d3d8.cpp
+@@ -14,6 +14,7 @@
+ #if !defined(_WIN32)
+ #include "app/platform.h"  // app::HostAspect (Linux Hor+ widening)
+ #endif
++#include "core/determinism.h"
+ #include "core/diag.h"
+ #include "gpu/backend.h"
+ #include "gpu/texture.h"
+@@ -548,6 +549,10 @@ void VerticalBlank(X86Context& ctx) {
+     uint32_t info = mem::AllocSystem(12), shown = 0;
+     auto next = clock::now();
+     for (;;) {
++        if (det::FixedStep()) {
++            std::this_thread::sleep_for(std::chrono::milliseconds(50));
++            continue;
++        }
+         next = std::max(next + std::chrono::microseconds(16667), clock::now());
+         std::this_thread::sleep_until(next);
+         uint32_t count = Dev(XDK_CDevice_VBlankCount) + 1, swaps = Dev(kDevSwapCount);
+@@ -573,6 +578,30 @@ void VerticalBlank(X86Context& ctx) {
+ const gpu::State& State() { return g_state; }
+ std::recursive_mutex& Lock() { return g_lock; }
+ 
++void BumpVblank() {
++    if (!kVBlank) return;
++    uint32_t count = Dev(XDK_CDevice_VBlankCount) + 1;
++    SetDev(XDK_CDevice_VBlankCount, count);
++    ObjectRef event = FromPointer(kDevice + XDK_CDevice_VBlankEvent);
++    if (event) SetEvent(*event);
++}
++
++void VolatileSpans(void (*fn)(uint32_t va, uint32_t size, const char* name, void* user), void* user) {
++    if (!fn) return;
++    if (g_scratch_push && g_scratch_size) fn(g_scratch_push, g_scratch_size, "gpu-scratch", user);
++    auto surf = [&](uint32_t hdr, const char* name) {
++        if (!hdr) return;
++        uint32_t size = R32(hdr + 0x10);
++        if (!size) return;
++        uint32_t bytes = ((size >> 24 & 0xFF) + 1) * 64 * ((size >> 12 & 0xFFF) + 1);
++        uint32_t data = mem::VirtualFromPhysical(R32(hdr + 4));
++        if (data && bytes) fn(data, bytes, name, user);
++    };
++    const char* names[] = {"color0", "color1", "color2"};
++    for (uint32_t i = 0; i < g_buffer_count && i < 3; i++) surf(g_buffers[i], names[i]);
++    surf(g_depth, "depth");
++}
++
+ }  // namespace d3d
+ 
+ using namespace d3d;
+@@ -808,6 +837,7 @@ HLE_STDCALL(D3D_MakeRequestedSpace, 2) {
+ }
+ 
+ HLE_STDCALL(D3DDevice_BlockUntilVerticalBlank, 0) {
++    if (det::FixedStep()) return 0;
+     // Wait for the blank the title is actually counting, not a fixed sleep. 16 ms is neither the
+     // 16.667 ms period nor in phase with it, so a frame that finished just after one blank waited
+     // past the next and the title locked to half the refresh.
+@@ -945,7 +975,7 @@ uint32_t PresentFrame(const char* name) {
+         }
+     }
+     if (g_backend) g_backend->Present(SurfaceOf(g_buffers[1]));
+-    app::Pace();
++    if (!det::FixedStep()) app::Pace();
+     // like the XDK, the surfaces stay put and their memory rotates: titles keep back buffer pointers and copy its data
+     uint32_t last = g_buffers[g_buffer_count - 1], data = R32(last + 4), lk = R32(last + 8);
+     for (uint32_t i = g_buffer_count - 1; i > 0; i--) {
+@@ -962,13 +992,18 @@ uint32_t PresentFrame(const char* name) {
+ }
+ }  // namespace
+ 
+-HLE_STDCALL(D3DDevice_Swap, 1) { return PresentFrame("Swap"); }
++HLE_STDCALL(D3DDevice_Swap, 1) {
++    uint32_t n = PresentFrame("Swap");
++    det::OnPresented(ctx);
++    return n;
++}
+ 
+ // Present(pSourceRect, pDestRect, hDestWindowOverride, pDirtyRegion), how XDK 3925 presents: it has no Swap. The
+ // same frame as Swap's, the arguments ignored as Swap's flags are, and S_OK, the HRESULT the library's own body
+ // leaves in eax whenever no display mode change is pending.
+ HLE_STDCALL(D3DDevice_Present, 4) {
+     PresentFrame("Present");
++    det::OnPresented(ctx);
+     return 0;
+ }
+ 
+diff --git a/runtime/xdk/d3d8.h b/runtime/xdk/d3d8.h
+index 4e1eaa6..63bb7b4 100644
+--- a/runtime/xdk/d3d8.h
++++ b/runtime/xdk/d3d8.h
+@@ -8,5 +8,9 @@ namespace d3d {
+ // read-only: the XDK entry points write it and mark what they wrote for the render thread (gpu::State::Mark)
+ const gpu::State& State();
+ std::recursive_mutex& Lock();
++// Guest ranges the GPU rewrites every frame. The determinism hash zeros them.
++void VolatileSpans(void (*fn)(uint32_t va, uint32_t size, const char* name, void* user), void* user);
++// One vertical blank, used when the frame clock advances instead of the 60 Hz thread.
++void BumpVblank();
+ 
+ }  // namespace d3d
+diff --git a/runtime/xdk/dsound.cpp b/runtime/xdk/dsound.cpp
+index 37e9f91..dd2a30a 100644
+--- a/runtime/xdk/dsound.cpp
++++ b/runtime/xdk/dsound.cpp
+@@ -9,6 +9,7 @@
+ #include <vector>
+ 
+ #include "audio/audio.h"
++#include "core/determinism.h"
+ #include "xbe/xbe.h"
+ #include "xdk/hle.h"
+ #include "xdk/layout.h"
+@@ -278,8 +279,11 @@ void Deactivate(Voice& v) {
+     if (v.active) v.active = v.paused = v.ending = false;
+ }
+ 
+-void Render(float* out, uint32_t frames) {
+-    std::memset(out, 0, frames * 2 * sizeof(float));
++// clock false: the SDL callback in fixed-step mode. Silence, and do not move a voice cursor.
++// The present thread advances the mixer by a fixed sample count instead.
++void RenderClocked(float* out, uint32_t frames, bool clock) {
++    if (out && frames) std::memset(out, 0, frames * 2 * sizeof(float));
++    if (!clock || !out || !frames) return;
+     std::lock_guard<std::recursive_mutex> lock(g_lock);
+     for (auto& [obj, v] : g_voices) {
+         if (v.paused || v.sync || (!v.stream && !v.playing)) continue;
+@@ -379,6 +383,8 @@ void Render(float* out, uint32_t frames) {
+     }
+ }
+ 
++void Render(float* out, uint32_t frames) { RenderClocked(out, frames, !det::FixedStep()); }
++
+ int64_t NowMs() {
+     using namespace std::chrono;
+     return duration_cast<milliseconds>(steady_clock::now().time_since_epoch()).count();
+@@ -400,6 +406,8 @@ void Start() {
+             {
+                 std::unique_lock<std::recursive_mutex> lock(g_lock);
+                 g_done_cv.wait_for(lock, std::chrono::milliseconds(50));
++                // Fixed step drains completions on the present thread, in guest order.
++                if (det::FixedStep()) continue;
+                 if (NowMs() - g_pumped < kPumpMs) continue;
+                 done.assign(g_done.begin(), g_done.end());
+                 g_done.clear();
+@@ -476,6 +484,23 @@ float F32(uint32_t v) {
+ 
+ }  // namespace
+ 
++namespace dsound {
++// One sim frame of audio on the thread that presented, then the completions that produced.
++// The SDL callback stays silent for the whole fixed-step run, so this is the only cursor advance.
++void AdvanceFixed(X86Context& ctx, uint32_t frames) {
++    if (!frames) return;
++    std::vector<float> out(size_t(frames) * 2);
++    RenderClocked(out.data(), frames, true);
++    std::vector<Done> done;
++    {
++        std::lock_guard<std::recursive_mutex> lock(g_lock);
++        done.assign(g_done.begin(), g_done.end());
++        g_done.clear();
++    }
++    Run(ctx, done);
++}
++}  // namespace dsound
++
+ // device
+ 
+ // DSOUND objects are the host's; .XTLID names linked exports that would still run console code on them
+diff --git a/runtime/xdk/xapi.cpp b/runtime/xdk/xapi.cpp
+index 3783383..5a4059e 100644
+--- a/runtime/xdk/xapi.cpp
++++ b/runtime/xdk/xapi.cpp
+@@ -1,6 +1,7 @@
+ // XAPI functions that talk to hardware: controller ports and the hard disk cache partition
+ #include <chrono>
+ 
++#include "core/determinism.h"
+ #include "core/input.h"
+ #include "xdk/hle.h"
+ #include "xdk/layout.h"
+@@ -38,6 +39,10 @@ std::unordered_map<uint32_t, Handle> g_handles;
+ 
+ }  // namespace
+ 
++namespace xapi {
++void PollPortsOnce() { UpdatePorts(); }
++}  // namespace xapi
++
+ HLE_STDCALL(XMountUtilityDrive, 1) {
+     CreateSymbolicLink("\\??\\Z:", "\\Device\\Harddisk0\\Partition5");
+     return 1;
+@@ -59,6 +64,8 @@ HLE_STDCALL(XInitDevices, 2) {
+         std::thread([] {
+             for (;;) {
+                 std::this_thread::sleep_for(std::chrono::milliseconds(250));
++                // Record, replay, and fixed step sample the ports once per present instead.
++                if (det::FramePads()) continue;
+                 UpdatePorts();
+             }
+         }).detach();
