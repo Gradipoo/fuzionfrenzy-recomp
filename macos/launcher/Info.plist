@@ -5,15 +5,17 @@
     <key>CFBundleDevelopmentRegion</key>
     <string>en</string>
     <key>CFBundleExecutable</key>
-    <string>FuzionFrenzyLauncher</string>
+    <string>RingHostLauncher</string>
     <key>CFBundleIdentifier</key>
-    <string>local.fuzionfrenzy.launcher</string>
+    <string>local.ringhost.launcher</string>
     <key>CFBundleInfoDictionaryVersion</key>
     <string>6.0</string>
     <key>CFBundleName</key>
-    <string>Fuzion Frenzy</string>
+    <string>Ring Host</string>
     <key>CFBundleDisplayName</key>
-    <string>Fuzion Frenzy</string>
+    <string>Ring Host</string>
+    <key>CFBundleIconFile</key>
+    <string>RingHost</string>
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>CFBundleShortVersionString</key>

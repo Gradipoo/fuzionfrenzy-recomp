@@ -64,13 +64,13 @@ struct ContentView: View {
         VStack(alignment: .leading, spacing: 18) {
             MenuLink(title: "choose disc", active: true) { model.browse() }
             Text("Point this at your own USA disc image, or at a folder that already holds the extracted disc. The executable on its own is not enough. This app does not include the game.")
-                .font(.system(size: 15))
+                .font(.arena(15)).arenaSoft()
                 .foregroundStyle(Arena.ghost.opacity(0.9))
                 .frame(maxWidth: 520, alignment: .leading)
                 .fixedSize(horizontal: false, vertical: true)
             if let error = model.error {
                 Text(error)
-                    .font(.system(size: 15))
+                    .font(.arena(15)).arenaSoft()
                     .foregroundStyle(Arena.yellow)
                     .textSelection(.enabled)
                     .frame(maxWidth: 560, alignment: .leading)
@@ -86,10 +86,10 @@ struct ContentView: View {
         VStack(alignment: .leading, spacing: 8) {
             if let verdict = model.verdict {
                 Text(verdict.confirmed ? "usa release" : "disc image")
-                    .font(.system(size: 15))
+                    .font(.arena(15)).arenaSoft()
                     .foregroundStyle(Arena.ghost)
                 Text(verdict.detail)
-                    .font(.system(size: 13))
+                    .font(.arena(13)).arenaSoft()
                     .foregroundStyle(Arena.ghost.opacity(0.75))
                     .textSelection(.enabled)
                     .frame(maxWidth: 460, alignment: .leading)
@@ -103,7 +103,7 @@ struct ContentView: View {
             Text(model.gameRunning
                  ? "The game is open. Settings were written beside it."
                  : "The first play compiles from your disc on this Mac. Later plays reuse that build.")
-                .font(.system(size: 13))
+                .font(.arena(13)).arenaSoft()
                 .foregroundStyle(Arena.ghost.opacity(0.75))
                 .frame(maxWidth: 460, alignment: .leading)
         }
@@ -121,7 +121,7 @@ struct ContentView: View {
                 Text(model.settings.displayMode == "borderless"
                      ? "Borderless follows the display. The size below is kept for the other modes."
                      : "Windowed and fullscreen use the size below.")
-                    .font(.system(size: 12))
+                    .font(.arena(12)).arenaSoft()
                     .foregroundStyle(Arena.ghost.opacity(0.65))
                     .padding(.top, 4)
 
@@ -140,7 +140,7 @@ struct ContentView: View {
                     }
                 }
                 Text("30 is the cooler cap. 60 is the game's pace.")
-                    .font(.system(size: 12))
+                    .font(.arena(12)).arenaSoft()
                     .foregroundStyle(Arena.ghost.opacity(0.65))
 
                 GroupLabel(title: "vsync")
@@ -165,7 +165,7 @@ struct ContentView: View {
                 Choice(title: "on", on: model.settings.ultrawide) { model.settings.ultrawide = true }
                 Choice(title: "off", on: !model.settings.ultrawide) { model.settings.ultrawide = false }
                 Text("Stored for the game. Extra-wide drawing stays off unless SIMSBO_HORPLUS is set.")
-                    .font(.system(size: 12))
+                    .font(.arena(12)).arenaSoft()
                     .foregroundStyle(Arena.ghost.opacity(0.65))
 
                 GroupLabel(title: "anisotropic")
@@ -177,7 +177,7 @@ struct ContentView: View {
 
                 GroupLabel(title: "not on this mac")
                 Text("HDR is a Windows setting and stays off. The disc's movies are 640×480. There is no 4K movie option.")
-                    .font(.system(size: 13))
+                    .font(.arena(13)).arenaSoft()
                     .foregroundStyle(Arena.ghost.opacity(0.8))
                     .frame(maxWidth: 420, alignment: .leading)
                     .padding(.bottom, 12)
@@ -191,14 +191,14 @@ struct ContentView: View {
             Choice(title: "on", on: model.settings.sound) { model.settings.sound = true }
             Choice(title: "off", on: !model.settings.sound) { model.settings.sound = false }
             Text("Off silences the game. This port has no volume slider.")
-                .font(.system(size: 12))
+                .font(.arena(12)).arenaSoft()
                 .foregroundStyle(Arena.ghost.opacity(0.65))
 
             GroupLabel(title: "scripted pad")
             Choice(title: "off", on: !model.settings.scriptedPad) { model.settings.scriptedPad = false }
             Choice(title: "on", on: model.settings.scriptedPad) { model.settings.scriptedPad = true }
             Text("Leave this off to play. On, the port's self-test drives Start, Up, and A through the intro, then walks. You skip the intro yourself with Start or Enter.")
-                .font(.system(size: 12))
+                .font(.arena(12)).arenaSoft()
                 .foregroundStyle(Arena.ghost.opacity(0.65))
                 .frame(maxWidth: 440, alignment: .leading)
                 .padding(.top, 4)
@@ -206,13 +206,13 @@ struct ContentView: View {
             GroupLabel(title: "system-link host")
             TextField("address", text: $model.settings.joinIP)
                 .textFieldStyle(.plain)
-                .font(.system(size: 18))
+                .font(.arena(18)).arenaSoft()
                 .foregroundStyle(Arena.white)
                 .frame(maxWidth: 280)
                 .padding(.vertical, 4)
                 .overlay(alignment: .bottom) { Rectangle().fill(Arena.yellow).frame(height: 1) }
             Text("Empty stays on the local network.")
-                .font(.system(size: 12))
+                .font(.arena(12)).arenaSoft()
                 .foregroundStyle(Arena.ghost.opacity(0.65))
                 .padding(.top, 6)
         }
@@ -221,13 +221,13 @@ struct ContentView: View {
     private var controlsPage: some View {
         VStack(alignment: .leading, spacing: 10) {
             Text("A controller is an Xbox pad, in the order controllers are plugged in. This port has no button remapper. The keyboard is fixed.")
-                .font(.system(size: 14))
+                .font(.arena(14)).arenaSoft()
                 .foregroundStyle(Arena.ghost)
                 .frame(maxWidth: 460, alignment: .leading)
             LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible())], alignment: .leading, spacing: 6) {
                 ForEach(KeyboardMap.rows, id: \.0) { key, pad in
                     Text("\(key)   \(pad)")
-                        .font(.system(size: 13, design: .monospaced))
+                        .font(.arenaMono(13)).arenaSoft()
                         .foregroundStyle(Arena.ghost.opacity(0.9))
                 }
             }
@@ -239,7 +239,7 @@ struct ContentView: View {
         VStack(alignment: .leading, spacing: 8) {
             if let path = model.verdict?.iso?.path ?? model.verdict?.folder?.path {
                 Text(model.pretty(path: path))
-                    .font(.system(size: 13, design: .monospaced))
+                    .font(.arenaMono(13)).arenaSoft()
                     .foregroundStyle(Arena.ghost)
                     .lineLimit(2)
                     .truncationMode(.middle)
@@ -251,7 +251,7 @@ struct ContentView: View {
                 tools.padding(.top, 12)
             } else {
                 Text("Tools are on this Mac.")
-                    .font(.system(size: 13))
+                    .font(.arena(13)).arenaSoft()
                     .foregroundStyle(Arena.ghost.opacity(0.7))
                     .padding(.top, 8)
             }
@@ -267,10 +267,10 @@ struct ContentView: View {
                         .frame(width: 6, height: 6)
                     VStack(alignment: .leading, spacing: 1) {
                         Text(item.title.lowercased())
-                            .font(.system(size: 14))
+                            .font(.arena(14)).arenaSoft()
                             .foregroundStyle(item.ok ? Arena.ghost : Arena.white)
                         Text(item.detail)
-                            .font(.system(size: 11))
+                            .font(.arena(11)).arenaSoft()
                             .foregroundStyle(Arena.ghost.opacity(0.7))
                             .textSelection(.enabled)
                     }
@@ -285,7 +285,7 @@ struct ContentView: View {
         VStack(alignment: .leading, spacing: 6) {
             if let error = model.error, model.verdict?.ok == true {
                 Text(error)
-                    .font(.system(size: 13))
+                    .font(.arena(13)).arenaSoft()
                     .foregroundStyle(Arena.yellow)
                     .textSelection(.enabled)
                     .lineLimit(4)
@@ -293,7 +293,7 @@ struct ContentView: View {
             if model.busy || !model.logLines.isEmpty {
                 HStack(spacing: 10) {
                     Text(model.stage.lowercased())
-                        .font(.system(size: 12))
+                        .font(.arena(12)).arenaSoft()
                         .foregroundStyle(Arena.ghost)
                     GeometryReader { geo in
                         ZStack(alignment: .leading) {
@@ -306,14 +306,14 @@ struct ContentView: View {
                     .frame(height: 3)
                     if let progress = model.progress {
                         Text("\(Int(progress * 100))%")
-                            .font(.system(size: 12, design: .monospaced))
+                            .font(.arenaMono(12)).arenaSoft()
                             .foregroundStyle(Arena.ghost)
                     }
                 }
                 .frame(height: 16)
                 if model.busy {
                     Text(model.logLines.suffix(3).joined(separator: "   "))
-                        .font(.system(size: 11, design: .monospaced))
+                        .font(.arenaMono(11)).arenaSoft()
                         .foregroundStyle(Arena.ghost.opacity(0.65))
                         .lineLimit(2)
                         .frame(maxWidth: .infinity, alignment: .leading)

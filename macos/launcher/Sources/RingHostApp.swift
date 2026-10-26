@@ -1,9 +1,9 @@
 import SwiftUI
 
 @main
-struct FuzionLauncherApp: App {
+struct RingHostApp: App {
     var body: some Scene {
-        WindowGroup {
+        WindowGroup("Ring Host") {
             ContentView()
         }
         .windowStyle(.hiddenTitleBar)
