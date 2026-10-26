@@ -284,7 +284,7 @@ The Homebrew Vulkan loader is arm64, so a Linux `FuzionFrenzy` cannot be linked 
 Install one of these, then the packages inside the guest:
 
 - OrbStack, Lima, or Docker Desktop. A Lima VM is `brew install lima` and `limactl start`.
-- In the guest: `clang`, `cmake`, `ninja`, `python3`, `pkg-config`, `zlib1g-dev`, `libvulkan-dev`, `glslang-dev`, `mesa-vulkan-drivers`, `xvfb`, and the X11 headers SDL's CMake fetch needs (`libx11-dev`, `libxext-dev`, `libxrandr-dev`, `libxcursor-dev`, `libxi-dev`).
+- In the guest: `clang`, `lld`, `cmake`, `ninja`, `python3`, `pkg-config`, `zlib1g-dev`, `libvulkan-dev`, `glslang-dev`, `mesa-vulkan-drivers`, `xvfb`, and the libraries SDL's CMake fetch looks up (`libx11-dev`, `libxext-dev`, `libxrandr-dev`, `libxcursor-dev`, `libxi-dev`, `libxfixes-dev`, `libxrender-dev`, `libxss-dev`, `libxtst-dev`, `libxinerama-dev`, `libxxf86vm-dev`, `libwayland-dev`, `libxkbcommon-dev`, `libasound2-dev`, `libpulse-dev`, `libdbus-1-dev`, `libudev-dev`, `libdrm-dev`, `libgbm-dev`, `libgl1-mesa-dev`, `libegl1-mesa-dev`, `libibus-1.0-dev`, `libdecor-0-dev`, `libpipewire-0.3-dev`). The runtime links with `-fuse-ld=lld`.
 
 Lima's Ubuntu template mounts the home directory read-only. Configure writes the lockstep patch into `sdk/` and the recompiled guest into `out/`, so copy the tree onto the guest disk first. A writable mount is the other way. Either copy stays on this Mac.
 
