@@ -1,0 +1,28 @@
+--- a/runtime/kernel/memory.cpp
++++ b/runtime/kernel/memory.cpp
+@@ -157,12 +157,23 @@
+         return false;
+     }
+ #elif defined(__APPLE__)
+-    for (uint64_t p = first; p < end; p += kPage) g_committed[size_t(p >> 12)] = 1;
++    // XBE_LOCKSTEP_COMMIT: zero pages that were not already committed.
++    // Darwin MADV_DONTNEED does not promise zeros on the next access. Windows
++    // VirtualAlloc zeros a fresh commit, so a recommit has to do the same.
++    for (uint64_t p = first; p < end; p += kPage)
++        if (!g_committed[size_t(p >> 12)]) g_committed[size_t(p >> 12)] = 2;
+     if (!HostProtect(first, end)) {
+-        for (uint64_t p = first; p < end; p += kPage) g_committed[size_t(p >> 12)] = 0;
++        for (uint64_t p = first; p < end; p += kPage)
++            if (g_committed[size_t(p >> 12)] == 2) g_committed[size_t(p >> 12)] = 0;
+         LOGE("memory: commit %08X+%X failed", first, uint32_t(end - first));
+         return false;
+     }
++    for (uint64_t p = first; p < end; p += kPage) {
++        if (g_committed[size_t(p >> 12)] == 2) {
++            std::memset(g_base + p, 0, size_t(kPage));
++            g_committed[size_t(p >> 12)] = 1;
++        }
++    }
+ #else
+     if (mprotect(g_base + first, size_t(end - first), PROT_READ | PROT_WRITE)) {
+         LOGE("memory: commit %08X+%X failed", first, uint32_t(end - first));

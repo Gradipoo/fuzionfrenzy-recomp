@@ -1,0 +1,18 @@
+--- a/runtime/kernel/memory.cpp
++++ b/runtime/kernel/memory.cpp
+@@ -91,7 +91,14 @@
+         return false;
+     }
+ #endif
+-    for (uint64_t p = first; p < end; p += kPage) g_committed[size_t(p >> 12)] = 1;
++    // XBE_LOCKSTEP_COMMIT: zero pages that were not already committed.
++    // Linux mprotect does not zero. Windows VirtualAlloc does, on a fresh
++    // commit only. Do it here so a recommit matches on every host.
++    for (uint64_t p = first; p < end; p += kPage) {
++        size_t i = size_t(p >> 12);
++        if (!g_committed[i]) std::memset(g_base + p, 0, size_t(kPage));
++        g_committed[i] = 1;
++    }
+     return true;
+ }
+ 

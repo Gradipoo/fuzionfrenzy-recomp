@@ -3,7 +3,7 @@
 cmake_minimum_required(VERSION 3.25)
 
 # macOS arm64 support lives in patches/sdk-macos-arm64.patch, applied onto the
-# pinned SDK submodule. Idempotent. Linux and Windows configure the submodule as-is.
+# pinned SDK submodule. Idempotent. Linux and Windows do not apply it.
 if(APPLE)
     execute_process(
         COMMAND /bin/sh "${CMAKE_CURRENT_SOURCE_DIR}/tools/apply-macos-sdk.sh"
@@ -12,6 +12,15 @@ if(APPLE)
     if(NOT _xbe_macos_patch EQUAL 0)
         message(FATAL_ERROR "tools/apply-macos-sdk.sh failed (${_xbe_macos_patch})")
     endif()
+endif()
+# Cross-platform lockstep math and fresh-commit zeroing. Every host applies
+# this, after the Apple patch when there is one. Idempotent.
+execute_process(
+    COMMAND "${CMAKE_COMMAND}" -P "${CMAKE_CURRENT_SOURCE_DIR}/tools/apply-lockstep.cmake"
+    WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
+    RESULT_VARIABLE _xbe_lockstep_patch)
+if(NOT _xbe_lockstep_patch EQUAL 0)
+    message(FATAL_ERROR "tools/apply-lockstep.cmake failed (${_xbe_lockstep_patch})")
 endif()
 
 project(FuzionFrenzy LANGUAGES C CXX)
@@ -61,4 +70,19 @@ add_xbe_image(FuzionFrenzy default.xbe game.toml ${GAME_PARTITIONS} game)
 # existing macos-release build relinks instead of recompiling the guest.
 if(APPLE)
     set_target_properties(FuzionFrenzy PROPERTIES OUTPUT_NAME RingHost)
+endif()
+# Guest floating point has to match across arm64 and x86-64. No FMA contraction,
+# no fast-math, and no 80-bit x87 evaluation of float or double. clang-cl still
+# contracts under /fp:precise, so it gets the clang flag as well. GCC 16
+# contracts at -O2 unless -ffp-contract=off is passed.
+if(MSVC)
+    target_compile_options(FuzionFrenzy PRIVATE /fp:precise)
+    if(CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+        target_compile_options(FuzionFrenzy PRIVATE /clang:-ffp-contract=off /clang:-fno-fast-math)
+    endif()
+else()
+    target_compile_options(FuzionFrenzy PRIVATE -ffp-contract=off -fno-fast-math)
+    if(CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|AMD64|amd64")
+        target_compile_options(FuzionFrenzy PRIVATE -mfpmath=sse -msse2)
+    endif()
 endif()
