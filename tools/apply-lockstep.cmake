@@ -31,6 +31,22 @@ if(NOT _hdr MATCHES "XBE_LOCKSTEP_FP")
     message(STATUS "applied patches/sdk-lockstep.patch")
 endif()
 
+# Harness delta on top of the Apple patch's determinism.cpp. Linux has no
+# harness yet (the call sites live in the Apple patch), so a missing file is
+# skipped rather than failing the configure.
+set(_harness "${REPO}/patches/sdk-lockstep-harness.patch")
+if(EXISTS "${SDK}/runtime/core/determinism.cpp")
+    file(READ "${SDK}/runtime/core/determinism.cpp" _det)
+    if(NOT _det MATCHES "XBE_LOCKSTEP_HARNESS")
+        execute_process(COMMAND "${GIT_EXE}" -C "${SDK}" apply --whitespace=nowarn "${_harness}"
+                        RESULT_VARIABLE _rc)
+        if(NOT _rc EQUAL 0)
+            message(FATAL_ERROR "patches/sdk-lockstep-harness.patch failed (${_rc})")
+        endif()
+        message(STATUS "applied patches/sdk-lockstep-harness.patch")
+    endif()
+endif()
+
 file(READ "${SDK}/runtime/kernel/memory.cpp" _mem)
 if(NOT _mem MATCHES "XBE_LOCKSTEP_COMMIT")
     if(_mem MATCHES "HostProtect")

@@ -29,12 +29,12 @@ python3 - "$REPLAY" "$FRAMES" <<'PY'
 import sys
 path, frames = sys.argv[1], int(sys.argv[2])
 with open(path, "w") as f:
-    f.write("# fuzion-input 1\n")
-    f.write("# frame port connected buttons lx ly rx ry a b x y black white lt rt\n")
+    f.write("# fuzion-input 2\n")
+    f.write("# LogKey:frame|P1 c,buttons,lx,ly,rx,ry,a,b,x,y,black,white,lt,rt|P2 ...|P3 ...|P4 ...\n")
     f.write("# generated idle replay: four ports disconnected. Not from a game run.\n")
+    idle = "0,0000,0,0,0,0,00,00,00,00,00,00,00,00"
     for frame in range(frames):
-        for port in range(1, 5):
-            f.write(f"{frame} {port} 0 0000 0 0 0 0 00 00 00 00 00 00 00 00\n")
+        f.write(f"{frame}|{idle}|{idle}|{idle}|{idle}\n")
 PY
 
 run_one() {
