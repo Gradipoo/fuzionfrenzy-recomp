@@ -50,7 +50,7 @@ diff --git a/runtime/core/determinism.cpp b/runtime/core/determinism.cpp
  namespace kernel {
  extern const xbe::Image* g_image;
  void SetDeterministicClocks(uint64_t interrupt_100ns, uint64_t system_100ns, uint32_t tick_ms);
-@@ -1234,8 +1274,631 @@
+@@ -1234,8 +1274,634 @@
      t_sw.has_ticket = true;
  }
  
@@ -235,6 +235,9 @@ diff --git a/runtime/core/determinism.cpp b/runtime/core/determinism.cpp
 +    auto* uc = static_cast<ucontext_t*>(uctx);
 +    int tid = MyTid();
 +    WatchSlot* s = FindSlot(tid);
++#ifndef TRAP_PERF
++#define TRAP_PERF 6
++#endif
 +    const bool perf = info && info->si_code == TRAP_PERF;
 +#if defined(__x86_64__)
 +    const bool trace = info && info->si_code == TRAP_TRACE;
