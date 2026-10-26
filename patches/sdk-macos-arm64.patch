@@ -361,7 +361,7 @@ index 5b8aa22..b62ce91 100644
          for (;;) {
              Batch* b;
 diff --git a/runtime/gpu/shaders.cpp b/runtime/gpu/shaders.cpp
-index 274ab60..84ed6c9 100644
+index 274ab60..a14882c 100644
 --- a/runtime/gpu/shaders.cpp
 +++ b/runtime/gpu/shaders.cpp
 @@ -205,6 +205,7 @@ std::string VsInputs(uint16_t regs, uint64_t decode) {
@@ -403,6 +403,32 @@ index 274ab60..84ed6c9 100644
              std::string cube;
              if (t.shadow)
                  body += F("float4 t%d = shadow(tex%d, smp%d, (tc%d.xy / tc%d.w)%s, tc%d.z / tc%d.w, %d, i.pos.xy, texsize[%d].xy);\n", i, i,
+@@ -873,8 +878,23 @@ std::string PixelHlsl(const PixelKey& k) {
+             body += Hooks().Fetched(t, i);
+             if ((k.alphakill >> i) & 1) body += F("if (t%d.a == 0) discard;\n", i);
+             const char* dst = f[8] == 5 ? "tmp" : "cur";
+-            std::string rgb = FfOp(f[0], FfArg(f[1], i, false), FfArg(f[2], i, false), FfArg(f[3], i, false), i, false);
+-            std::string a = f[4] <= 1 ? std::string("cur.a") : FfOp(f[4], FfArg(f[5], i, true), FfArg(f[6], i, true), FfArg(f[7], i, true), i, true);
++            // MODULATE2X is the shared stage on the white Twisted System characters and level
++            // meshes: arg order is texture * current, and the lit diffuse is 0.74 (vertex color
++            // 0.5 times ambient 0.5 plus a white light). Scaling the product by 2 then clamping
++            // turns every texel above about 0.67 white. The x2 exists to undo that 0.5 bias, so
++            // saturate the scaled color first and then multiply by the texel. A neutral 0.5 is
++            // unchanged. Two textures, or no texture, keep the product-then-scale order.
++            auto bias2x = [&](uint32_t argA, uint32_t argB, bool alpha) {
++                bool ta = (argA & 0xF) == 2, tb = (argB & 0xF) == 2;
++                if (ta == tb) return std::string();
++                const std::string ea = FfArg(argA, i, alpha), eb = FfArg(argB, i, alpha);
++                return ta ? ea + " * saturate(" + eb + " * 2)" : eb + " * saturate(" + ea + " * 2)";
++            };
++            std::string rgb = f[0] == 5 ? bias2x(f[1], f[2], false) : std::string();
++            if (rgb.empty()) rgb = FfOp(f[0], FfArg(f[1], i, false), FfArg(f[2], i, false), FfArg(f[3], i, false), i, false);
++            std::string a = f[4] == 5 ? bias2x(f[5], f[6], true) : std::string();
++            if (f[4] <= 1) a = "cur.a";
++            else if (a.empty()) a = FfOp(f[4], FfArg(f[5], i, true), FfArg(f[6], i, true), FfArg(f[7], i, true), i, true);
+             body += F("{ float3 c3 = saturate(%s); float c1 = saturate(%s); %s = float4(c3, c1); }\n", rgb.c_str(), a.c_str(), dst);
+         }
+         body += "cur.rgb = saturate(cur.rgb + v1.rgb);\n";
 diff --git a/runtime/gpu/spirv.cpp b/runtime/gpu/spirv.cpp
 index 95630b2..389a560 100644
 --- a/runtime/gpu/spirv.cpp
