@@ -361,7 +361,7 @@ index 5b8aa22..b62ce91 100644
          for (;;) {
              Batch* b;
 diff --git a/runtime/gpu/shaders.cpp b/runtime/gpu/shaders.cpp
-index 274ab60..a08a09a 100644
+index 274ab60..ff044df 100644
 --- a/runtime/gpu/shaders.cpp
 +++ b/runtime/gpu/shaders.cpp
 @@ -205,6 +205,7 @@ std::string VsInputs(uint16_t regs, uint64_t decode) {
@@ -394,23 +394,52 @@ index 274ab60..a08a09a 100644
  void alphatest(float a) {
      int f = (int)misc.y;
      int v = (int)round(a * 255), r = (int)misc.x;
-@@ -858,8 +863,14 @@ std::string PixelHlsl(const PixelKey& k) {
-             const uint32_t* f = k.ff[i];
+@@ -575,6 +580,24 @@ uint64_t Hash(const void* p, size_t n, uint64_t h) {
+     return mix(seed ^ k0, uint64_t(n) ^ k1);
+ }
+ 
++// XDK 3925 numbers D3DTOP the way PC D3D8 did. Cxbx-Reloaded NormalizeValue()
++// (TextureStates.cpp) remaps 13..16 for every build through 3948; the order was
++// verified there against 3948 and the later order against 4039. FfOp's cases are
++// the later order. 17 (PREMODULATE) and every op outside 13..16 match already.
++//   13 BLENDTEXTUREALPHA   -> 14
++//   14 BLENDFACTORALPHA    -> 15
++//   15 BLENDTEXTUREALPHAPM -> 16
++//   16 BLENDCURRENTALPHA   -> 13
++uint32_t TextureOp3925(uint32_t op) {
++    switch (op) {
++        case 13: return 14;
++        case 14: return 15;
++        case 15: return 16;
++        case 16: return 13;
++        default: return op;
++    }
++}
++
+ PixelKey MakePixelKey(const State& s, const TexInfo tex[4]) {
+     PixelKey k;
+     std::memset(&k, 0, sizeof(k));
+@@ -616,8 +639,8 @@ PixelKey MakePixelKey(const State& s, const TexInfo tex[4]) {
+     bool program = (s.vs_handle & 1) && s.vs && !s.vs->program.empty();
+     for (int i = 0; i < 4; i++) {
+         const auto& t = s.tss[size_t(i)];
+-        uint32_t v[9] = {t[kTssColorOp], t[kTssColorArg1], t[kTssColorArg2], t[kTssColorArg0], t[kTssAlphaOp],
+-                         t[kTssAlphaArg1],  t[kTssAlphaArg2], t[kTssAlphaArg0], t[kTssResultArg]};
++        uint32_t v[9] = {TextureOp3925(t[kTssColorOp]), t[kTssColorArg1], t[kTssColorArg2], t[kTssColorArg0],
++                         TextureOp3925(t[kTssAlphaOp]), t[kTssAlphaArg1], t[kTssAlphaArg2], t[kTssAlphaArg0], t[kTssResultArg]};
+         std::memcpy(k.ff[i], v, sizeof(v));
+         if (program || (t[kTssTextureTransformFlags] & 0x100)) k.proj |= 1u << i;  // D3DTTFF_PROJECTED
+         if (t[kTssColorOp] <= 1) break;
+@@ -859,7 +882,7 @@ std::string PixelHlsl(const PixelKey& k) {
              if (f[0] <= 1) break;
              const TexInfo& t = k.tex[i];
-+            // No texture on this stage is sampled as opaque white. BLENDTEXTUREALPHA
-+            // lerps with that alpha of 1, so the result is Arg1. The in-round Twisted
-+            // System characters set Arg1 to this texture and the alpha op to SELECTARG1
-+            // (the alpha-op-disabled guard never matched), so a colored stage-0 texel
-+            // was replaced with flat white. Skip the stage when Arg1 is that sample.
-+            if (!t.kind && f[0] == 14 && (f[1] & 0x1F) == 2) continue;
              std::string norm = (t.rect ? F(" / texsize[%d].xy", i) : "") + F(" + texsize[%d].zw", i);
 -            std::string uv = (k.proj >> i) & 1 ? F("(tc%d.xy / tc%d.w)%s", i, i, norm.c_str()) : F("tc%d.xy%s", i, norm.c_str());
 +            std::string uv = (k.proj >> i) & 1 ? F("projuv(tc%d)%s", i, norm.c_str()) : F("tc%d.xy%s", i, norm.c_str());
              std::string cube;
              if (t.shadow)
                  body += F("float4 t%d = shadow(tex%d, smp%d, (tc%d.xy / tc%d.w)%s, tc%d.z / tc%d.w, %d, i.pos.xy, texsize[%d].xy);\n", i, i,
-@@ -873,8 +884,23 @@ std::string PixelHlsl(const PixelKey& k) {
+@@ -873,8 +896,23 @@ std::string PixelHlsl(const PixelKey& k) {
              body += Hooks().Fetched(t, i);
              if ((k.alphakill >> i) & 1) body += F("if (t%d.a == 0) discard;\n", i);
              const char* dst = f[8] == 5 ? "tmp" : "cur";
