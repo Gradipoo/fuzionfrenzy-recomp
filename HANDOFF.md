@@ -95,6 +95,15 @@ Applied by `tools/apply-macos-sdk.sh` (also from the top of `CMakeLists.txt` on 
 - Shaders: Homebrew glslang. DXC is used when `VULKAN_SDK` provides `dxc/dxcapi.h` and
   `libdxcompiler.dylib`.
 - If `VK_DRIVER_FILES` is unset, `main` points the loader at Homebrew's MoltenVK ICD.
+- Fixed-function stage 1 on the in-round Twisted System characters is color op 14,
+  `BLENDTEXTUREALPHA` in this shader's numbering, with no texture and alpha op
+  `SELECTARG1`. A missing texture is opaque white, so the blend replaced the colored
+  stage-0 texel with flat white. The stage is skipped when it has no texture, the
+  color op is 14, and color arg1 is that texture (no complement). An earlier guard
+  required the alpha op to be disabled, so these draws never took it. Confirmed in
+  play on 2026-10-25: characters stay textured through the countdown and the round,
+  and the other scenes looked at in that session were unchanged. The arena floor is
+  a different draw (stage 1 disabled) and is not this skip.
 
 Presets: `macos-debug`, `macos-release`, `macos-relwithdebinfo`. `CMAKE_OSX_ARCHITECTURES=arm64`.
 No `-march=x86-64-v2`.
@@ -144,6 +153,9 @@ OpenSSL 3. No LunarG SDK, so shaders go through glslang. `file` on the linked bi
 
 ## What is broken / open
 
+- Twisted System's floor can still draw flat white. It is not the character skip: that
+  mesh is fixed-function, stage 1 disabled, stage 0 a 64×64 P8 texture. See
+  `docs/render-defect.md`.
 - The heavy scene sits on the vsync budget most seconds and still misses a few when
   a second of ~12000 draws takes about 20 ms of host draw. The 4096-draw flush waits,
   so the title thread spends several milliseconds blocked on that submit inside a
