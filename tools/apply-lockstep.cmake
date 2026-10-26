@@ -116,6 +116,21 @@ if(EXISTS "${SDK}/runtime/core/determinism.cpp" AND EXISTS "${_watch}")
     endif()
 endif()
 
+# A guest thread that returns must store its exit signal before another thread
+# can present. Otherwise the presenter hashes a still-clear signal on a slow host.
+set(_texit "${REPO}/patches/sdk-lockstep-thread-exit.patch")
+if(EXISTS "${SDK}/runtime/kernel/threads.cpp" AND EXISTS "${_texit}")
+    file(READ "${SDK}/runtime/kernel/threads.cpp" _texit_src)
+    if(NOT _texit_src MATCHES "XBE_THREAD_EXIT")
+        execute_process(COMMAND "${GIT_EXE}" -C "${SDK}" apply --whitespace=nowarn "${_texit}"
+                        RESULT_VARIABLE _rc)
+        if(NOT _rc EQUAL 0)
+            message(FATAL_ERROR "patches/sdk-lockstep-thread-exit.patch failed (${_rc})")
+        endif()
+        message(STATUS "applied patches/sdk-lockstep-thread-exit.patch")
+    endif()
+endif()
+
 # XInputGetState's packet number compares report fields. A memcmp of the whole
 # Pad also saw the padding after connected, which is not stable across hosts.
 set(_xinput "${REPO}/patches/sdk-lockstep-xinput-packet.patch")
