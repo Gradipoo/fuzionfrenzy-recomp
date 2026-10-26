@@ -1,8 +1,11 @@
 # Cold start (26 Oct 2026, Pacific)
 
-A new agent can start from this file. The section below the rule is the macOS GPU and
-launcher state. Battery numbers and the MoltenVK flush notes there are still the open
-GPU work. Determinism, replays, and the branch map are here.
+A new agent can start from this file. The procedure is
+`docs/agent-workflow.md` (one task per agent, what to update here, how to
+verify, how to report). Settled choices are `docs/decisions.md`. The section
+below the rule is the macOS GPU and launcher state. Battery numbers and the
+MoltenVK flush notes there are still the open GPU work. Determinism, replays,
+and the branch map are here.
 
 USA Xbox Fuzion Frenzy, XDK 3925, title `0x4D530002`. Static recomp. SDK submodule
 `sdk/` is `abilliontokens/XboxXBERecomp` @ `58757ab` (`fuzion-frenzy-port`). The XBE
@@ -10,10 +13,15 @@ never leaves this Mac. SHA-1 of `default.xbe` is `c6fb6082900532cde5fa8dbb7de8df
 
 ## Latest branch
 
-`cursor/linux-det-c2dc` is the latest line. Tip before this handoff was `fc4730d`
-("Record the x86_64 gameplay2 match and the boot-thread exit."). Review base is
+`cursor/linux-det-c2dc` is the latest line. Review base is
 `cursor/fixed-step-pace-c2dc` @ `92002fe`. Parent of that is `cursor/xbox-one-usb-c2dc`
 @ `36d66fb`.
+
+The gameplay2 write-up is `fc4730d` ("Record the x86_64 gameplay2 match and
+the boot-thread exit."). The cold-start handoff is `09b7843`. The agent
+workflow (`docs/agent-workflow.md`), the decisions log (`docs/decisions.md`),
+and `AGENTS.md` are the commit on top of that. `git log -1` on this branch
+is the hash to report.
 
 No pull request was opened. `ManagePullRequest` `create_pr` returned unauthenticated.
 Compare:
