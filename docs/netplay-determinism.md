@@ -290,7 +290,7 @@ Lima's Ubuntu template mounts the home directory read-only. Configure writes the
 
 ```
 # Lima mounts the Mac home read-only at the same path. $HOME is the guest disk.
-rsync -a --copy-links --exclude out \
+rsync -a --copy-links --exclude out --exclude .git \
   /Users/gsrvm3/Documents/projects/ff-linux-det/ "$HOME/ff-src/"
 cd "$HOME/ff-src"
 ./build.sh
