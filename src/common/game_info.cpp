@@ -8,6 +8,7 @@
 #include "app/app.h"
 #include "common/input_kbm.h"
 #include "common/overlay.h"
+#include "core/determinism.h"
 #include "core/input.h"
 #include "core/log.h"
 #include <cstdio>
@@ -172,6 +173,9 @@ void PadHook(int port, input::Pad& pad) {
     kbm::Apply(port, pad);
 }
 
+// Inlined MSVC rand: imul 343FDh, add 269EC3h, store the seed back. This .data dword is that global.
+void Loaded() { det::WatchRng(0x285630); }
+
 }  // namespace
 
 // what the runtime asks of the game; strings must be set, hooks may stay null
@@ -199,7 +203,7 @@ const app::GameInfo app::kGame = {
     .load = nullptr,                         // reads more from the settings file's toml::table
     .save = nullptr,                         // writes more into it
     .init = nullptr,                         // after the settings load, before the window and boot
-    .loaded = nullptr,                       // image in memory, before its entry point runs
+    .loaded = &Loaded,                      // image in memory, before its entry point runs
     .window = nullptr,                       // the game window is up
 #if defined(_WIN32)
     .message = &kbm::Message,                // window messages first; true takes one
