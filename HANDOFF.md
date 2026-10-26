@@ -329,7 +329,7 @@ then checked the same way. No disc image was on this machine, so that extract wa
 run against a real iso. Prerequisites are detected and not bundled: arm64, clang, git,
 cmake >= 3.25, ninja, python3, the MoltenVK ICD, and the glslang header plus its three
 libraries. openssl is not required. Capstone is unused. The install line is
-`brew install cmake ninja glslang libusb molten-vk vulkan-loader vulkan-headers`. libusb is linked into the game so a wired Xbox One pad opens through SDL's HIDAPI driver. No kernel extension.
+`brew install cmake ninja glslang libusb molten-vk vulkan-loader vulkan-headers`. A wired Xbox Series pad opens through GameController. libusb stays linked for a USB pad Apple's Xbox driver does not claim. No kernel extension.
 
 Version stamp is `PORT_VERSION` (`1`) plus the short git sha. A dirty worktree appends
 `-dirty`, ignoring the `sdk` submodule line. A mismatch, a missing binary, or Rebuild

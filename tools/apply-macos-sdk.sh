@@ -8,6 +8,20 @@ if [ ! -f sdk/runtime/kernel/memory.cpp ]; then
     exit 1
 fi
 
+# GCController publishes a wired Series pad after SDL_Init. This second patch
+# opens it on the main thread. Idempotent: the marker is inside input.cpp.
+apply_gamepad_watch() {
+    if grep -q "XBE_GAMEPAD_WATCH" sdk/runtime/core/input.cpp; then
+        return 0
+    fi
+    if [ ! -f patches/sdk-macos-gamepad-events.patch ]; then
+        echo "missing patches/sdk-macos-gamepad-events.patch" >&2
+        exit 1
+    fi
+    git -C sdk apply --whitespace=nowarn ../patches/sdk-macos-gamepad-events.patch
+    echo "applied patches/sdk-macos-gamepad-events.patch"
+}
+
 # An already-patched tree used to stop here, so a newer input.cpp hunk never
 # landed. Wired Xbox One support lives in that file. Refresh it from the
 # pinned commit plus the current patch when the hint is missing.
@@ -31,6 +45,7 @@ if grep -q "XBE_DARWIN_GUEST" sdk/runtime/kernel/memory.cpp; then
         rm -f "$_xbe_input_patch"
         echo "refreshed sdk/runtime/core/input.cpp from patches/sdk-macos-arm64.patch"
     fi
+    apply_gamepad_watch
     exit 0
 fi
 
@@ -49,3 +64,4 @@ else
     git -C sdk apply --whitespace=nowarn ../patches/sdk-macos-arm64.patch
 fi
 echo "applied patches/sdk-macos-arm64.patch"
+apply_gamepad_watch
