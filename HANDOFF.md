@@ -102,8 +102,10 @@ Applied by `tools/apply-macos-sdk.sh` (also from the top of `CMakeLists.txt` on 
   color op is 14, and color arg1 is that texture (no complement). An earlier guard
   required the alpha op to be disabled, so these draws never took it. Confirmed in
   play on 2026-10-25: characters stay textured through the countdown and the round,
-  and the other scenes looked at in that session were unchanged. The arena floor is
-  a different draw (stage 1 disabled) and is not this skip.
+  the floor that had been flat white is textured too, and the other scenes looked at
+  in that session were unchanged. Cxbx would remap raw op 14 to `BLENDFACTORALPHA`
+  on this XDK; that remap is not applied, because it would miss this skip. See
+  `docs/render-defect.md`.
 
 Presets: `macos-debug`, `macos-release`, `macos-relwithdebinfo`. `CMAKE_OSX_ARCHITECTURES=arm64`.
 No `-march=x86-64-v2`.
@@ -153,9 +155,12 @@ OpenSSL 3. No LunarG SDK, so shaders go through glslang. `file` on the linked bi
 
 ## What is broken / open
 
-- Twisted System's floor can still draw flat white. It is not the character skip: that
-  mesh is fixed-function, stage 1 disabled, stage 0 a 64×64 P8 texture. See
-  `docs/render-defect.md`.
+- Next: battery and heat. The white characters and the white Twisted System floor are
+  resolved (`docs/render-defect.md`). What is already measured, on battery during the
+  60 fps heavy scene: 11.168 V and −1231 mA (13.7 W; `BatteryPower` −13747 mW), process
+  CPU about 76% of one core, RSS about 195 MB. `powermetrics` needs root and `sudo -n`
+  is not available. The frame cap and guest stalls already sleep; the 4096-draw flush
+  still waits inside a heavy frame.
 - The heavy scene sits on the vsync budget most seconds and still misses a few when
   a second of ~12000 draws takes about 20 ms of host draw. The 4096-draw flush waits,
   so the title thread spends several milliseconds blocked on that submit inside a
