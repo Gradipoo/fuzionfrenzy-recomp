@@ -1,0 +1,372 @@
+--- a/runtime/core/determinism.cpp
++++ b/runtime/core/determinism.cpp
+@@ -1,5 +1,6 @@
+ // Frame-derived clocks, latched pads, and a per-present guest RAM checksum.
+ // Off unless a flag or env var is set. See docs/netplay-determinism.md.
++// XBE_LOCKSTEP_HARNESS
+ #include "core/determinism.h"
+ 
+ #include "core/input.h"
+@@ -18,8 +19,12 @@
+ #include <fstream>
+ #include <mutex>
+ #include <string>
++#include <sys/stat.h>
+ #include <thread>
+ #include <vector>
++#if defined(_WIN32)
++#include <direct.h>
++#endif
+ 
+ namespace kernel {
+ extern const xbe::Image* g_image;
+@@ -85,6 +90,7 @@
+     const char* state_log = nullptr;
+     const char* dump_dir = nullptr;
+     const char* dump_region = nullptr;
++    const char* expect = nullptr;
+     int64_t dump_frame = -1;
+     uint64_t frames = 0;
+     uint32_t stall_ms = 0;
+@@ -102,6 +108,7 @@
+         c.state_log = EnvOrOpt("FUZION_STATE_LOG", "state-log");
+         c.dump_dir = EnvOrOpt("FUZION_STATE_DUMP", "state-dump");
+         c.dump_region = EnvOrOpt("FUZION_STATE_DUMP_REGION", "state-dump-region");
++        c.expect = EnvOrOpt("FUZION_STATE_EXPECT", "state-expect");
+         if (const char* v = EnvOrOpt("FUZION_STATE_DUMP_FRAME", "state-dump-frame")) c.dump_frame = std::atoll(v);
+         if (const char* v = EnvOrOpt("FUZION_FRAMES", "frames")) c.frames = std::strtoull(v, nullptr, 10);
+         if (const char* v = EnvOrOpt("FUZION_STALL_MS", "stall-ms")) c.stall_ms = uint32_t(std::strtoul(v, nullptr, 10));
+@@ -173,15 +180,35 @@
+ 
+ uint64_t Mix(uint64_t h, uint64_t v) { return (h ^ v) * kHashPrime; }
+ 
++// ARM invalid-ops produce the default NaN. x86 keeps a payload. A quiet NaN is
++// hashed as the default quiet NaN (sign kept) so the two hosts match. Guest RAM
++// is not rewritten. An integer whose bits happen to be a NaN is hashed the same
++// way; pages are 4-byte aligned, and only complete 4- and 8-byte groups are looked at.
++uint32_t CanonF32(uint32_t v) {
++    if (((v >> 23) & 0xFFu) == 0xFFu && (v & 0x7FFFFFu) != 0) return (v & 0x80000000u) | 0x7FC00000u;
++    return v;
++}
++uint64_t CanonWord(uint64_t v) {
++    if (((v >> 52) & 0x7FFu) == 0x7FFu && (v & 0x000FFFFFFFFFFFFFull) != 0)
++        return (v & 0x8000000000000000ull) | 0x7FF8000000000000ull;
++    uint32_t lo = CanonF32(uint32_t(v));
++    uint32_t hi = CanonF32(uint32_t(v >> 32));
++    return uint64_t(lo) | (uint64_t(hi) << 32);
++}
++
+ uint64_t HashBytes(const uint8_t* p, size_t n, uint64_t h) {
+     size_t i = 0;
+     for (; i + 8 <= n; i += 8) {
+         uint64_t v;
+         std::memcpy(&v, p + i, 8);
+-        h = Mix(h, v);
++        h = Mix(h, CanonWord(v));
+     }
+     uint64_t tail = 0;
+     if (i < n) std::memcpy(&tail, p + i, n - i);
++    if (i + 4 <= n) {
++        uint32_t lo = CanonF32(uint32_t(tail));
++        tail = (tail & ~0xFFFFFFFFull) | lo;
++    }
+     if (i < n) h = Mix(h, tail);
+     return h;
+ }
+@@ -244,16 +271,9 @@
+         LOGE("det: replay file missing: %s", path);
+         kernel::Shutdown(1);
+     }
+-    std::string line;
+-    while (std::getline(in, line)) {
+-        if (line.empty() || line[0] == '#') continue;
+-        unsigned frame = 0, port = 0, connected = 0, buttons = 0;
+-        int lx = 0, ly = 0, rx = 0, ry = 0;
+-        unsigned analog[8] = {};
+-        int n = std::sscanf(line.c_str(), "%u %u %u %x %d %d %d %d %x %x %x %x %x %x %x %x", &frame, &port, &connected,
+-                            &buttons, &lx, &ly, &rx, &ry, &analog[0], &analog[1], &analog[2], &analog[3], &analog[4],
+-                            &analog[5], &analog[6], &analog[7]);
+-        if (n != 16 || port < 1 || port > 4) continue;
++    auto store = [](unsigned frame, int port, unsigned connected, unsigned buttons, int lx, int ly, int rx, int ry,
++                    const unsigned analog[8]) {
++        if (port < 1 || port > 4) return;
+         size_t need = (size_t(frame) + 1) * kPorts;
+         if (g_replay.size() < need) g_replay.resize(need);
+         Sample& s = g_replay[size_t(frame) * kPorts + (port - 1)];
+@@ -264,6 +284,39 @@
+         s.rx = int16_t(rx);
+         s.ry = int16_t(ry);
+         for (int i = 0; i < 8; i++) s.analog[i] = uint8_t(analog[i]);
++    };
++    std::string line;
++    while (std::getline(in, line)) {
++        if (line.empty() || line[0] == '#') continue;
++        if (line.find('|') != std::string::npos) {
++            unsigned frame = 0;
++            if (std::sscanf(line.c_str(), "%u", &frame) != 1) continue;
++            size_t bar = 0;
++            int port = 1;
++            while (port <= 4) {
++                bar = line.find('|', bar);
++                if (bar == std::string::npos) break;
++                const char* p = line.c_str() + bar + 1;
++                unsigned connected = 0, buttons = 0;
++                int lx = 0, ly = 0, rx = 0, ry = 0;
++                unsigned analog[8] = {};
++                int n = std::sscanf(p, "%u,%x,%d,%d,%d,%d,%x,%x,%x,%x,%x,%x,%x,%x", &connected, &buttons, &lx, &ly, &rx,
++                                    &ry, &analog[0], &analog[1], &analog[2], &analog[3], &analog[4], &analog[5],
++                                    &analog[6], &analog[7]);
++                if (n == 14) store(frame, port, connected, buttons, lx, ly, rx, ry, analog);
++                port++;
++                bar++;
++            }
++            continue;
++        }
++        unsigned frame = 0, port = 0, connected = 0, buttons = 0;
++        int lx = 0, ly = 0, rx = 0, ry = 0;
++        unsigned analog[8] = {};
++        int n = std::sscanf(line.c_str(), "%u %u %u %x %d %d %d %d %x %x %x %x %x %x %x %x", &frame, &port, &connected,
++                            &buttons, &lx, &ly, &rx, &ry, &analog[0], &analog[1], &analog[2], &analog[3], &analog[4],
++                            &analog[5], &analog[6], &analog[7]);
++        if (n != 16) continue;
++        store(frame, port, connected, buttons, lx, ly, rx, ry, analog);
+     }
+     LOGR("det: replay %s, %zu frames", path, g_replay.size() / kPorts);
+ }
+@@ -293,17 +346,20 @@
+             LOGE("det: cannot write %s", C().record);
+             return;
+         }
+-        std::fprintf(f, "# fuzion-input 1\n");
+-        std::fprintf(f, "# frame port connected buttons lx ly rx ry a b x y black white lt rt\n");
+-        std::fprintf(f, "# ports are 1..4. buttons and analog bytes are hex. sticks are signed.\n");
++        std::fprintf(f, "# fuzion-input 2\n");
++        std::fprintf(f, "# BizHawk-style movie text. One line per frame. Four ports, pipe-separated.\n");
++        std::fprintf(f, "# LogKey:frame|P1 c,buttons,lx,ly,rx,ry,a,b,x,y,black,white,lt,rt|P2 ...|P3 ...|P4 ...\n");
++        std::fprintf(f, "# buttons and analog bytes are hex. sticks are signed. version 1 (one line per port) still loads.\n");
+     }
+     if (!f) return;
++    std::fprintf(f, "%llu", (unsigned long long)frame);
+     for (int p = 0; p < kPorts; p++) {
+         const Sample& s = g_latched[p];
+-        std::fprintf(f, "%llu %d %u %04x %d %d %d %d %02x %02x %02x %02x %02x %02x %02x %02x\n", (unsigned long long)frame,
+-                     p + 1, s.connected ? 1u : 0u, s.buttons, int(s.lx), int(s.ly), int(s.rx), int(s.ry), s.analog[0],
+-                     s.analog[1], s.analog[2], s.analog[3], s.analog[4], s.analog[5], s.analog[6], s.analog[7]);
++        std::fprintf(f, "|%u,%04x,%d,%d,%d,%d,%02x,%02x,%02x,%02x,%02x,%02x,%02x,%02x", s.connected ? 1u : 0u, s.buttons,
++                     int(s.lx), int(s.ly), int(s.rx), int(s.ry), s.analog[0], s.analog[1], s.analog[2], s.analog[3],
++                     s.analog[4], s.analog[5], s.analog[6], s.analog[7]);
+     }
++    std::fprintf(f, "\n");
+     std::fflush(f);
+ }
+ 
+@@ -342,6 +398,7 @@
+     std::fprintf(g_state, "# F frame total data phys system user seed qpc rdtsc delay\n");
+     std::fprintf(g_state, "# P frame 64 hashes of 1MB physical slices from 80000000\n");
+     std::fprintf(g_state, "# D frame section=hash. U frame index=hash for committed user slices.\n");
++    std::fprintf(g_state, "# NaN payloads are canonical quiet NaNs in the hash. Guest RAM is not rewritten.\n");
+ }
+ 
+ void DumpRegion(uint64_t frame, const char* name, uint32_t va, uint32_t size, const std::vector<Exc>& exc) {
+@@ -369,6 +426,175 @@
+     LOGR("det: dumped %s", path.c_str());
+ }
+ 
++struct ExpF {
++    bool ok = false;
++    bool have_slices = false;
++    uint64_t total = 0, data = 0, phys = 0, system = 0, user = 0;
++    uint64_t slices[64] = {};
++};
++
++std::vector<ExpF> g_exp;
++bool g_exp_loaded = false;
++
++void LoadExpect() {
++    if (g_exp_loaded) return;
++    g_exp_loaded = true;
++    if (!C().expect) return;
++    std::ifstream in(C().expect);
++    if (!in) {
++        LOGE("det: expect file missing: %s", C().expect);
++        kernel::Shutdown(1);
++    }
++    std::string line;
++    while (std::getline(in, line)) {
++        if (line.size() < 2 || line[0] == '#') continue;
++        if (line[0] == 'F') {
++            unsigned long long frame = 0, total = 0, data = 0, phys = 0, system = 0, user = 0;
++            unsigned long long seed = 0, qpc = 0, rdtsc = 0, delay = 0;
++            if (std::sscanf(line.c_str(),
++                            "F %llu total=%llx data=%llx phys=%llx system=%llx user=%llx seed=%llx qpc=%llu rdtsc=%llu "
++                            "delay=%llu",
++                            &frame, &total, &data, &phys, &system, &user, &seed, &qpc, &rdtsc, &delay) < 6)
++                continue;
++            if (g_exp.size() <= frame) g_exp.resize(size_t(frame) + 1);
++            ExpF& e = g_exp[size_t(frame)];
++            e.ok = true;
++            e.total = total;
++            e.data = data;
++            e.phys = phys;
++            e.system = system;
++            e.user = user;
++        } else if (line[0] == 'P') {
++            unsigned long long frame = 0;
++            if (std::sscanf(line.c_str(), "P %llu", &frame) != 1) continue;
++            if (g_exp.size() <= frame) g_exp.resize(size_t(frame) + 1);
++            ExpF& e = g_exp[size_t(frame)];
++            const char* p = std::strchr(line.c_str(), ' ');
++            if (p) p = std::strchr(p + 1, ' ');
++            int i = 0;
++            while (p && i < 64) {
++                unsigned long long slice = 0;
++                if (std::sscanf(p, " %llx", &slice) != 1) break;
++                e.slices[i++] = slice;
++                const char* next = std::strchr(p + 1, ' ');
++                if (!next) break;
++                p = next;
++            }
++            e.have_slices = i == 64;
++        }
++    }
++    LOGR("det: expect %s, %zu frames", C().expect, g_exp.size());
++}
++
++void DumpSpan(const char* dir, uint64_t frame, const char* name, uint32_t va, uint32_t size, const std::vector<Exc>& exc) {
++    std::string path = std::string(dir) + "/frame_" + std::to_string(frame) + "_" + name + ".bin";
++    FILE* f = std::fopen(path.c_str(), "wb");
++    if (!f) {
++        LOGE("det: cannot write %s", path.c_str());
++        return;
++    }
++    std::vector<uint8_t> buf(4096);
++    for (uint32_t at = va; at < va + size;) {
++        uint32_t n = std::min<uint32_t>(4096, va + size - at);
++        bool gap = false;
++        for (const Exc& e : exc)
++            if (Overlap(at, at + n, e)) gap = true;
++        if (gap || !mem::IsCommitted(at)) std::memset(buf.data(), 0, n);
++        else std::memcpy(buf.data(), kernel::HostPtr(at), n);
++        std::fwrite(buf.data(), 1, n, f);
++        at += n;
++    }
++    std::fclose(f);
++    LOGR("det: dumped %s", path.c_str());
++}
++
++void ReportDesync(uint64_t frame, const char* region, uint64_t got, uint64_t want, const std::vector<Exc>& exc) {
++    const char* dir = C().dump_dir && C().dump_dir[0] ? C().dump_dir : "det-desync";
++#if defined(_WIN32)
++    _mkdir(dir);
++#else
++    mkdir(dir, 0755);
++#endif
++    std::string path = std::string(dir) + "/desync_" + std::to_string(frame) + ".txt";
++    FILE* f = std::fopen(path.c_str(), "w");
++    if (!f) {
++        LOGE("det: cannot write %s", path.c_str());
++    } else {
++        std::fprintf(f, "desync frame %llu\n", (unsigned long long)frame);
++        std::fprintf(f, "region %s\n", region);
++        std::fprintf(f, "reference %016llx\n", (unsigned long long)want);
++        std::fprintf(f, "local %016llx\n", (unsigned long long)got);
++        std::fprintf(f, "snapshot %s/frame_%llu_%s.bin\n", dir, (unsigned long long)frame, region);
++        std::fprintf(f, "reference log %s\n", C().expect ? C().expect : "-");
++        std::fclose(f);
++        LOGR("det: wrote %s", path.c_str());
++    }
++    if (std::strncmp(region, "phys_", 5) == 0) {
++        int idx = std::atoi(region + 5);
++        if (idx >= 0 && idx < 64)
++            DumpSpan(dir, frame, region, 0x80000000u + uint32_t(idx) * 0x100000u, 0x100000u, exc);
++    } else if (std::strcmp(region, "system") == 0) {
++        DumpSpan(dir, frame, "system", mem::kSystemBase, mem::kSystemSize, {});
++    } else if (std::strncmp(region, "user_", 5) == 0) {
++        uint32_t index = uint32_t(std::strtoul(region + 5, nullptr, 10));
++        uint32_t base = index * 0x400000u;
++        uint32_t from = std::max(base, mem::kUserLow);
++        uint32_t to = std::min(base + 0x400000u, mem::kUserHigh);
++        DumpSpan(dir, frame, region, from, to - from, {});
++    } else if (std::strcmp(region, "user") != 0 && std::strcmp(region, "total") != 0 && kernel::g_image) {
++        for (const xbe::Section& s : kernel::g_image->sections) {
++            if (!(s.flags & xbe::kWritable) || !s.vsize) continue;
++            if (region[0] == '.' && s.name != region) continue;
++            DumpSpan(dir, frame, s.name.c_str(), s.va, s.vsize, exc);
++            if (region[0] == '.') break;
++        }
++    }
++    if (g_state) std::fflush(g_state);
++    LOGE("det: desync at frame %llu region %s", (unsigned long long)frame, region);
++    kernel::Shutdown(1);
++}
++
++void CheckExpect(uint64_t frame, uint64_t total, uint64_t data, uint64_t phys, uint64_t system, uint64_t user,
++                 const uint64_t slices[64], const std::vector<Exc>& exc) {
++    LoadExpect();
++    if (!C().expect) return;
++    if (frame >= g_exp.size() || !g_exp[size_t(frame)].ok) return;
++    const ExpF& e = g_exp[size_t(frame)];
++    if (e.total == total && e.data == data && e.phys == phys && e.system == system && e.user == user) return;
++    const char* region = "total";
++    uint64_t got = total, want = e.total;
++    if (e.data != data) {
++        region = "data";
++        got = data;
++        want = e.data;
++    } else if (e.phys != phys) {
++        region = "phys";
++        got = phys;
++        want = e.phys;
++        if (e.have_slices) {
++            for (int i = 0; i < 64; i++) {
++                if (e.slices[i] != slices[i]) {
++                    static char name[16];
++                    std::snprintf(name, sizeof name, "phys_%02d", i);
++                    region = name;
++                    got = slices[i];
++                    want = e.slices[i];
++                    break;
++                }
++            }
++        }
++    } else if (e.system != system) {
++        region = "system";
++        got = system;
++        want = e.system;
++    } else if (e.user != user) {
++        region = "user";
++        got = user;
++        want = e.user;
++    }
++    ReportDesync(frame, region, got, want, exc);
++}
++
+ void WriteState(uint64_t frame) {
+     OpenState();
+     std::vector<Exc> exc;
+@@ -463,6 +689,7 @@
+     }
+     if ((frame % 60ull) == 0)
+         LOGR("det: frame %llu total %016llx seed %08x", (unsigned long long)frame, (unsigned long long)total, seed);
++    CheckExpect(frame, total, data_h, phys_h, system_h, user_h, slices, exc);
+ }
+ 
+ void LogMode() {
+@@ -708,7 +935,7 @@
+ 
+ void OnPresented(X86Context& ctx) {
+     const Cfg& c = C();
+-    if (!c.fixed && !c.record && !c.replay && !c.state_log && !c.frames && !c.stall_ms) return;
++    if (!c.fixed && !c.record && !c.replay && !c.state_log && !c.frames && !c.stall_ms && !c.expect) return;
+     if (g_in_present) return;
+     g_in_present = true;
+     NotePacer();
+@@ -719,7 +946,7 @@
+     if (c.fixed) kernel::FireDueTimers(ctx);
+ 
+     uint64_t frame = g_frame.load(std::memory_order_relaxed);
+-    if (c.state_log || c.dump_dir) WriteState(frame);
++    if (c.state_log || c.dump_dir || c.expect) WriteState(frame);
+     {
+         std::lock_guard<std::mutex> lock(g_pad_lock);
+         if (c.record) WritePads(frame);

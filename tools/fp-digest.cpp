@@ -5,6 +5,7 @@
 #include <cstdio>
 #include <cstring>
 #include <initializer_list>
+#include <limits>
 
 #include "cpu/softmath.h"
 
@@ -70,6 +71,20 @@ int main() {
     Expect("log10", std::fabs(xbe_log(In(10)) - std::log(10)) < 1e-9);
     Expect("pow10", std::fabs(xbe_pow(In(10), In(-0.5)) - std::pow(10, -0.5)) < 1e-9);
     Expect("atan1", std::fabs(xbe_atan(In(1)) - std::atan(1)) < 1e-9);
+    double pi = 0x1.921fb54442d18p+1;
+    double fsin_pi = xbe_x87_sin(In(pi));
+    double lib_pi = xbe_sin(In(pi));
+    Expect("x87_sin_small", std::fabs(xbe_x87_sin(In(0.2)) - xbe_sin(In(0.2))) == 0.0);
+    Expect("fsin_pi_differs", fsin_pi != lib_pi);
+    Expect("fsin_pi", std::fabs(fsin_pi - 1.2246063538223773e-16) < 1e-31);
+    double huge = xbe_ldexp(0x1.000002p0, 200);
+    double r24 = xbe_round24(huge);
+    Expect("round24_finite", std::isfinite(r24) && r24 != 0.0);
+    Expect("round24_narrow", xbe_round24(1.0000001) == (double)(float)1.0000001);
+    Expect("cvt_max", xbe_cvt_i32(2147483647.0) == 2147483647);
+    Expect("cvt_oor", xbe_cvt_i32(2147483648.0) == (int32_t)0x80000000u);
+    Expect("cvt_nan", xbe_cvt_i32(std::numeric_limits<double>::quiet_NaN()) == (int32_t)0x80000000u);
+    Expect("trunc_clamp", xbe_trunc_i32(1e20) == 4096);
 
     double samples[] = {0, -0.0, 0.25, 0.5, 1, -1, 2, 10, -8, 0x1p-1074, 0x1p-1022, 0x1.fffffp+127,
                         0x1.921fb54442d18p+0, 0x1.921fb54442d18p+1, 100, 1000, 1e-8, 0.1};
@@ -117,6 +132,12 @@ int main() {
     Feed(xbe_asin(0.5));
     Feed(xbe_acos(0.5));
     Feed(xbe_atan2(-1, -1));
+    Feed(xbe_x87_sin(In(pi)));
+    Feed(xbe_x87_cos(In(pi)));
+    Feed(xbe_x87_tan(In(1.0)));
+    Feed(r24);
+    Mix(uint32_t(xbe_cvt_i32(2147483648.0)));
+    Mix(uint32_t(xbe_cvt_i32(-2147483649.0)));
 
     std::printf("%016llx %s\n", (unsigned long long)g_hash, g_fail ? "FAIL" : "PASS");
     return g_fail ? 1 : 0;

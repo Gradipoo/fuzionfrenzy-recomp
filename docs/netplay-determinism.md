@@ -59,12 +59,12 @@ There is no `GetTickCount` import.
 Ports in the file are 1–4. The runtime's ports are 0–3. The file is text:
 
 ```
-# fuzion-input 1
-# frame port connected buttons lx ly rx ry a b x y black white lt rt
-0 1 1 0000 0 0 0 0 00 00 00 00 00 00 00 00
+# fuzion-input 2
+# LogKey:frame|P1 c,buttons,lx,ly,rx,ry,a,b,x,y,black,white,lt,rt|P2 ...|P3 ...|P4 ...
+0|1,0000,0,0,0,0,00,00,00,00,00,00,00,00|0,0000,0,0,0,0,00,00,00,00,00,00,00,00|0,0000,0,0,0,0,00,00,00,00,00,00,00,00|0,0000,0,0,0,0,00,00,00,00,00,00,00,00
 ```
 
-Buttons and the eight analog bytes are hex. Sticks are signed. Disconnected ports are how this game fills seats with AI. The usual case is humans in ports 1–2 and ports 3–4 empty.
+One line per frame, four ports, pipe-separated. That is the BizHawk movie shape (`Input Log.txt`: a `LogKey` header, then one line of every player). Buttons and the eight analog bytes are hex. Sticks are signed. A version 1 file (one line per port) still loads. Disconnected ports are how this game fills seats with AI. The usual case is humans in ports 1–2 and ports 3–4 empty.
 
 The first poll of a port in a frame becomes the latch. Later polls update a pending sample and still return the latch, so a recording and a replay see one sample per present. At the end of the present the latch becomes the pending sample. Record and replay together: replay wins.
 
@@ -197,7 +197,7 @@ x87 data registers in this recomp stay IEEE binary64. The title's control word a
 
 The host rounding mode is forced to round-to-nearest, with flush-to-zero and denormals-are-zero off (`xbe_arm_host_fp`). That runs on the main thread, at each new host thread, on every indirect guest call, and again after a kernel export returns. The guest MXCSR is stored and is not copied onto the host. A title that sets flush-to-zero would disagree with a real Xbox and would still agree with every other recompiled client.
 
-`sqrt` stays on the hardware. IEEE-754 requires it to be correctly rounded, and so do `nearbyint`, `trunc`, `floor`, and `ceil` once the rounding mode is the one above. Every other guest-visible transcendental goes through `sdk/runtime/cpu/softmath.cpp`: sin, cos, tan, asin, acos, atan, atan2, log, log2, log10, exp, exp2, pow, fmod, remainder, ldexp, frexp, and the float wrappers the mixer and the vertex interpreter use. The recompiler emits those names, so a generated guest partition does not call the host libm. Polynomial coefficients are hex floats, so compilers do not re-round a decimal literal differently.
+`sqrt` at an `FSQRT` stays a hardware instruction. IEEE-754 requires it to be correctly rounded. `ldexp` and `frexp` stay integer arithmetic in `softmath.cpp`, and so does the 80-bit load/store. Every other guest-visible transcendental goes through openlibm (`third_party/openlibm`, MIT/BSD, commit `5fe399749f9276eaa0b8403e507470da05cbbb3f`). The game compiles the portable C sources in `sources.txt` only: no amd64/aarch64 assembly, no long-double objects. Entry points are renamed `olm_*` so the compiler does not treat them as builtins and the link does not bind them to libsystem. `xbe_sin` and the rest call those names. The CRT uses that libm. x87 `FSIN`/`FCOS`/`FSINCOS`/`FPTAN` do not: they use openlibm plus the 66-bit pi reduction from xboxrecomp (`recomp_x87_sincos_pi66`, MIT). `|x| >= 2^63` sets C2 and leaves the stack alone. Precision control 24 rounds the significand only (`xbe_round24`), so a value outside the float range does not become inf. `FRNDINT` rounds in software from the guest control word. `CVTSS2SI` / `CVTTSS2SI` / the packed forms return `0x80000000` out of range, after a double range check, and the cast goes through `int64` so ARM does not saturate. SoftFloat extF80 is not vendored. CORE-MATH is the correctly-rounded alternative and is not what this build uses.
 
 Left on the host libm, on purpose:
 
@@ -209,7 +209,7 @@ Left on the host libm, on purpose:
 
 A page that is committed for the first time is zeroed in `Commit`, including a recommit after decommit. Windows `VirtualAlloc` already zeros a fresh commit. Linux `mprotect` does not, and Darwin `MADV_DONTNEED` does not promise zeros the next time the page is touched. Pages that were already committed are not wiped.
 
-The state log and the pad file are text (`# det 1`, `# fuzion-input 1`, hashes and buttons in hex). Nothing in either format is a host pointer, a `size_t` width, or a struct dumped with the host's padding. `scripts/det-diff.py` compares the text.
+The state log and the pad file are text (`# det 1`, `# fuzion-input 2`, hashes and buttons in hex). Nothing in either format is a host pointer, a `size_t` width, or a struct dumped with the host's padding. Before a word is mixed, a double NaN becomes the default quiet NaN `0x7FF8000000000000` and a float NaN becomes `0x7FC00000`, sign kept. Guest RAM is not rewritten. An integer that happens to have those bits is hashed the same way. `scripts/det-diff.py` compares the text and, on the first mismatch, writes `desync_<frame>.txt` (the OpenRCT2 desync log: frame, region, both checksums, and the dump command). `FUZION_STATE_EXPECT=earlier.detlog` does that inside the run and also writes `frame_<n>_<region>.bin` under `FUZION_STATE_DUMP` or `det-desync/`, then exits. That is the snapshot-on-mismatch. There is still no socket.
 
 `std::map` is used where the runtime walks a table into guest-visible work: DirectSound voices, reservations, device paths. `std::unordered_map` iteration is not used to order a guest-visible sequence, except the case-insensitive object-name fallback. That scan keeps the exact-key hit, and when several names fold to the same string it returns the lexicographically lowest key. GPU unordered maps are caches or a debug log. Fixed-step scheduling is the guest turn lock, not the host's thread scheduler.
 
@@ -217,15 +217,15 @@ Struct layout of Xbox objects and host pointers written into guest RAM were not 
 
 ### What was run
 
-`scripts/fp-cross.sh` on this Mac, 25 Oct 2026. Clang arm64, Clang x86_64 under Rosetta (`arch -x86_64`, `uname -m` reports `x86_64`), and Homebrew GCC 16.2.0 arm64, each with `-ffp-contract=off -fno-fast-math`. All three printed the same digest and `PASS`:
+`scripts/fp-cross.sh` on this Mac, 25 Oct 2026. Clang arm64, Clang x86_64 under Rosetta (`arch -x86_64`, `uname -m` reports `x86_64`), and Homebrew GCC 16.2.0 arm64, each with `-ffp-contract=off -fno-fast-math`, linked to the same openlibm objects. All three printed the same digest and `PASS`:
 
 ```
-f95fc86463222bef PASS
+06a5a5d542b715f9 PASS
 ```
 
-The digest covers the bundled transcendentals, an 80-bit store/load round trip (including a significand that has to round), `ldexp`/`frexp`, a float mul-add chain, and a subnormal multiply. It does not boot the game.
+The digest covers openlibm, the 66-bit-pi `fsin(pi)` (the value `1.2246063538223773e-16`, and it differs from openlibm `sin(pi)`), `xbe_round24` outside the float range, the out-of-range `0x80000000` convert, an 80-bit store/load round trip, `ldexp`/`frexp`, a float mul-add chain, and a subnormal multiply. It does not boot the game. The previous Taylor digest `f95fc86463222bef` is retired with that implementation.
 
-The rebuilt Mac arm64 `RingHost` then replayed the idle pads twice, 25 Oct 2026 10:01 PM PT. Instance 2, fresh `hdd2` each time, muted, minimized, fixed-step, seed 1, 240 frames. `scripts/det-diff.py` printed `PASS 240 frames match`. Frame 0 total `adaa8469791e9640`. Frame 239 total `23c7bcee96e7f23a`, delay count 3, seed `00000001`. Those are the same totals as the 9:34 PM PT matrix, so this idle path did not move. The generated guest code calls `xbe_sin` (and the other bundled names) and no longer calls `std::sin`.
+The idle replay of this binary is recorded below once the two instance-2 runs finish. The 10:01 PM PT totals were from the Taylor build and are not assumed to still match.
 
 This machine has no Docker, no Podman, no QEMU, no `clang-cl`, and no xwin sysroot. A full RingHost cannot be linked x86_64 here: the Homebrew Vulkan loader is arm64. So there is no Linux x86-64 replay and no Windows x64 replay yet. Rosetta covered the math digest only. The comparison that is still required, once a Linux or Windows build exists, is:
 
@@ -239,7 +239,7 @@ env -u FUZION_AUTOSTART XBE_MUTE=1 FUZION_FIXED_STEP=1 FUZION_SEED=1 \
 python3 scripts/det-diff.py mac.detlog linux.detlog
 ```
 
-The Mac binary is `RingHost`. Linux and Windows keep the name `FuzionFrenzy`. On this Mac the new binary's idle totals matched the 9:34 PM PT log. A Linux or Windows log still has to be diffed against that file before a mixed-OS session is treated as matching.
+The Mac binary is `RingHost`. Linux and Windows keep the name `FuzionFrenzy`. Diff a Linux or Windows log against the Mac idle log from this openlibm build, not against the 9:34 PM PT Taylor log.
 
 Windows, from a Linux machine that has the xwin sysroot from the top of `cmake/windows-cross.cmake`:
 

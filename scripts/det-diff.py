@@ -151,7 +151,35 @@ def dump_hint(frame, region):
     )
 
 
-def compare(path_a, path_b, out):
+def write_report(path, frame, region, why, fa, fb, hint):
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        "\n".join(
+            [
+                f"desync frame {frame}",
+                f"region {region}",
+                f"cause {why}",
+                f"reference_total {fa.total}",
+                f"local_total {fb.total}",
+                f"reference_data {fa.data}",
+                f"local_data {fb.data}",
+                f"reference_phys {fa.phys}",
+                f"local_phys {fb.phys}",
+                f"reference_system {fa.system}",
+                f"local_system {fb.system}",
+                f"reference_user {fa.user}",
+                f"local_user {fb.user}",
+                f"reference_seed {fa.seed}",
+                f"local_seed {fb.seed}",
+                hint,
+                "",
+            ]
+        )
+    )
+
+
+def compare(path_a, path_b, out, report_dir=None):
     fa, order_a = parse(path_a)
     fb, order_b = parse(path_b)
     if not order_a or not order_b:
@@ -171,9 +199,14 @@ def compare(path_a, path_b, out):
         region = first_diff(fa[n], fb[n])
         if region:
             why = cause(fa[n], fb[n], region)
+            hint = dump_hint(n, region)
             out.write(f"FAIL frame {n} region {region}\n")
             out.write(f"cause {why}\n")
-            out.write(dump_hint(n, region) + "\n")
+            out.write(hint + "\n")
+            if report_dir is not None:
+                report = Path(report_dir) / f"desync_{n}.txt"
+                write_report(report, n, region, why, fa[n], fb[n], hint)
+                out.write(f"report {report}\n")
             return 1
     if len(order_a) != len(order_b) or order_a[-1] != order_b[-1]:
         out.write(
@@ -233,10 +266,12 @@ def self_check():
         from io import StringIO
 
         buf = StringIO()
-        rc = compare(a, b, buf)
+        rc = compare(a, b, buf, report_dir=d)
         text = buf.getvalue()
-        if rc != 1 or "frame 3" not in text or "phys_02" not in text or "RNG" not in text:
-            sys.stderr.write(text)
+        report = Path(d) / "desync_3.txt"
+        body = report.read_text() if report.exists() else ""
+        if rc != 1 or "frame 3" not in text or "phys_02" not in text or "RNG" not in text or "desync frame 3" not in body:
+            sys.stderr.write(text + body)
             raise SystemExit("self-check failed")
         same = StringIO()
         if compare(a, a, same) != 0 or "PASS" not in same.getvalue():
@@ -250,12 +285,19 @@ def main():
     p.add_argument("a", nargs="?")
     p.add_argument("b", nargs="?")
     p.add_argument("--self-check", action="store_true")
+    p.add_argument(
+        "--report-dir",
+        help="on a mismatch, write desync_<frame>.txt here (OpenRCT2 desync log)",
+    )
     args = p.parse_args()
     if args.self_check:
         return self_check()
     if not args.a or not args.b:
         p.error("need two logs, or --self-check")
-    return compare(args.a, args.b, sys.stdout)
+    report = args.report_dir
+    if report is None:
+        report = str(Path(args.b).resolve().parent)
+    return compare(args.a, args.b, sys.stdout, report_dir=report)
 
 
 if __name__ == "__main__":

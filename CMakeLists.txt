@@ -86,3 +86,39 @@ else()
         target_compile_options(FuzionFrenzy PRIVATE -mfpmath=sse -msse2)
     endif()
 endif()
+
+# Guest transcendentals. Portable C from openlibm, symbols renamed olm_*,
+# no arch asm and no long-double objects. sqrt at the FSQRT site stays hardware.
+file(STRINGS "${CMAKE_CURRENT_SOURCE_DIR}/third_party/openlibm/sources.txt" OLM_SRC_NAMES)
+set(OLM_SRCS "")
+foreach(n ${OLM_SRC_NAMES})
+    list(APPEND OLM_SRCS "${CMAKE_CURRENT_SOURCE_DIR}/third_party/openlibm/src/${n}")
+endforeach()
+add_library(openlibm STATIC ${OLM_SRCS})
+target_include_directories(openlibm PRIVATE
+    "${CMAKE_CURRENT_SOURCE_DIR}/third_party/openlibm/include"
+    "${CMAKE_CURRENT_SOURCE_DIR}/third_party/openlibm/src")
+target_compile_definitions(openlibm PRIVATE OLM_PRIVATE __BSD_VISIBLE)
+set_target_properties(openlibm PROPERTIES C_STANDARD 99 C_STANDARD_REQUIRED ON)
+set(OLM_PREFIX "${CMAKE_CURRENT_SOURCE_DIR}/third_party/openlibm/olm_prefix.h")
+if(MSVC)
+    target_compile_options(openlibm PRIVATE /fp:precise)
+    if(CMAKE_C_COMPILER_ID MATCHES "Clang")
+        target_compile_options(openlibm PRIVATE
+            /clang:-ffp-contract=off /clang:-fno-fast-math /clang:-fno-builtin
+            /clang:-fno-strict-aliasing /clang:-fvisibility=hidden
+            /clang:-Wno-deprecated-non-prototype
+            "/clang:-include${OLM_PREFIX}")
+    else()
+        target_compile_options(openlibm PRIVATE "/FI${OLM_PREFIX}")
+    endif()
+else()
+    target_compile_options(openlibm PRIVATE
+        -ffp-contract=off -fno-fast-math -fno-builtin -fno-strict-aliasing
+        -fvisibility=hidden -Wno-deprecated-non-prototype
+        "-include${OLM_PREFIX}")
+    if(CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|AMD64|amd64")
+        target_compile_options(openlibm PRIVATE -mfpmath=sse -msse2)
+    endif()
+endif()
+target_link_libraries(FuzionFrenzy PRIVATE openlibm)
