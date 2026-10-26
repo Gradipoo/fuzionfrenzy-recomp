@@ -143,6 +143,8 @@ One guest thread calls `PsTerminateSystemThread` between frame 60 and frame 120 
 
 Nothing in these idle rows diverged. They do not cover menus, character select, or a minigame. That is row (d).
 
+The openlibm rebuild, 25 Oct 2026 10:20 PM PT, was two more instance-2 idle replays, not a full a/b/c matrix. They match each other. Frame 0 total `574c0f97185e0166`. Frame 239 total `41a20ce3c40f8974`, delay count 3, seed `00000001`. The 9:34 PM totals above are the previous math.
+
 ## Manual check
 
 A normal launch, with none of the variables above set, should look and pace the way it does today. Sound stays on unless `XBE_MUTE` is set.
@@ -225,7 +227,7 @@ Struct layout of Xbox objects and host pointers written into guest RAM were not 
 
 The digest covers openlibm, the 66-bit-pi `fsin(pi)` (the value `1.2246063538223773e-16`, and it differs from openlibm `sin(pi)`), `xbe_round24` outside the float range, the out-of-range `0x80000000` convert, an 80-bit store/load round trip, `ldexp`/`frexp`, a float mul-add chain, and a subnormal multiply. It does not boot the game. The previous Taylor digest `f95fc86463222bef` is retired with that implementation.
 
-The idle replay of this binary is recorded below once the two instance-2 runs finish. The 10:01 PM PT totals were from the Taylor build and are not assumed to still match.
+The rebuilt Mac arm64 `RingHost` then replayed the idle pads twice, 25 Oct 2026 10:20 PM PT. Instance 2, fresh `hdd2` each time, muted, minimized, fixed-step, seed 1, 240 frames. `scripts/det-diff.py` printed `PASS 240 frames match`. Frame 0 total `574c0f97185e0166`. Frame 3 delay count is still 1 (`qpc=87`, `rdtsc=15`). Frame 239 total `41a20ce3c40f8974`, delay count 3, seed `00000001`. Those totals are not the 10:01 PM PT Taylor totals (`adaa8469791e9640` / `23c7bcee96e7f23a`). The idle path moved when the transcendental implementation changed. The two runs of this binary match each other.
 
 This machine has no Docker, no Podman, no QEMU, no `clang-cl`, and no xwin sysroot. A full RingHost cannot be linked x86_64 here: the Homebrew Vulkan loader is arm64. So there is no Linux x86-64 replay and no Windows x64 replay yet. Rosetta covered the math digest only. The comparison that is still required, once a Linux or Windows build exists, is:
 
