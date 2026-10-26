@@ -284,7 +284,7 @@ The Homebrew Vulkan loader is arm64, so a Linux `FuzionFrenzy` cannot be linked 
 Install one of these, then the packages inside the guest:
 
 - OrbStack, Lima, or Docker Desktop. A Lima VM is `brew install lima` and `limactl start`.
-- In the guest: `clang`, `lld`, `cmake`, `ninja`, `python3`, `pkg-config`, `zlib1g-dev`, `libvulkan-dev`, `glslang-dev`, `mesa-vulkan-drivers`, `xvfb`, and the libraries SDL's CMake fetch looks up (`libx11-dev`, `libxext-dev`, `libxrandr-dev`, `libxcursor-dev`, `libxi-dev`, `libxfixes-dev`, `libxrender-dev`, `libxss-dev`, `libxtst-dev`, `libxinerama-dev`, `libxxf86vm-dev`, `libwayland-dev`, `libxkbcommon-dev`, `libasound2-dev`, `libpulse-dev`, `libdbus-1-dev`, `libudev-dev`, `libdrm-dev`, `libgbm-dev`, `libgl1-mesa-dev`, `libegl1-mesa-dev`, `libibus-1.0-dev`, `libdecor-0-dev`, `libpipewire-0.3-dev`). The runtime links with `-fuse-ld=lld`.
+- In the guest: `clang`, `lld`, `cmake`, `ninja`, `python3`, `pkg-config`, `zlib1g-dev`, `libvulkan-dev`, `glslang-dev`, `spirv-tools-dev`, `mesa-vulkan-drivers`, `xvfb`, and the libraries SDL's CMake fetch looks up (`libx11-dev`, `libxext-dev`, `libxrandr-dev`, `libxcursor-dev`, `libxi-dev`, `libxfixes-dev`, `libxrender-dev`, `libxss-dev`, `libxtst-dev`, `libxinerama-dev`, `libxxf86vm-dev`, `libwayland-dev`, `libxkbcommon-dev`, `libasound2-dev`, `libpulse-dev`, `libdbus-1-dev`, `libudev-dev`, `libdrm-dev`, `libgbm-dev`, `libgl1-mesa-dev`, `libegl1-mesa-dev`, `libibus-1.0-dev`, `libdecor-0-dev`, `libpipewire-0.3-dev`). The runtime links with `-fuse-ld=lld`. Ubuntu's `libglslang.a` is a static archive and does not pull in `libMachineIndependent.a`, `libOSDependent.a`, `libGenericCodeGen.a`, `libSPIRV-Tools-opt.a`, or `libSPIRV-Tools.a`. `patches/sdk-lockstep-host.patch` adds those to the link line when CMake finds them. Homebrew's dylibs already contain them, so a miss there is fine.
 
 Lima's Ubuntu template mounts the home directory read-only. Configure writes the lockstep patch into `sdk/` and the recompiled guest into `out/`, so copy the tree onto the guest disk first. A writable mount is the other way. Either copy stays on this Mac.
 
@@ -298,14 +298,30 @@ cd "$HOME/ff-src"
 # This Ubuntu 26.04 image names it lvp_icd.json. Other images use
 # lvp_icd.aarch64.json or lvp_icd.x86_64.json in the same directory.
 export VK_DRIVER_FILES=/usr/share/vulkan/icd.d/lvp_icd.json
+# This Mesa's llvmpipe JIT (LLVM 21 on Ubuntu 26.04 arm64) SIGSEGVs in the
+# raster threads. Pixels are not in the hash. LP_NO_RAST skips rasterization
+# so the replay can finish. A later readback of pixels into guest RAM can
+# still diverge.
+export LP_NO_RAST=1
 cd out/build/linux-release
+# Widescreen follows settings.toml width/height. A missing file leaves both
+# at 0, and the guest then follows the Xvfb mode. The "Desktop: 1280x720"
+# line printed before SDL starts is the fallback, not that mode. On this
+# guest that cleared the widescreen bit in CDevice_DisplayFlags (XDK 3925,
+# device + 0x2510): 0x400000 instead of the Mac's 0x410000. Copy the
+# recording's settings.toml beside the executable. The paced Mac log used
+# width 1280, height 720, ultrawide true.
 rm -rf hdd2
 xvfb-run -a env -u FUZION_AUTOSTART XBE_MUTE=1 FUZION_FIXED_STEP=1 FUZION_SEED=1 \
   FUZION_REPLAY_INPUT=/Users/gsrvm3/Documents/projects/fuzionfrenzy-recomp/det-logs/idle.pads \
-  FUZION_STATE_LOG=/tmp/linux-idle.detlog \
+  FUZION_STATE_LOG="$HOME/linux-idle.detlog" \
   FUZION_FRAMES=240 FUZION_MINIMIZED=1 \
   ./FuzionFrenzy --instance 2
 ```
+
+On 26 Oct 2026 (Pacific) that arm64 guest replayed the idle pads. Instance 2, fresh `hdd2`, the Mac `settings.toml` (1280x720), `LP_NO_RAST=1`. `scripts/det-diff.py` against the paced Mac idle log printed `PASS 240 frames match`. Frame 0 total `574c0f97185e0166`. Frame 239 total `784ca3be84e7aa6c`.
+
+The same binary then replayed `det-logs/gameplay2.pads` with no `--instance`, Sean's `hdd` snapshot restored first, and `FUZION_STATE_EXPECT` pointed at `det-logs/gameplay2.detlog`. Frames 0 through 4 match, including frame 0 total `eefbcee7c7938e05` and the frame 5 clock counts (`qpc=103`, `rdtsc=25`, `delay=1`). Frame 5 is the first divergence. `data` reference `1a779fe99f57eec5`, local `bb67e63a9f57eec5`. `phys` and `system` match. The only differing byte in the user window is guest `0x002CC1FC`: Mac `0x01`, Linux `0x02`. Guest `sub_0024D2AE` writes that dword. It copies field +8 of the object at `0xB01018E0`. The caller is `sub_00049DF0`, which polls on a 1000 ms gate. Networking was not started.
 
 Back on the Mac, diff that log against a Mac idle log from this same paced build (instance 2, fresh `hdd2`, the same flags, `RingHost`). Do not diff it against the 9:34 PM PT Taylor log.
 
@@ -315,7 +331,7 @@ python3 scripts/det-diff.py mac-idle.detlog linux-idle.detlog
 
 The same command with `det-logs/gameplay2.pads`, `FUZION_FRAMES=7766`, and `FUZION_STATE_EXPECT` pointed at `det-logs/gameplay2.detlog` is the gameplay check. The Mac binary is `RingHost`. Linux and Windows keep the name `FuzionFrenzy`.
 
-x86_64 uses the same steps in an emulated guest (`limactl start --arch=x86_64 template:ubuntu`, or Docker `--platform linux/amd64`). Point `VK_DRIVER_FILES` at that image's lavapipe ICD. Emulation is enough to compare checksums. It is not a frame-rate test. `brew install lima-additional-guestagents` is what provides the non-native Lima guest agent.
+x86_64 uses the same steps in an emulated guest (`limactl start --name ff-det-x86 --arch=x86_64 --cpus 4 --memory 8 template:ubuntu`, or Docker `--platform linux/amd64`). Point `VK_DRIVER_FILES` at that image's lavapipe ICD. Emulation is enough to compare checksums. It is not a frame-rate test. `brew install lima-additional-guestagents` is what provides the non-native Lima guest agent. That package is not installed on this Mac, and the x86_64 guest was not started. The arm64 gameplay replay already diverges at frame 5, so an emulated rebuild would hit that byte before it said anything new about x86_64.
 
 Windows, from a Linux machine that has the xwin sysroot from the top of `cmake/windows-cross.cmake`:
 

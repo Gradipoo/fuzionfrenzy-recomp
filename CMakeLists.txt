@@ -75,6 +75,9 @@ option(XBE_CI_RUNTIME "Compile the SDK runtime without a game image" OFF)
 if(XBE_CI_RUNTIME AND NOT APPLE)
     set(SDL_X11 OFF CACHE BOOL "" FORCE)
     set(SDL_WAYLAND OFF CACHE BOOL "" FORCE)
+    # SDL3 refuses to configure a Unix build that has neither X11 nor Wayland
+    # unless this is set. CI has no display server.
+    set(SDL_UNIX_CONSOLE_BUILD ON CACHE BOOL "" FORCE)
 endif()
 include(${SDK}/cmake/XbeRecomp.cmake)
 
