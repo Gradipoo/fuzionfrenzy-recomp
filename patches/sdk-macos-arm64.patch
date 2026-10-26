@@ -307,10 +307,10 @@ index b2cd099..1304c37 100644
          uintmax_t size = std::filesystem::file_size(exe, ec);
 diff --git a/runtime/core/determinism.cpp b/runtime/core/determinism.cpp
 new file mode 100644
-index 0000000..96578d6
+index 0000000..526eeb4
 --- /dev/null
 +++ b/runtime/core/determinism.cpp
-@@ -0,0 +1,564 @@
+@@ -0,0 +1,625 @@
 +// Frame-derived clocks, latched pads, and a per-present guest RAM checksum.
 +// Off unless a flag or env var is set. See docs/netplay-determinism.md.
 +#include "core/determinism.h"
@@ -436,8 +436,13 @@ index 0000000..96578d6
 +constexpr uint32_t kAudioFrames = 48000 / 60;  // one sim frame of the mixer
 +constexpr int kPorts = 4;
 +
-+std::atomic<uint64_t> g_frame{0};
++std::atomic<uint64_t> g_frame{0};  // presents, pad index, hash frame
++std::atomic<uint64_t> g_time{0};   // sim ticks. A present costs one. A held clock read costs one.
 +std::atomic<uint64_t> g_qpc{0}, g_rdtsc{0}, g_delay{0};
++std::mutex g_time_mu;
++bool g_have_qpc = false, g_have_rdtsc = false, g_have_interrupt = false;
++uint64_t g_last_qpc = 0, g_last_rdtsc = 0, g_last_interrupt = 0;
++bool g_logged_spin = false;
 +std::mutex g_pad_lock;
 +bool g_logged_mode = false;
 +bool g_in_present = false;
@@ -803,11 +808,67 @@ index 0000000..96578d6
 +void NoteRdtsc() { g_rdtsc.fetch_add(1, std::memory_order_relaxed); }
 +void NoteDelay() { g_delay.fetch_add(1, std::memory_order_relaxed); }
 +
-+uint64_t PerfCounter() { return g_frame.load(std::memory_order_relaxed) * kPerfPerFrame; }
-+uint64_t InterruptTime100ns() { return g_frame.load(std::memory_order_relaxed) * kInterruptPerFrame; }
++uint64_t PerfCounter() { return g_time.load(std::memory_order_relaxed) * kPerfPerFrame; }
++uint64_t InterruptTime100ns() { return g_time.load(std::memory_order_relaxed) * kInterruptPerFrame; }
 +uint64_t SystemTime100ns() { return kEpoch100ns + InterruptTime100ns(); }
-+uint64_t Rdtsc() { return g_frame.load(std::memory_order_relaxed) * (kRdtscHz / 60ull); }
-+uint32_t TickMs() { return uint32_t((g_frame.load(std::memory_order_relaxed) * 1000ull) / 60ull); }
++uint64_t Rdtsc() { return g_time.load(std::memory_order_relaxed) * (kRdtscHz / 60ull); }
++uint32_t TickMs() { return uint32_t((g_time.load(std::memory_order_relaxed) * 1000ull) / 60ull); }
++
++void PublishTime() {
++    uint64_t t = g_time.load(std::memory_order_relaxed);
++    kernel::SetDeterministicClocks(t * kInterruptPerFrame, kEpoch100ns + t * kInterruptPerFrame,
++                                   uint32_t((t * 1000ull) / 60ull));
++}
++
++void AdvanceTicksLocked(uint64_t ticks) {
++    if (!ticks) return;
++    g_time.fetch_add(ticks, std::memory_order_relaxed);
++    PublishTime();
++}
++
++uint64_t Hold(uint64_t& last, bool& have, uint64_t now) {
++    if (have && now == last) {
++        if (!g_logged_spin) {
++            g_logged_spin = true;
++            LOGR("det: a clock read repeated, so the sim tick advanced. The title waits on QPC for frequency/2.");
++        }
++        AdvanceTicksLocked(1);
++        now = g_time.load(std::memory_order_relaxed);
++    }
++    have = true;
++    return now;
++}
++
++uint64_t ClockQpc() {
++    std::lock_guard<std::mutex> lock(g_time_mu);
++    uint64_t ticks = Hold(g_last_qpc, g_have_qpc, g_time.load(std::memory_order_relaxed));
++    g_last_qpc = ticks;
++    return ticks * kPerfPerFrame;
++}
++
++uint64_t ClockRdtsc() {
++    std::lock_guard<std::mutex> lock(g_time_mu);
++    uint64_t ticks = Hold(g_last_rdtsc, g_have_rdtsc, g_time.load(std::memory_order_relaxed));
++    g_last_rdtsc = ticks;
++    return ticks * (kRdtscHz / 60ull);
++}
++
++uint64_t ClockInterrupt() {
++    std::lock_guard<std::mutex> lock(g_time_mu);
++    uint64_t ticks = Hold(g_last_interrupt, g_have_interrupt, g_time.load(std::memory_order_relaxed));
++    g_last_interrupt = ticks;
++    return ticks * kInterruptPerFrame;
++}
++
++uint64_t ClockSystem() { return kEpoch100ns + ClockInterrupt(); }
++
++void Consume100ns(uint64_t hundred_ns) {
++    if (!hundred_ns) return;
++    uint64_t ticks = hundred_ns / kInterruptPerFrame;
++    if (!ticks) return;
++    std::lock_guard<std::mutex> lock(g_time_mu);
++    AdvanceTicksLocked(ticks);
++}
 +
 +void WatchRng(uint32_t guest_va) { g_rng_va = guest_va; }
 +
@@ -862,8 +923,8 @@ index 0000000..96578d6
 +    uint64_t next = frame + 1;
 +    g_frame.store(next, std::memory_order_relaxed);
 +    if (c.fixed) {
-+        kernel::SetDeterministicClocks(next * kInterruptPerFrame, kEpoch100ns + next * kInterruptPerFrame,
-+                                       uint32_t((next * 1000ull) / 60ull));
++        std::lock_guard<std::mutex> lock(g_time_mu);
++        AdvanceTicksLocked(1);
 +        d3d::BumpVblank();
 +    }
 +    g_in_present = false;
@@ -877,10 +938,10 @@ index 0000000..96578d6
 +}  // namespace det
 diff --git a/runtime/core/determinism.h b/runtime/core/determinism.h
 new file mode 100644
-index 0000000..8f35f18
+index 0000000..46b96e4
 --- /dev/null
 +++ b/runtime/core/determinism.h
-@@ -0,0 +1,38 @@
+@@ -0,0 +1,48 @@
 +#pragma once
 +// Lockstep determinism harness. Every entry is a no-op unless a flag or env var turns it on,
 +// so a normal launch keeps the clocks, the pads, the mixer and the frame pacing it has now.
@@ -918,6 +979,16 @@ index 0000000..8f35f18
 +uint64_t Rdtsc();
 +uint32_t TickMs();
 +
++// Guest queries. A read that would return the same value as the last read of that
++// clock advances one sim tick first. This title waits on KeQueryPerformanceCounter
++// until half a second of counts have elapsed (frequency/2) before it will present again.
++uint64_t ClockQpc();
++uint64_t ClockRdtsc();
++uint64_t ClockInterrupt();
++uint64_t ClockSystem();
++// Relative waits. hundred_ns is a guest duration. Whole ticks are consumed, the rest dropped.
++void Consume100ns(uint64_t hundred_ns);
++
 +}  // namespace det
 diff --git a/runtime/core/input.cpp b/runtime/core/input.cpp
 index 8a0f1d0..ad19511 100644
@@ -954,7 +1025,7 @@ index 8a0f1d0..ad19511 100644
  }
  
 diff --git a/runtime/cpu/dispatch.cpp b/runtime/cpu/dispatch.cpp
-index 1169944..869e350 100644
+index 1169944..bab0b65 100644
 --- a/runtime/cpu/dispatch.cpp
 +++ b/runtime/cpu/dispatch.cpp
 @@ -8,12 +8,13 @@
@@ -978,7 +1049,7 @@ index 1169944..869e350 100644
  uint64_t x86_rdtsc() {
 +    if (det::FixedStep()) {
 +        det::NoteRdtsc();
-+        return det::Rdtsc();
++        return det::ClockRdtsc();
 +    }
      using namespace std::chrono;
      static const auto start = steady_clock::now();
@@ -2735,7 +2806,7 @@ index 56fadb8..5e60004 100644
      pthread_setname_np(pthread_self(), name);
  #endif
 diff --git a/runtime/kernel/xboxkrnl.cpp b/runtime/kernel/xboxkrnl.cpp
-index 86cf14a..9c8e41c 100644
+index 86cf14a..af6229d 100644
 --- a/runtime/kernel/xboxkrnl.cpp
 +++ b/runtime/kernel/xboxkrnl.cpp
 @@ -5,6 +5,7 @@
@@ -2778,14 +2849,14 @@ index 86cf14a..9c8e41c 100644
  
  KERNEL_EXPORT(125, KeQueryInterruptTime, 0) {
 -    uint64_t t = InterruptTime();
-+    uint64_t t = det::FixedStep() ? det::InterruptTime100ns() : InterruptTime();
++    uint64_t t = det::FixedStep() ? det::ClockInterrupt() : InterruptTime();
      ctx.edx = uint32_t(t >> 32);
      return uint32_t(t);
  }
  
  KERNEL_EXPORT(128, KeQuerySystemTime, 1) {
 -    W64(a[0], uint64_t(Now100ns()));
-+    W64(a[0], det::FixedStep() ? det::SystemTime100ns() : uint64_t(Now100ns()));
++    W64(a[0], det::FixedStep() ? det::ClockSystem() : uint64_t(Now100ns()));
      return 0;
  }
  
@@ -2795,18 +2866,21 @@ index 86cf14a..9c8e41c 100644
  KERNEL_EXPORT(126, KeQueryPerformanceCounter, 0) {
 +    if (det::FixedStep()) {
 +        det::NoteQpc();
-+        uint64_t v = det::PerfCounter();
++        uint64_t v = det::ClockQpc();
 +        ctx.edx = uint32_t(v >> 32);
 +        return uint32_t(v);
 +    }
      using namespace std::chrono;
      static const auto start = steady_clock::now();
      uint64_t ns = uint64_t(duration_cast<nanoseconds>(steady_clock::now() - start).count());
-@@ -250,12 +270,23 @@ KERNEL_EXPORT(127, KeQueryPerformanceFrequency, 0) {
+@@ -250,12 +270,28 @@ KERNEL_EXPORT(127, KeQueryPerformanceFrequency, 0) {
  }
  
  KERNEL_EXPORT(151, KeStallExecutionProcessor, 1) {
-+    if (det::FixedStep()) return 0;
++    if (det::FixedStep()) {
++        det::Consume100ns(uint64_t(a[0]) * 10ull);
++        return 0;
++    }
 +#if defined(__APPLE__)
 +    // The Xbox call busy-waits. Sleeping the requested interval keeps the core
 +    // idle; a zero stall stays a no-op.
@@ -2821,6 +2895,8 @@ index 86cf14a..9c8e41c 100644
  KERNEL_EXPORT(99, KeDelayExecutionThread, 3) {
 +    if (det::FixedStep()) {
 +        det::NoteDelay();
++        int64_t interval = int64_t(R64(a[2]));
++        if (interval < 0 && interval != INT64_MIN) det::Consume100ns(uint64_t(-interval));
 +        return kSuccess;
 +    }
      int64_t interval = int64_t(R64(a[2]));

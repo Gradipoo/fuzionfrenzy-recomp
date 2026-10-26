@@ -30,7 +30,9 @@ The command line wins over the environment variable. `--name value` and `--name=
 
 A frame is one `D3DDevice_Present` (this XDK has no `Swap` that the title calls). The guest body of `Present` is replaced, and the only caller of `BlockUntilVerticalBlank` sat inside that body, so the title does not wait on vblank itself.
 
-Clocks stay constant during the frame and step after the checksum, so a once-per-frame performance-counter delta is exactly 1/60 s. Two reads inside one frame return the same value. If the title stored `last = now` on a second read and then subtracted, the delta would be 0 and the sim would sit still. Identical hashes on every frame are that failure. Do not switch to per-call clocks without a log that shows it.
+Present advances the sim tick by one, after the checksum. A guest read of QPC, RDTSC, or interrupt/system time that would return the same value as the previous read of that clock advances one tick first and then returns the new value. `KeDelayExecutionThread` and `KeStallExecutionProcessor` consume their guest duration in whole ticks and return, without sleeping.
+
+That repeat rule is what gets past boot. `sub_0004C510` samples RDTSC, then spins on `KeQueryPerformanceCounter` until the delta reaches the performance frequency divided by two (half a second, 1,687,500 counts). A counter that only moved on present never left that spin: the first run hashed frame 0 and then sat in the wait at 100% CPU. Thirty repeated reads are exactly half a second (`30 * 56250`), so the wait exits and the TSC delta beside it stays in step with the QPC delta. Two reads that are not a wait also see one tick between them. The qpc column in the state log is how you see whether a frame is polling the counter far more than once.
 
 | Source | Fixed-step value |
 | --- | --- |
@@ -39,7 +41,7 @@ Clocks stay constant during the frame and step after the checksum, so a once-per
 | `KeQuerySystemTime`, `KeSystemTime`, `NtSetSystemTime`'s read | epoch + interrupt time. Epoch is 2026-01-01 00:00:00 UTC as 100 ns since 1601 (`134116992000000000`). |
 | `KeTickCount` | `(frame * 1000) / 60` milliseconds. The step alternates 16 and 17 and lands on 1000 at frame 60. |
 | `RDTSC` (`x86_rdtsc`) | `frame * 12222222` (733333333/60). `.text`, DSOUND, XGRPH, and WMADEC all come through this. |
-| `KeDelayExecutionThread`, `KeStallExecutionProcessor` | Return immediately. No sleep, no yield. |
+| `KeDelayExecutionThread`, `KeStallExecutionProcessor` | Consume the guest duration in whole ticks (a delay shorter than one tick does not move time), then return. No sleep. |
 | Timer DPCs | Deadline is guest 100 ns. The timer thread does not pop. Present fires due timers inline, in deadline order, on the present thread, then rearms a period by `period_ms * 10000` (100 ns). |
 | Vblank | The free-running thread does not increment. Present bumps the count once. `BlockUntilVerticalBlank` returns at once. |
 | `app::Pace` | Skipped, so the harness is not fps-capped. A Vulkan present can still wait on vsync. |
