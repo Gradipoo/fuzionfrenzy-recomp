@@ -130,7 +130,18 @@ If every frame's total hash is the same, the tool warns that time is probably no
 
 ## Results
 
-Filled in after `scripts/det-matrix.sh` on this branch. Until that run, this section is the plan above and not a measured result.
+`scripts/det-matrix.sh` on this Mac, 25 Oct 2026 9:34 PM PT, 240 frames, muted, minimized, seed 1, idle replay (four ports disconnected). Build `out/build/macos-release/RingHost`.
+
+| Row | Result |
+| --- | --- |
+| a sequential | PASS. Two runs of instance 2, fresh `hdd2` each time. 240 frames match. Frame 0 total `adaa8469791e9640`. Frame 3 delay count is 1 (`qpc=87`, `rdtsc=15`). Frame 239 total `23c7bcee96e7f23a`, delay count 3, seed still `00000001`. |
+| b parallel | PASS. Instances 2 and 3 at the same time. 240 frames match, same totals as (a). |
+| c stall | PASS. Instance 4 with a 30 ms stall after each present matches the zero-stall log from (a), including frame 0. |
+| d gameplay | SKIP. `det-logs/gameplay.pads` is not recorded yet. |
+
+One guest thread calls `PsTerminateSystemThread` between frame 60 and frame 120 (the log line is "a guest thread exited while it held the turn"). Before that release, both surviving threads blocked in `UnblockGuest` and presents stopped at frame 107. With the release, all three idle rows finish.
+
+Nothing in these idle rows diverged. They do not cover menus, character select, or a minigame. That is row (d).
 
 ## Manual check
 
@@ -162,6 +173,6 @@ The menus and the minigames should follow the recording with the controllers ign
 
 - `Wait` timeouts.
 - A `srand` after image load replaces `--seed`. The seed column shows it. Fixed time keeps a clock-seeded `srand` stable across runs.
-- A host thread that writes guest RAM without taking the turn (an IO status block, a GPU fence). The stall row is where that shows up. One early stall run differed at frame 0 in `user_0` only; repeats of that pair matched, so it is not yet a stable failure.
+- A host thread that writes guest RAM without taking the turn (an IO status block, a GPU fence). The 240-frame stall row matched, so that did not show up on the idle replay. An earlier 8-frame stall differed once at frame 0 in `user_0` only, and the raw dumps were identical; it did not repeat.
 - Stacks are not hashed, so a value that only ever lived in a spill is invisible.
 - GPU pixels are not hashed, so a render-only divergence does not fail a row. That is deliberate.
