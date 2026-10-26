@@ -169,4 +169,15 @@ else()
         target_compile_options(openlibm PRIVATE -mfpmath=sse -msse2)
     endif()
 endif()
+if(XBE_SANITIZE)
+    # fdlibm updates exponents with signed shifts and wrapping adds. Those
+    # are the bit operations the math digest already pins. -fwrapv defines
+    # the adds. The shift check is off for this library only; e_pow.c and
+    # e_powf.c shift through unsigned so the reported site is defined in
+    # every build. Float divide-by-zero here is IEEE, which is the result
+    # the guest is supposed to see. The runtime stays fully checked.
+    target_compile_options(openlibm PRIVATE
+        -fwrapv
+        -fno-sanitize=shift,signed-integer-overflow,float-divide-by-zero)
+endif()
 target_link_libraries(FuzionFrenzy PRIVATE openlibm)
