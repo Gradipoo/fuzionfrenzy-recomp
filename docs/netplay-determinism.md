@@ -232,7 +232,8 @@ Upstream already builds those hosts. `build.bat` is the native Windows build. `c
 - `patches/sdk-lockstep.patch` — bundled math, codegen, CRT, mixer, CPU vertex math, and the host rounding mode. Marker: `XBE_LOCKSTEP_FP`.
 - `patches/sdk-lockstep-memory.patch` — zero a freshly committed page on Linux and Windows.
 - `patches/sdk-lockstep-memory-apple.patch` — the same zeroing for the Darwin commit path.
-- `patches/sdk-lockstep-load-yield.patch` — each present yields the guest turn, object-wait timeouts follow sim ticks, and a fixed-step GPU submit finishes before the guest continues. Marker: `XBE_LOAD_YIELD`. `tools/apply-lockstep.cmake` applies it after `patches/sdk-lockstep-harness.patch` when `determinism.cpp` is already in the tree.
+- `patches/sdk-lockstep-load-yield.patch` — each present yields the guest turn, object-wait timeouts follow sim ticks, and a fixed-step GPU submit finishes before the guest continues. Marker: `XBE_LOAD_YIELD`. `tools/apply-lockstep.cmake` applies it after `patches/sdk-lockstep-harness.patch` when the Apple patch has already added `determinism.cpp`.
+- `patches/sdk-lockstep-host.patch` — the same runtime and call sites, against the pinned sdk, for Linux and Windows. Applied only when `determinism.cpp` is absent. It already contains `XBE_LOCKSTEP_HARNESS` and `XBE_LOAD_YIELD`, so the two patches above are skipped.
 
 `tools/apply-lockstep.cmake` picks the memory patch from whether `HostProtect` is already in the tree, and it does nothing if the marker is already present. Do not fold these hunks back into the Apple patch. A full `git -C sdk diff` would.
 
@@ -274,19 +275,42 @@ The digest covers openlibm, the 66-bit-pi `fsin(pi)` (the value `1.2246063538223
 
 The rebuilt Mac arm64 `RingHost` then replayed the idle pads twice, 25 Oct 2026 10:20 PM PT. Instance 2, fresh `hdd2` each time, muted, minimized, fixed-step, seed 1, 240 frames. `scripts/det-diff.py` printed `PASS 240 frames match`. Frame 0 total `574c0f97185e0166`. Frame 3 delay count is still 1 (`qpc=87`, `rdtsc=15`). Frame 239 total `41a20ce3c40f8974`, delay count 3, seed `00000001`. Those totals are not the 10:01 PM PT Taylor totals (`adaa8469791e9640` / `23c7bcee96e7f23a`). The idle path moved when the transcendental implementation changed. The two runs of this binary match each other.
 
-This machine has no Docker, no Podman, no QEMU, no `clang-cl`, and no xwin sysroot. A full RingHost cannot be linked x86_64 here: the Homebrew Vulkan loader is arm64. So there is no Linux x86-64 replay and no Windows x64 replay yet. Rosetta covered the math digest only. The comparison that is still required, once a Linux or Windows build exists, is:
+On 26 Oct 2026 (Pacific) the paced Mac `RingHost` replayed `det-logs/gameplay2.pads` twice with `FUZION_FIXED_STEP=1`, `FUZION_SEED=1`, and `FUZION_STATE_EXPECT` pointed at `det-logs/gameplay2.detlog`. Both runs exited 0. `scripts/det-diff.py` printed `PASS 7766 frames match` for the two replays and for the first replay against that expect log. The recording was launched with no `--instance`, so the replays used the same `hdd` beside the executable, restored from a snapshot before each run.
+
+GitHub CI does not run that comparison. The workflow builds the math digest, `det-diff.py --self-check`, the host tools, and the runtime against `tools/ci/stub_symbols.py`. It never checks out a disc image or a detlog. The real cross-check stays on this Mac.
+
+This Mac has no Docker, OrbStack, Lima, UTM, or QEMU installed, and the Homebrew Vulkan loader is arm64, so a Linux `FuzionFrenzy` cannot be linked on the host itself. The local path is a Linux VM or container whose disk never leaves the machine. Arm64 Linux first (native on this M3). x86_64 Linux second, under emulation, for correctness. Generated C, the XBE, pads, and detlogs stay in the VM's mount of this repo and are not committed or pushed.
+
+Install one of these, then the packages inside the guest:
+
+- OrbStack, Lima, or Docker Desktop. A Lima VM is `brew install lima` and `limactl start`.
+- In the guest: `clang`, `cmake`, `ninja`, `python3`, `pkg-config`, `zlib1g-dev`, `libvulkan-dev`, `glslang-dev`, `mesa-vulkan-drivers`, `xvfb`, and the X11 headers SDL's CMake fetch needs (`libx11-dev`, `libxext-dev`, `libxrandr-dev`, `libxcursor-dev`, `libxi-dev`).
+
+From the repo root inside the guest, with `assets/default.xbe` visible only because the repo is mounted:
 
 ```
-# on each machine, same idle.pads, same seed, fresh hdd for that instance
-env -u FUZION_AUTOSTART XBE_MUTE=1 FUZION_FIXED_STEP=1 FUZION_SEED=1 \
-  FUZION_REPLAY_INPUT=det-logs/idle.pads \
-  FUZION_STATE_LOG=det-logs/cross.detlog \
+./build.sh
+# lavapipe is the software Vulkan ICD. GPU pixels are not in the hash.
+# The filename is lvp_icd.aarch64.json, lvp_icd.x86_64.json, or lvp_icd.json.
+export VK_DRIVER_FILES=/usr/share/vulkan/icd.d/lvp_icd.aarch64.json
+cd out/build/linux-release
+rm -rf hdd2
+xvfb-run -a env -u FUZION_AUTOSTART XBE_MUTE=1 FUZION_FIXED_STEP=1 FUZION_SEED=1 \
+  FUZION_REPLAY_INPUT=../../../det-logs/idle.pads \
+  FUZION_STATE_LOG=/tmp/linux-idle.detlog \
   FUZION_FRAMES=240 FUZION_MINIMIZED=1 \
-  ./FuzionFrenzy
-python3 scripts/det-diff.py mac.detlog linux.detlog
+  ./FuzionFrenzy --instance 2
 ```
 
-The Mac binary is `RingHost`. Linux and Windows keep the name `FuzionFrenzy`. Diff a Linux or Windows log against the Mac idle log from this openlibm build, not against the 9:34 PM PT Taylor log.
+Back on the Mac, diff that log against a Mac idle log from this same paced build (instance 2, fresh `hdd2`, the same flags, `RingHost`). Do not diff it against the 9:34 PM PT Taylor log.
+
+```
+python3 scripts/det-diff.py mac-idle.detlog linux-idle.detlog
+```
+
+The same command with `det-logs/gameplay2.pads`, `FUZION_FRAMES=7766`, and `FUZION_STATE_EXPECT` pointed at `det-logs/gameplay2.detlog` is the gameplay check. The Mac binary is `RingHost`. Linux and Windows keep the name `FuzionFrenzy`.
+
+x86_64 uses the same steps in an emulated guest (`limactl start --arch=x86_64 template://ubuntu`, or Docker `--platform linux/amd64`). The ICD filename is `lvp_icd.x86_64.json`. Emulation is enough to compare checksums. It is not a frame-rate test.
 
 Windows, from a Linux machine that has the xwin sysroot from the top of `cmake/windows-cross.cmake`:
 
