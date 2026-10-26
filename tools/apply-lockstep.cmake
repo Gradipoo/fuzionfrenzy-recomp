@@ -21,7 +21,12 @@ if(NOT _is_git EQUAL 0)
     execute_process(COMMAND "${GIT_EXE}" -C "${SDK}" init -q)
 endif()
 
-file(READ "${SDK}/runtime/cpu/softmath.h" _hdr)
+# softmath.h is created by the patch below. A clean tree does not have it yet,
+# and file(READ) aborts the configure when the path is missing.
+set(_hdr "")
+if(EXISTS "${SDK}/runtime/cpu/softmath.h")
+    file(READ "${SDK}/runtime/cpu/softmath.h" _hdr)
+endif()
 if(NOT _hdr MATCHES "XBE_LOCKSTEP_FP")
     execute_process(COMMAND "${GIT_EXE}" -C "${SDK}" apply --whitespace=nowarn "${PATCH}"
                     RESULT_VARIABLE _rc)
@@ -31,9 +36,25 @@ if(NOT _hdr MATCHES "XBE_LOCKSTEP_FP")
     message(STATUS "applied patches/sdk-lockstep.patch")
 endif()
 
-# Harness delta on top of the Apple patch's determinism.cpp. Linux has no
-# harness yet (the call sites live in the Apple patch), so a missing file is
-# skipped rather than failing the configure.
+# Linux and Windows do not apply the Apple patch, so determinism.cpp is
+# missing. One patch adds the same runtime and call sites the Mac already
+# has after the harness and the load-yield patches. A tree that already
+# has the file (the Apple path) skips this and takes those two patches.
+set(_host "${REPO}/patches/sdk-lockstep-host.patch")
+if(NOT EXISTS "${SDK}/runtime/core/determinism.cpp")
+    if(NOT EXISTS "${_host}")
+        message(FATAL_ERROR "missing patches/sdk-lockstep-host.patch")
+    endif()
+    execute_process(COMMAND "${GIT_EXE}" -C "${SDK}" apply --whitespace=nowarn "${_host}"
+                    RESULT_VARIABLE _rc)
+    if(NOT _rc EQUAL 0)
+        message(FATAL_ERROR "patches/sdk-lockstep-host.patch failed (${_rc})")
+    endif()
+    message(STATUS "applied patches/sdk-lockstep-host.patch")
+endif()
+
+# Harness delta on top of the Apple patch's determinism.cpp. The host patch
+# above already contains this marker, so it is skipped there.
 set(_harness "${REPO}/patches/sdk-lockstep-harness.patch")
 if(EXISTS "${SDK}/runtime/core/determinism.cpp")
     file(READ "${SDK}/runtime/core/determinism.cpp" _det)

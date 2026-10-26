@@ -36,6 +36,11 @@ det-desync/
 desync_*.txt
 frame_*_*.bin
 
+# Reverse-engineering workspace. The Ghidra project, decompiler exports, symbol
+# dumps, the Unicorn venv, and the oracle binary are derived from the local XBE.
+# tools/re/ holds the scripts we wrote and stays tracked.
+/re/
+
 # runtime files
 settings.toml
 shadercache/
