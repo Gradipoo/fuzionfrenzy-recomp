@@ -239,7 +239,7 @@ env -u FUZION_AUTOSTART XBE_MUTE=1 FUZION_FIXED_STEP=1 FUZION_SEED=1 \
 python3 scripts/det-diff.py mac.detlog linux.detlog
 ```
 
-The Mac binary is `RingHost`. Linux and Windows keep the name `FuzionFrenzy`. The frame-0 total from the 9:34 PM PT idle matrix will not match a build that contains this math. Two runs of the new binary still have to match each other. That re-run is recorded below when it has been done.
+The Mac binary is `RingHost`. Linux and Windows keep the name `FuzionFrenzy`. On this Mac the new binary's idle totals matched the 9:34 PM PT log. A Linux or Windows log still has to be diffed against that file before a mixed-OS session is treated as matching.
 
 Windows, from a Linux machine that has the xwin sysroot from the top of `cmake/windows-cross.cmake`:
 
