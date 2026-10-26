@@ -1,0 +1,120 @@
+diff --git a/runtime/core/input.h b/runtime/core/input.h
+--- a/runtime/core/input.h
++++ b/runtime/core/input.h
+@@ -12,6 +12,9 @@
+ };
+ 
+ void Init();  // window thread, before boot
++// Window thread. event_type is SDL_EVENT_GAMEPAD_ADDED or SDL_EVENT_GAMEPAD_REMOVED.
++// GCController posts a wired Xbox pad after SDL_Init; the window loop is what receives it.
++void NoteDevice(uint32_t event_type, uint32_t joystick_id);
+ // the controller on that port, then GameInfo::pad
+ Pad Poll(int port);
+ void Rumble(int port, uint16_t left, uint16_t right);
+diff --git a/runtime/core/input.cpp b/runtime/core/input.cpp
+--- a/runtime/core/input.cpp
++++ b/runtime/core/input.cpp
+@@ -88,21 +88,29 @@
+     if (!g_sdl || now == last) return;
+     last = now;
+ #if defined(__APPLE__)
+-    // Cocoa delivers NSEvents on the main thread only. SDL_PumpEvents from a
+-    // guest thread aborts the process. main_sdl pumps on the main thread;
+-    // SDL_HINT_JOYSTICK_THREAD keeps the pad state readable from here.
++    // The window thread pumps and opens pads (NoteDevice). SDL_PumpEvents
++    // from a guest thread aborts. Taking SDL_EVENT_GAMEPAD_ADDED here would
++    // drop it, or open a GCController device off the main thread.
++    return;
+ #else
+     SDL_PumpEvents();
+-#endif
+     SDL_Event e;
+     while (SDL_PeepEvents(&e, 1, SDL_GETEVENT, SDL_EVENT_FIRST, SDL_EVENT_LAST) == 1) {
+         if (e.type == SDL_EVENT_GAMEPAD_ADDED) AddPad(e.gdevice.which);
+         else if (e.type == SDL_EVENT_GAMEPAD_REMOVED) RemovePad(e.gdevice.which);
+     }
++#endif
+ }
+ 
+ }  // namespace
+ 
++void NoteDevice(uint32_t event_type, uint32_t joystick_id) {
++    if (!g_sdl) return;
++    std::lock_guard lock(g_lock);
++    if (event_type == SDL_EVENT_GAMEPAD_ADDED) AddPad(joystick_id);
++    else if (event_type == SDL_EVENT_GAMEPAD_REMOVED) RemovePad(joystick_id);
++}
++
+ void Init() {
+     // WGI reads the triggers apart and HIDAPI takes PlayStation and Switch pads. Reads come from the guest's threads,
+     // so SDL's own thread takes the device notices.
+@@ -112,14 +120,16 @@
+     SDL_SetHint(SDL_HINT_JOYSTICK_RAWINPUT, "0");
+     SDL_SetHint(SDL_HINT_XINPUT_ENABLED, "0");
+     SDL_SetHint(SDL_HINT_JOYSTICK_DIRECTINPUT, "0");
+-    // Wired Xbox One on macOS is not a GameController device. HIDAPI's Xbox
+-    // One driver opens it through libusb. MFI stays at its default so a
+-    // Bluetooth pad still comes in through GCController. The libusb whitelist
+-    // stays at its default so libusb does not claim every USB HID device.
++    // A wired Xbox Series pad (USB 045e:0b12) is owned by Apple's XboxGamepad
++    // dext. SDL opens it through GCController, the same way a default SDL3
++    // build does. HIDAPI skips that IOHID node while MFI is on, and libusb
++    // cannot take the device from the dext. HIDAPI and libusb stay on for a
++    // pad that dext does not claim.
+     SDL_SetHint(SDL_HINT_JOYSTICK_HIDAPI, "1");
+     SDL_SetHint(SDL_HINT_JOYSTICK_HIDAPI_XBOX, "1");
+     SDL_SetHint(SDL_HINT_JOYSTICK_HIDAPI_XBOX_ONE, "1");
+     SDL_SetHint(SDL_HINT_HIDAPI_LIBUSB, "1");
++    SDL_SetHint(SDL_HINT_JOYSTICK_MFI, "1");
+     if (!SDL_Init(SDL_INIT_GAMEPAD)) {
+         LOGE("input: SDL failed to start, no controllers: %s", SDL_GetError());
+         return;
+@@ -136,7 +146,34 @@
+     LOGR("input: hints hidapi=%s xbox=%s xbox_one=%s libusb=%s mfi=%s", HintValue(SDL_HINT_JOYSTICK_HIDAPI),
+          HintValue(SDL_HINT_JOYSTICK_HIDAPI_XBOX), HintValue(SDL_HINT_JOYSTICK_HIDAPI_XBOX_ONE),
+          HintValue(SDL_HINT_HIDAPI_LIBUSB), HintValue(SDL_HINT_JOYSTICK_MFI));
+-    if (count <= 0) LOGR("input: no gamepads");
++#if defined(__APPLE__)
++    // XBE_GAMEPAD_WATCH: GCController posts the wired pad about 150ms after
++    // the gamepad subsystem starts. The snapshot above is empty until then.
++    // Pump on this thread so a pad already plugged in is open before boot.
++    // A pad plugged in later is opened from the window loop (NoteDevice).
++    if (count <= 0) {
++        const uint64_t deadline = SDL_GetTicks() + 1000;
++        while (SDL_GetTicks() < deadline) {
++            SDL_PumpEvents();
++            bool added = false;
++            SDL_Event ev;
++            while (SDL_PeepEvents(&ev, 1, SDL_GETEVENT, SDL_EVENT_GAMEPAD_ADDED, SDL_EVENT_GAMEPAD_REMOVED) == 1) {
++                if (ev.type == SDL_EVENT_GAMEPAD_ADDED) {
++                    AddPad(ev.gdevice.which);
++                    added = true;
++                } else {
++                    RemovePad(ev.gdevice.which);
++                }
++            }
++            if (added) {
++                count = 1;
++                break;
++            }
++            SDL_Delay(10);
++        }
++    }
++#endif
++    if (count <= 0) LOGR("input: no gamepads yet");
+ }
+ 
+ Pad Poll(int port) {
+diff --git a/runtime/app/main_sdl.cpp b/runtime/app/main_sdl.cpp
+--- a/runtime/app/main_sdl.cpp
++++ b/runtime/app/main_sdl.cpp
+@@ -298,6 +298,9 @@
+         // F1/F2 need no host handling: ImGui has the key from ProcessEvent
+         // above and the overlay toggles itself in GameInfo::ui.
+     }
++    // A wired Xbox pad arrives through GCController after startup.
++    if (e.type == SDL_EVENT_GAMEPAD_ADDED || e.type == SDL_EVENT_GAMEPAD_REMOVED)
++        input::NoteDevice(uint32_t(e.type), uint32_t(e.gdevice.which));
+     return false;
+ }
+ 
