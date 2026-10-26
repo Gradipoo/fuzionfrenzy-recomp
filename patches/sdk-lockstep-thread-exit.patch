@@ -1,0 +1,69 @@
+diff --git a/runtime/cpu/dispatch.cpp b/runtime/cpu/dispatch.cpp
+--- a/runtime/cpu/dispatch.cpp
++++ b/runtime/cpu/dispatch.cpp
+@@ -158,11 +158,12 @@ uint32_t DataAddress(uint32_t ordinal) { return ordinal < 400 ? g_exports[ordinal].data : 0; }
+ const char* ExportName(uint32_t ordinal) { return ordinal < 400 && g_exports[ordinal].name ? g_exports[ordinal].name : OrdinalName(ordinal); }
+ bool HasExport(uint32_t ordinal) { return ordinal < 400 && (g_exports[ordinal].fn || g_exports[ordinal].data); }
+ 
+-uint32_t CallGuest(X86Context& ctx, uint32_t fn, const uint32_t* args, size_t count) {
++uint32_t CallGuest(X86Context& ctx, uint32_t fn, const uint32_t* args, size_t count, bool release_turn) {
+     struct Turn {
+-        Turn() { det::EnterGuest(); }
+-        ~Turn() { det::LeaveGuest(); }
+-    } turn;
++        bool release;
++        explicit Turn(bool release) : release(release) { det::EnterGuest(); }
++        ~Turn() { if (release) det::LeaveGuest(); }
++    } turn{release_turn};
+     (void)turn;
+     // the D3D and DirectSound hooks call this several times a draw: no heap, only the registers put back are kept
+     struct {
+diff --git a/runtime/kernel/kernel.h b/runtime/kernel/kernel.h
+--- a/runtime/kernel/kernel.h
++++ b/runtime/kernel/kernel.h
+@@ -95,10 +95,15 @@ inline void Return(X86Context& ctx, uint32_t value, int stack_args) {
+ }
+ 
+ // runs guest code from the host on the current guest thread
+-uint32_t CallGuest(X86Context& ctx, uint32_t fn, const uint32_t* args, size_t count);
++// release_turn is false when the caller still has guest writes that must land
++// before another thread can take the turn. Fixed step is the only mode that holds one.
++uint32_t CallGuest(X86Context& ctx, uint32_t fn, const uint32_t* args, size_t count, bool release_turn = true);
+ inline uint32_t CallGuest(X86Context& ctx, uint32_t fn, std::initializer_list<uint32_t> args) {
+     return CallGuest(ctx, fn, args.begin(), args.size());
+ }
++inline uint32_t CallGuest(X86Context& ctx, uint32_t fn, std::initializer_list<uint32_t> args, bool release_turn) {
++    return CallGuest(ctx, fn, args.begin(), args.size(), release_turn);
++}
+ 
+ // objects
+ enum class ObjType : uint8_t { Event, Semaphore, Mutant, Timer, Thread, File, SymLink, Device, Queue, Other };
+diff --git a/runtime/kernel/threads.cpp b/runtime/kernel/threads.cpp
+--- a/runtime/kernel/threads.cpp
++++ b/runtime/kernel/threads.cpp
+@@ -185,17 +185,18 @@ void StartThread(ThreadRef t) {
+         static std::atomic<int> pace_once{0};
+         if (det::FixedStep() && pace_once.exchange(1) == 0) det::NotePacer();
+         uint32_t code;
++        // XBE_THREAD_EXIT: the entry thread returns before the first present.
++        // Dropping the turn first lets the new thread present and hash while
++        // this thread's signal is still clear. A fast host usually wins that
++        // race. Write the exit, then release the turn.
+         if (si.system_routine)
+-            code = CallGuest(ctx, si.system_routine, {si.start_routine, si.start_context});
++            code = CallGuest(ctx, si.system_routine, {si.start_routine, si.start_context}, false);
+         else
+-            code = CallGuest(ctx, si.start_routine, {si.start_context});
+-        // CallGuest has dropped the turn. Take it back so the exit writes are
+-        // visible before the presenter hashes the next frame.
+-        if (det::FixedStep()) det::EnterGuest();
++            code = CallGuest(ctx, si.start_routine, {si.start_context}, false);
+         LOGI("thread %X returned %08X", t->id, code);
+         MarkExited(*t, code);
+         Unregister(t.get());
+         t_current.reset();
+-        if (det::FixedStep()) det::LeaveGuest();
++        det::LeaveGuest();
+     });
+ }
+ 
