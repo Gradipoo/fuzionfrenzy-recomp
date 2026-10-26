@@ -66,6 +66,8 @@
          "cacheVariables": {"CMAKE_BUILD_TYPE": "Release"}},
         {"name": "macos-relwithdebinfo", "displayName": "macOS arm64 RelWithDebInfo", "inherits": "macos-base",
          "cacheVariables": {"CMAKE_BUILD_TYPE": "RelWithDebInfo"}},
+        {"name": "macos-tracy", "displayName": "macOS arm64 RelWithDebInfo + Tracy", "inherits": "macos-base",
+         "cacheVariables": {"CMAKE_BUILD_TYPE": "RelWithDebInfo", "XBE_TRACY": "ON"}},
         {"name": "macos-asan", "displayName": "macOS arm64 ASan+UBSan", "inherits": "macos-base",
          "cacheVariables": {
              "CMAKE_BUILD_TYPE": "RelWithDebInfo",
@@ -99,6 +101,7 @@
         {"name": "macos-debug", "configurePreset": "macos-debug"},
         {"name": "macos-release", "configurePreset": "macos-release"},
         {"name": "macos-relwithdebinfo", "configurePreset": "macos-relwithdebinfo"},
+        {"name": "macos-tracy", "configurePreset": "macos-tracy"},
         {"name": "macos-asan", "configurePreset": "macos-asan"}
     ]
 }

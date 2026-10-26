@@ -22,6 +22,15 @@ execute_process(
 if(NOT _xbe_lockstep_patch EQUAL 0)
     message(FATAL_ERROR "tools/apply-lockstep.cmake failed (${_xbe_lockstep_patch})")
 endif()
+# Tracy call sites. They compile to nothing unless XBE_TRACY is on. Idempotent,
+# and it follows whichever of the Apple and lockstep patches this host applied.
+execute_process(
+    COMMAND python3 "${CMAKE_CURRENT_SOURCE_DIR}/tools/apply-tracy.py"
+    WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
+    RESULT_VARIABLE _xbe_tracy_patch)
+if(NOT _xbe_tracy_patch EQUAL 0)
+    message(FATAL_ERROR "tools/apply-tracy.py failed (${_xbe_tracy_patch})")
+endif()
 
 project(FuzionFrenzy LANGUAGES C CXX)
 
@@ -57,6 +66,31 @@ endif()
 # below; those are x86 semantics, not host bugs. See docs/sanitizers.md.
 option(XBE_CI_RUNTIME "Compile the SDK runtime without a game image" OFF)
 option(XBE_SANITIZE "Instrument the runtime and the game with ASan and UBSan" OFF)
+# Tracy 0.14.1 (BSD-3). Off unless this option is on: the default build does
+# not fetch or link it. On-demand and localhost-only, so a profiled build
+# still runs when the Tracy server is not attached. See docs/profiling.md.
+option(XBE_TRACY "Tracy zones for frame, game tick, GPU submit/present, and audio" OFF)
+if(XBE_TRACY)
+    include(FetchContent)
+    set(TRACY_ENABLE ON CACHE BOOL "" FORCE)
+    set(TRACY_ON_DEMAND ON CACHE BOOL "" FORCE)
+    set(TRACY_ONLY_LOCALHOST ON CACHE BOOL "" FORCE)
+    set(TRACY_NO_BROADCAST ON CACHE BOOL "" FORCE)
+    set(TRACY_NO_CRASH_HANDLER ON CACHE BOOL "" FORCE)
+    set(TRACY_NO_SYSTEM_TRACING ON CACHE BOOL "" FORCE)
+    set(TRACY_NO_FRAME_IMAGE ON CACHE BOOL "" FORCE)
+    FetchContent_Declare(tracy
+        GIT_REPOSITORY https://github.com/wolfpld/tracy.git
+        GIT_TAG v0.14.1)
+    FetchContent_MakeAvailable(tracy)
+endif()
+function(xbe_tracy_link target)
+    if(NOT XBE_TRACY OR NOT TARGET ${target})
+        return()
+    endif()
+    target_compile_definitions(${target} PRIVATE XBE_TRACY)
+    target_link_libraries(${target} PRIVATE Tracy::TracyClient)
+endfunction()
 if(XBE_SANITIZE)
     if(MSVC AND NOT CMAKE_CXX_COMPILER_ID MATCHES "Clang")
         message(FATAL_ERROR "XBE_SANITIZE needs Clang or GCC (ASan + UBSan).")
@@ -108,6 +142,7 @@ if(XBE_CI_RUNTIME)
     target_include_directories(xbe_runtime SYSTEM PRIVATE ${imgui_SOURCE_DIR} ${XBE_SHADER_INCLUDES})
     target_compile_definitions(xbe_runtime PRIVATE UNICODE _UNICODE _CRT_SECURE_NO_WARNINGS ${XBE_SHADER_DEFINES})
     target_link_libraries(xbe_runtime PRIVATE tomlplusplus::tomlplusplus SDL3::SDL3-static Vulkan::Vulkan ${XBE_SHADER_LIBS} ZLIB::ZLIB)
+    xbe_tracy_link(xbe_runtime)
     if(MSVC)
         target_compile_options(xbe_runtime PRIVATE /fp:precise)
     else()
@@ -221,3 +256,4 @@ if(XBE_SANITIZE)
         -fno-sanitize=shift,signed-integer-overflow,float-divide-by-zero)
 endif()
 target_link_libraries(FuzionFrenzy PRIVATE openlibm)
+xbe_tracy_link(FuzionFrenzy)

@@ -265,6 +265,10 @@ You supply the game: the USA Xbox release, as either
    What that build ignores on purpose, and why MSan is not a macOS preset, is
    in `docs/sanitizers.md`.
 
+   Tracy is off unless the build asks for it (`./build.sh macos-tracy`, or
+   `-DXBE_TRACY=ON`). Zones, the Metal debugger, and Instruments are in
+   `docs/profiling.md`.
+
    A release run is quiet unless something fails. `XBE_PERF=1` prints a `perf:` line once a
    second (the macOS patch logs those at report level, so they show up in a Release build).
    `XBE_MUTE=1` silences SDL audio. How far a run gets, and what is still open, is in
