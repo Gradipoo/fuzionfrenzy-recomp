@@ -3,10 +3,12 @@
 # References are written under screen-ref/ and are not committed.
 #
 # name present
-title -
-board -
-character-select -
-twisted-system-countdown -
-twisted-system-round -
-sumo-balls -
-jetstream -
+# Measured 26 Oct 2026 PT on a paced fixed-step replay of det-logs/gameplay.pads
+# (seed 1). The pads file is local and is not in the tree.
+title 200
+board 1200
+character-select 1400
+twisted-system-countdown 1800
+twisted-system-round 2200
+sumo-balls 3400
+jetstream 5000

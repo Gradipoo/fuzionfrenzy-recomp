@@ -32,6 +32,8 @@ and the same lines on stdout.
 `tools/shots/scenes.txt` only.
 
 `python3 tools/shots/compare.py --self-check` checks the scorer on synthetic
-pixels. It does not need a replay. Filling a present index takes a local
-recording of those scenes (`docs/netplay-determinism.md`); the indexes above
-are still dashes because that recording is not in the tree.
+pixels. It does not need a replay. The presents in `tools/shots/scenes.txt`
+were measured on 26 Oct 2026 (Pacific) from a paced fixed-step replay of
+`det-logs/gameplay.pads` (seed 1): title 200, board 1200, character select
+1400, Twisted System countdown 1800, Twisted System round 2200, Sumo Balls
+3400, Jetstream 5000. The recording stays out of the tree.
