@@ -38,6 +38,7 @@ enum PrereqScan {
         items.append(tool("python3", title: "python3", hint: "Used to read an Xbox disc image. macOS or Homebrew both work."))
         items.append(vulkan())
         items.append(glslang())
+        items.append(libusb())
         return items
     }
 
@@ -87,6 +88,22 @@ enum PrereqScan {
             title: "MoltenVK",
             ok: false,
             detail: "brew install molten-vk vulkan-loader vulkan-headers. A LunarG Vulkan SDK works too, with VULKAN_SDK set."
+        )
+    }
+
+    private static func libusb() -> Prereq {
+        let candidates = [
+            "/opt/homebrew/lib/libusb-1.0.dylib",
+            "/usr/local/lib/libusb-1.0.dylib",
+        ]
+        if let found = candidates.first(where: { FileManager.default.fileExists(atPath: $0) }) {
+            return Prereq(id: "libusb", title: "libusb", ok: true, detail: found)
+        }
+        return Prereq(
+            id: "libusb",
+            title: "libusb",
+            ok: false,
+            detail: "brew install libusb. A wired Xbox pad is opened through it. No kernel extension."
         )
     }
 

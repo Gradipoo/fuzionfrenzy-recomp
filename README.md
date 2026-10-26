@@ -224,7 +224,10 @@ You supply the game: the USA Xbox release, as either
 
    - Xcode Command Line Tools (`xcode-select --install`). The compiler must be arm64. Do not
      build this target under Rosetta.
-   - Homebrew packages: `brew install cmake ninja openssl@3 glslang molten-vk vulkan-loader vulkan-headers`
+   - Homebrew packages: `brew install cmake ninja openssl@3 glslang libusb molten-vk vulkan-loader vulkan-headers`
+   - `libusb` is how a wired Xbox One controller is opened. macOS has no kernel
+     driver for that pad, and GameController only sees it over Bluetooth. The
+     build links the Homebrew dylib. No kernel extension.
    - A Vulkan ICD. Those Homebrew packages are enough: MoltenVK's ICD is
      `$(brew --prefix)/etc/vulkan/icd.d/MoltenVK_icd.json`, and the game points the loader at it
      when `VK_DRIVER_FILES` is unset. The [LunarG Vulkan SDK](https://vulkan.lunarg.com/sdk/home#mac)

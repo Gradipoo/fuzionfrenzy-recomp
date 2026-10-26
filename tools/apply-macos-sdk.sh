@@ -8,7 +8,29 @@ if [ ! -f sdk/runtime/kernel/memory.cpp ]; then
     exit 1
 fi
 
+# An already-patched tree used to stop here, so a newer input.cpp hunk never
+# landed. Wired Xbox One support lives in that file. Refresh it from the
+# pinned commit plus the current patch when the hint is missing.
 if grep -q "XBE_DARWIN_GUEST" sdk/runtime/kernel/memory.cpp; then
+    if ! grep -q "SDL_HINT_JOYSTICK_HIDAPI_XBOX_ONE" sdk/runtime/core/input.cpp; then
+        if ! git -C sdk cat-file -e HEAD:runtime/core/input.cpp 2>/dev/null; then
+            echo "sdk/runtime/core/input.cpp is an older macOS patch and there is no pinned commit to refresh it." >&2
+            echo "Reset the sdk submodule, or re-copy the port sources, then build again." >&2
+            exit 1
+        fi
+        git -C sdk checkout -- runtime/core/input.cpp
+        _xbe_input_patch="${TMPDIR:-/tmp}/xbe-input-$$.patch"
+        awk '
+            /^diff --git / {
+                if (keep) exit
+                keep = ($0 ~ /a\/runtime\/core\/input.cpp/)
+            }
+            keep { print }
+        ' patches/sdk-macos-arm64.patch > "$_xbe_input_patch"
+        git -C sdk apply --whitespace=nowarn "$_xbe_input_patch"
+        rm -f "$_xbe_input_patch"
+        echo "refreshed sdk/runtime/core/input.cpp from patches/sdk-macos-arm64.patch"
+    fi
     exit 0
 fi
 

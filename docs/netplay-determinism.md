@@ -155,6 +155,8 @@ A normal launch, with none of the variables above set, should look and pace the 
 
 To record the gameplay row with one controller, quit any Ring Host already open. Plug that pad in and leave the other ports empty. Do not set `FUZION_PORT2_KEYS` or `FUZION_PORT2_MASH`. The pad takes port 1. Ports 2–4 record as disconnected, and the title fills those seats with AI. The keyboard map still merges into port 1 while the new flag is unset, so leave the keyboard alone during this recording or those keys are part of port 1. One Start/A on the pad is enough to join; the match does not wait for a second connected port.
 
+A wired Xbox One pad on macOS is opened by SDL's HIDAPI driver through libusb. stderr and `logs/ringhost.log` beside RingHost list each pad at startup. `driver=libusb` `type=xboxone` `connection=wired` is the USB pad. A Bluetooth Xbox pad stays on GameController and shows `driver=mfi` (empty path) or `driver=iohid` (`DevSrvsID:`). The build links libusb. It does not load a kernel extension. If configure stops because libusb is missing, `brew install libusb` and rebuild. The first button or a hard stick move on that pad prints one `first report` line.
+
 ```
 cd out/build/macos-release
 env -u FUZION_AUTOSTART XBE_MUTE=1 FUZION_FIXED_STEP=1 FUZION_SEED=1 \
