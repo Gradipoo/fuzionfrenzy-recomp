@@ -156,14 +156,14 @@ index 2514392..b0b2aa5 100644
      if (!kernel::Boot(std::move(game.xbe), IMAGE_XBE, game.dir.string(), (app::ExeDir() / hdd).string())) {
          SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, app::Narrow(app::kGame.short_title).c_str(),
 diff --git a/runtime/app/system_info.cpp b/runtime/app/system_info.cpp
-index b2cd099..1304c37 100644
+index b2cd099..fa69dc6 100644
 --- a/runtime/app/system_info.cpp
 +++ b/runtime/app/system_info.cpp
 @@ -9,9 +9,15 @@
  #include <windows.h>
  #include <intrin.h>
  #else
-+#if !defined(__APPLE__)
++#if defined(__x86_64__) || defined(__i386__)
  #include <cpuid.h>
 +#endif
  #include <sys/utsname.h>
@@ -204,21 +204,25 @@ index b2cd099..1304c37 100644
  // The same CPUID brand leaves the Windows path reads (0x80000002..4), through
 -// <cpuid.h>'s __get_cpuid instead of MSVC's __cpuid intrinsic.
 +// <cpuid.h>'s __get_cpuid instead of MSVC's __cpuid intrinsic. Apple Silicon
-+// has no CPUID; the brand string comes from sysctl.
++// and arm64 Linux have no CPUID. The brand string is a log line, not guest state.
  std::string CpuName() {
 +#if defined(__APPLE__)
 +    char brand[256] = {};
 +    size_t len = sizeof(brand);
 +    if (sysctlbyname("machdep.cpu.brand_string", brand, &len, nullptr, 0) != 0 || !brand[0]) return "Apple Silicon";
 +    return brand;
-+#else
++#elif defined(__x86_64__) || defined(__i386__)
      if (__get_cpuid_max(0x80000000, nullptr) < 0x80000004) return "unknown";
      char brand[49] = {};
      for (unsigned i = 0; i < 3; i++) {
-@@ -137,14 +161,24 @@ std::string CpuName() {
+@@ -137,14 +161,28 @@ std::string CpuName() {
      s.erase(0, first);
      s.erase(s.find_last_not_of(' ') + 1);
      return s;
++#else
++    utsname u{};
++    if (uname(&u) != 0 || !u.machine[0]) return "unknown";
++    return u.machine;
 +#endif
  }
  
@@ -240,7 +244,7 @@ index b2cd099..1304c37 100644
  }
  
  // Windows enumerates a GPU line per display adapter; Linux has no equivalent list to
-@@ -152,10 +186,14 @@ std::string ExePath() {
+@@ -152,10 +190,14 @@ std::string ExePath() {
  // line when it picks a device), so the honest fact here is the display server this
  // session is running on, named by the environment every compositor sets.
  std::string DisplayStack() {
@@ -255,7 +259,7 @@ index b2cd099..1304c37 100644
  }
  
  #endif
-@@ -173,7 +211,7 @@ void LogSystem() {
+@@ -173,7 +215,7 @@ void LogSystem() {
      LOGR("Path: %s", ExeDir().string().c_str());
      std::string exe = ExePath();
      if (exe.empty()) {
