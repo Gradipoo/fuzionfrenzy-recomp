@@ -147,12 +147,13 @@ last = 0
 for line in open(sys.argv[1]):
     if not line or line[0] == "#":
         continue
-    last = max(last, int(line.split()[0]))
+    head = line.split("|", 1)[0].split()[0]
+    last = max(last, int(head))
 print(last + 1)
 PY
 )"
-  # Cap a long session so the matrix stays bounded. 3600 frames is one sim minute.
-  if [[ "$n" -gt 3600 ]]; then n=3600; fi
+  # Cap a long session so the matrix stays bounded. 12000 presents is 200 s at 60 Hz.
+  if [[ "$n" -gt 12000 ]]; then n=12000; fi
   local l1="$LOGS/d1.detlog" l2="$LOGS/d2.detlog"
   rm -f "$l1" "$l2"
   run_one 2 "$l1" 0 "$pads" "$n" || { note_log 2; return 1; }
