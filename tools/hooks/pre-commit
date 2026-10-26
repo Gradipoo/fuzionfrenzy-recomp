@@ -48,6 +48,14 @@ for f in $files; do
             ;;
     esac
     case "$f" in
+        re|re/*|*.gpr|*.rep|*.rep/*|*.gzf|time-rng-map.txt|*/time-rng-map.txt)
+            echo "pre-commit: refusing Ghidra project, export, or symbol dump: $f" >&2
+            echo "pre-commit: those are derived from the XBE and stay on this machine." >&2
+            fail=1
+            continue
+            ;;
+    esac
+    case "$f" in
         *x86_recomp*|*x86_func_mapping*|*image_symbols.h)
             echo "pre-commit: refusing recompiled guest code: $f" >&2
             fail=1

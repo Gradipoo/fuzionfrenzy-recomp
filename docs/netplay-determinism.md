@@ -76,7 +76,7 @@ The 250 ms XInput port thread does not write while fixed-step, record, or replay
 
 ## RNG
 
-One MSVC CRT global, guest `0x285630` in `.data`. The inlined sequence is `imul eax, 343FDh` / `add eax, 269EC3h` / `shr 16` / `and 7FFFh`. Hundreds of sites use it, including AI. There is no imported `srand`. The frame log prints the live dword whenever it changes, which is how a later `srand` of a clock shows up. Fixed time makes `srand` of `KeTickCount` stable even without `--seed`. `--seed` writes the dword once, before the entry point. It is not written again each frame.
+The inlined MSVC step uses guest `0x285630` in `.data`: `imul` by `343FDh`, `add` `269EC3h`, then `shr 16` / `and 7FFFh`. A headless Ghidra pass counts 1470 of those multiplies. `--seed` writes that dword once, before the entry point, and the frame log prints it when it changes. There is no imported `srand`. `_rand` at `0x1E133E` is a second copy of the same step, with its own dword, and the first-time path stores the constant 1 there. `--seed` does not touch it. The seat-to-AI switch does not call `_rand`. The address map is under Reverse engineering.
 
 ## Checksum
 
@@ -284,3 +284,92 @@ cmake --preset windows-cross && cmake --build out/build/windows-cross
 ```
 
 The Windows executable has to be run on Windows. This Mac cannot produce it.
+
+## Reverse engineering
+
+Two local tools, both aimed at the XBE on this Mac. Nothing they read out of the XBE is committed. The Ghidra project, the address map, decompiler text, symbol dumps, the Unicorn virtualenv, and the oracle binary stay under `re/`, which is gitignored, and `tools/hooks/pre-commit` refuses `re/`, `*.gpr`, `*.rep`, `*.gzf`, and `time-rng-map.txt`.
+
+Ghidra is the Homebrew formula `ghidra` (12.2). There is no cask by that name. It wants JDK 25 (`brew install openjdk@25`). `/usr/bin/java` on this Mac is a stub, so `JAVA_HOME` is `/opt/homebrew/opt/openjdk@25/libexec/openjdk.jdk/Contents/Home`. The XBE loader is [ghidra-xbe](https://github.com/XboxDev/ghidra-xbe), built from source against this Ghidra. The published zip is built for 12.1.4 and will not load. Headless Ghidra only indexes an extension jar whose directory contains `Module.manifest` and is passed as `-Dghidra.external.modules`. The install that works is `~/Library/ghidra/ghidra_12.2_PUBLIC/Extensions/ghidra-xbe-src/`. A copy under the Homebrew prefix is not on the classpath. `-loader` matches the class name `XbeLoader`, not the display name. `tools/re/analyze_xbe.sh` sets both and runs `analyzeHeadless` into `re/ghidra/`. The post-script `tools/re/TimeRngMap.java` writes addresses, symbol names, and one instruction per hit. It does not call the decompiler. That is the query bridge. GhidraMCP is not installed.
+
+```
+brew install ghidra openjdk@25
+tools/re/analyze_xbe.sh assets/default.xbe
+```
+
+The run on 26 Oct 2026, 3:11 AM PT, imported the local XBE (loader "Xbox Executable Format (XBE)", language `x86:LE:32:default:windows`), analyzed it in about 81 seconds, and wrote `re/ghidra/time-rng-map.txt`. `xboxkrnl.exe` is not in the project. The kernel names come from the loader. XDK library names, including `_rand`, come from XbSymbolDatabase inside the extension. This title has no `.XTLID` section.
+
+Unicorn is [unicorn](https://github.com/unicorn-engine/unicorn) (GPL-2.0). It is not vendored. Homebrew has the C library 2.1.4. The differential tester uses the Python module from a virtualenv that also stays under `re/`:
+
+```
+python3.14 -m venv re/.venv
+re/.venv/bin/pip install 'unicorn==2.1.4' capstone
+re/.venv/bin/python scripts/unicorn_diff.py --seed 1 --count 12 assets/default.xbe
+```
+
+`scripts/unicorn_diff.py` maps the image once, copies the original instruction bytes for each selected site, and compares them with `re/oracle/fp_oracle`. That binary calls the same `softmath` the recompiler uses (openlibm, the 66-bit pi reduction, `xbe_round24`, the `0x80000000` integer convert). Exit 0 means the integer and 24-bit multiply checks matched. `fsin` / `fcos` / `fptan` / `fsincos` print `FAIL qemu-x87` and do not fail the process. Unicorn is QEMU. Its `fsin`/`fcos` reduction is not the 66-bit pi, and `|x| >= 2^63` does not set C2. The recompiler does set C2 and leaves ST0. A 24-bit `fmul` that matches the exact product but not `xbe_round24` is reported as double rounding: x87 rounds a long product to 24 bits, and `xbe_round24` rounds the already-rounded binary64 product. The 26 Oct 2026 3:27 AM PT run, seed 1, did not hit that case.
+
+[xemu](https://xemu.app) is the whole-game reference for a later trace comparison. It is not installed. Nothing was set up for it.
+
+### Time sources
+
+Direct `call dword ptr [thunk]` counts from the image, checked against the fixed-step clocks above. Ghidra's xref list matches these.
+
+| Source | Thunk | Direct calls | What the harness does |
+| --- | --- | --- | --- |
+| `KeQueryPerformanceCounter` | `0x2534E4` | 1, the wrapper at `0x1E8E5F` | `ClockQpc`, and a repeated read advances a tick |
+| `KeQueryPerformanceFrequency` | `0x2534E8` | 1, the wrapper at `0x1E8E74` | constant 3375000 |
+| `KeQueryInterruptTime` | `0x253510` | 2 (`0x24EE22`, `0x24F14D`) | `ClockInterrupt` |
+| `KeQuerySystemTime` | `0x2533B0` | 7, plus the jump stub at `0x30982` | `ClockSystem` |
+| `KeTickCount` | `0x2534DC` | 0 (data import) | `(frame * 1000) / 60` |
+| `KeDelayExecutionThread` | `0x2533A8` | 3 (`0x3091C`, `0x24D00B`, `0x252B31`) | consume the guest duration in ticks |
+| `KeStallExecutionProcessor` | `0x253488` | 7 | same |
+| `KeSetTimer` | `0x253434` | 17 | Present fires due timers |
+| `KeCancelTimer` | `0x2534A4` | 20 | same |
+| `KeInitializeTimerEx` | `0x25343C` | 6 | same |
+| `RtlTimeToTimeFields` | `0x25346C` | 5 | pure conversion |
+| `RtlTimeFieldsToTime` | `0x2534E0` | 1, plus four `call ebx` in `0x1E8A24` after it loads the thunk | pure conversion |
+
+The QPC wrapper has 11 callers: the boot spin at `0x4C549` and `0x4C555`, `0x5A9B8` and `0x5A9FC` in `0x5A990`, and `0x1BD2F8`, `0x1BD312`, `0x1BD339`, `0x1BD398`, `0x1BD3AA`, `0x1BD415`, `0x1BD428`. Frequency is read from the boot spin at `0x4C521`, from `0x5A9AA`, and from `0x1BD308`. `0x5A990` also reads `KeTickCount` through `0x1E893C`. That reader is the only instruction that loads the `KeTickCount` slot. Its other callers are `0x49DF0` and `0x49D40`.
+
+`KeQuerySystemTime`'s jump stub at `0x30982` is called from `0x4F32A` in `0x4F210`, which `0x41EE0` calls beside Present. The other seven calls are `0x339FE` (`0x338DE`), `0x33F93`, `0x1E8C89`, `0x1E8DEA`, `0x1FE214`, `0x208800`, and `0x208D6B`.
+
+Ghidra's instruction list has eight `RDTSC`s, not the twenty-two `0F 31` byte hits. The extras are not `RDTSC` instructions. DSOUND and XGRPH have none. The eight are:
+
+- `0x4C526` and `0x4C58B` in the boot function `0x4C510`, which also calls the QPC and frequency wrappers.
+- `0x4C5F4` in `0x4C5F0`. That helper is the common sampler: 94 callers, including `0x1C377E`.
+- `0x5B41F` in `0x5B410`, `0x5B7AC` in `0x5B4A0` (seven callers), `0x5C126` in `0x5C0F0`.
+- `0x238A93` and `0x238AA0` in WMADEC function `0x238A6A`, called from `0x23837A`.
+
+Every one of those goes through `x86_rdtsc` when fixed-step is on. The hook is not limited to these eight sites.
+
+Not imported, so this title never reaches them: `NtSetSystemTime`, `KeSetTimerEx`, `NtCreateTimer`, `NtSetTimerEx`, `NtCancelTimer`, `NtQueryTimer`, `KeInterruptTime`, `KeSystemTime`, `KeTimeIncrement`, `GetTickCount`. `NtSetSystemTime` in the runtime still stores the host clock into the previous-time pointer, including while fixed-step is on. That does not affect this title.
+
+`D3D_BlockOnTime` at `0x1FB020` has five callers, all in the D3D section: `0x1FB2E1`, `0x1FB30B`, `0x1FB35A`, `0x1FB37E`, `0x1FB390`. `0x1FB30B` is inside `0x1FB300`, and Present calls `0x1FB300` at `0x2021FD`. The harness replaces Present, so that call does not run. `.text` never calls `BlockOnTime` directly. `BlockUntilVerticalBlank` at `0x1F5520` has one caller, Present at `0x202212`. The vblank function `0x1FD700`–`0x1FD839` has five callers, all in D3D (`0x1FDD55`, `0x1FDDFA`, `0x1FE51B`, `0x1FE9AA`, `0x2000F8`). Nothing in `.text` calls it. The callback slot at device offset `0x24EC` is unchanged from the layout note: this image does not store a game callback there.
+
+### RNG
+
+1470 instructions are `imul` by `0x343FD`, and 1470 are `add` of `0x269EC3`. Sixty further copies of each immediate are not instructions. 2491 `mov` instructions contain the address `0x285630` (loads, stores, and the address used as an immediate). There is no `mov dword ptr [0x285630], imm32`. `--seed` is a host write, before the entry point. The frame log is what shows a later guest store.
+
+`_rand` at `0x1E133E`–`0x1E135F` does not use `0x285630`. It calls `0x1E2038`, which returns the per-thread CRT block, and the step reads and writes the dword at offset `0x14` of that block. The first time the block is created, `0x1E2099` stores the constant 1 at that offset. No other caller of `0x1E2038` writes offset `0x14`. There is no `_srand` symbol. `--seed` does not change this dword. Two fixed-step runs still start from 1, so they match each other, and changing `--seed` does not move this generator.
+
+All 31 calls of `_rand` are in `.text` between `0x1BF9F0` and `0x1DDE45`. The callers are `0x1BF9F0`, `0x1BFC40`, `0x1C4420` (at `0x1C446B`), `0x1C9C90` (at `0x1C9CB5`), `0x1DA1C0`, `0x1DAB40`, `0x1DB5A0`, `0x1DBD20`, `0x1D2DC0`, `0x1D8820`, and `0x1DCDE0`. The seat-to-AI switch `0x1C8B70` does not call `_rand` and does not contain the multiply. Its caller is `0x1C2303`.
+
+### Unicorn, 26 Oct 2026 3:27 AM PT
+
+`scripts/unicorn_diff.py --seed 1 --count 12`, Unicorn 2.1.4, exit 0. `SUMMARY unexpected=0 qemu-x87=33`.
+
+| Check | Result | Site |
+| --- | --- | --- |
+| RNG state after one step | PASS, 6 instruction shapes, 72 seeds | `0x11730`, `0x118F0`, `0x15EC7`, `0xBB581`, `0xA2179`, `0xC40C3` |
+| `fistp` to int32, including ties, overflow, NaN, inf | PASS, 11 values | `0x29C1A` |
+| `cvttss2si` | PASS, 9 values | `0x1FC980` (the only one, in D3D) |
+| `fldcw` of `0x027F` and `0x007F` | PASS | `0x2CF43` |
+| `fmul st(1)` at 53-bit and at 24-bit | PASS, 12 pairs, no double-round | `0x122E1` (`D8 C9`) |
+| `fsin` | `FAIL qemu-x87`, 8 match, 6 differ, C2 missed twice | `0x122BD` |
+| `fcos` | `FAIL qemu-x87`, 10 match, 4 differ, C2 missed twice | `0x23923` |
+| `fptan` | `FAIL qemu-x87`, 6 match, 8 differ, C2 missed twice | `0x43B20` |
+| `fsincos` | `FAIL qemu-x87`, 7 match, 7 differ, C2 missed twice | `0x8622E` |
+
+`fsin(pi)` on this Unicorn is `0x3ca1a62633145c07`. The 66-bit model, which is what the recompiler returns, is `0x3ca1a60000000000`. `fcos(pi/2)` is the same split: Unicorn `0x3c91a62633145c07`, model `0x3c91a60000000000`. `fptan(pi/6)` leaves 1.0 in ST0, as the instruction specifies, and ST1 is one ulp off the model (`0x3fe279a74590331b` against `0x3fe279a74590331c`). `fsincos(pi/2)` leaves the cosine in ST0 and the sine in ST1. The sine matched. The cosine is the `fcos(pi/2)` pair above. The two C2 misses on each instruction are the inputs `+2^63` and `-2^63`.
+
+`fldcw` shows that Unicorn 2.1.4 does honor a 24-bit precision control word. The `fmul` row was loaded at 53 bits and then the control word was dropped to 24 bits, so the multiply is what rounded. Those 12 pairs matched `xbe_round24`. A pair that only matches the exact long product is still a `FAIL double-round` line, and it does not by itself make the process exit 1.
