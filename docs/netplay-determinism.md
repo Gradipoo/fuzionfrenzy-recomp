@@ -176,3 +176,74 @@ The menus and the minigames should follow the recording with the controllers ign
 - A host thread that writes guest RAM without taking the turn (an IO status block, a GPU fence). The 240-frame stall row matched, so that did not show up on the idle replay. An earlier 8-frame stall differed once at frame 0 in `user_0` only, and the raw dumps were identical; it did not repeat.
 - Stacks are not hashed, so a value that only ever lived in a spill is invisible.
 - GPU pixels are not hashed, so a render-only divergence does not fail a row. That is deliberate.
+
+## Cross-platform
+
+A lockstep session can put a Mac arm64 client in the same game as a Windows or Linux x86-64 client. The per-frame hash has to match across those builds, not only across two runs of one binary.
+
+Upstream already builds those hosts. `build.bat` is the native Windows build. `cmake/windows-cross.cmake` is clang-cl plus lld-link against an xwin sysroot, via the `windows-cross` preset, and it runs on a Linux machine. `linux-release` is the native Linux build. The Apple patch (`patches/sdk-macos-arm64.patch`) is applied only when `APPLE` is set. The lockstep patch is applied on every host, after the Apple patch when there is one:
+
+- `patches/sdk-lockstep.patch` — bundled math, codegen, CRT, mixer, CPU vertex math, and the host rounding mode. Marker: `XBE_LOCKSTEP_FP`.
+- `patches/sdk-lockstep-memory.patch` — zero a freshly committed page on Linux and Windows.
+- `patches/sdk-lockstep-memory-apple.patch` — the same zeroing for the Darwin commit path.
+
+`tools/apply-lockstep.cmake` picks the memory patch from whether `HostProtect` is already in the tree, and it does nothing if the marker is already present. Do not fold these hunks back into the Apple patch. A full `git -C sdk diff` would.
+
+### Floating point
+
+The recompiled guest is compiled with contraction off and without fast-math. GCC 16 at `-O2` emits `fmadd` unless `-ffp-contract=off` is passed, and `#pragma STDC FP_CONTRACT OFF` does not stop it. Clang contracts by default and honors both the flag and `#pragma clang fp contract(off)`. MSVC `/fp:precise` does not contract. clang-cl still does, so the Windows build also passes `/clang:-ffp-contract=off`. On x86-64, GCC and Clang get `-mfpmath=sse -msse2`, so a `float` or `double` expression is not evaluated in 80-bit x87 registers.
+
+x87 data registers in this recomp stay IEEE binary64. The title's control word at thread start is `0x27F`, which is 53-bit precision. An 80-bit memory operand is an explicit 64-bit significand plus a 15-bit exponent. Load and store convert that encoding with integer arithmetic (`xbe_load80` / `xbe_store80`). The result does not follow host `long double`, which is 64-bit on arm64 and on MSVC and 80-bit on x64 Linux GCC.
+
+The host rounding mode is forced to round-to-nearest, with flush-to-zero and denormals-are-zero off (`xbe_arm_host_fp`). That runs on the main thread, at each new host thread, on every indirect guest call, and again after a kernel export returns. The guest MXCSR is stored and is not copied onto the host. A title that sets flush-to-zero would disagree with a real Xbox and would still agree with every other recompiled client.
+
+`sqrt` stays on the hardware. IEEE-754 requires it to be correctly rounded, and so do `nearbyint`, `trunc`, `floor`, and `ceil` once the rounding mode is the one above. Every other guest-visible transcendental goes through `sdk/runtime/cpu/softmath.cpp`: sin, cos, tan, asin, acos, atan, atan2, log, log2, log10, exp, exp2, pow, fmod, remainder, ldexp, frexp, and the float wrappers the mixer and the vertex interpreter use. The recompiler emits those names, so a generated guest partition does not call the host libm. Polynomial coefficients are hex floats, so compilers do not re-round a decimal literal differently.
+
+Left on the host libm, on purpose:
+
+- The HDR display tone map in `d3d12.cpp` (`Pq`). It runs after the frame, for the monitor, and it is not guest state.
+- `src/common/game_info.cpp` stick motion. That file runs only for `FUZION_AUTOSTART`, which the harness unsets.
+- `sdk/harness/reference_renderer.cpp`. It is not linked into the game.
+
+### Other host leaks
+
+A page that is committed for the first time is zeroed in `Commit`, including a recommit after decommit. Windows `VirtualAlloc` already zeros a fresh commit. Linux `mprotect` does not, and Darwin `MADV_DONTNEED` does not promise zeros the next time the page is touched. Pages that were already committed are not wiped.
+
+The state log and the pad file are text (`# det 1`, `# fuzion-input 1`, hashes and buttons in hex). Nothing in either format is a host pointer, a `size_t` width, or a struct dumped with the host's padding. `scripts/det-diff.py` compares the text.
+
+`std::map` is used where the runtime walks a table into guest-visible work: DirectSound voices, reservations, device paths. `std::unordered_map` iteration is not used to order a guest-visible sequence, except the case-insensitive object-name fallback. That scan keeps the exact-key hit, and when several names fold to the same string it returns the lexicographically lowest key. GPU unordered maps are caches or a debug log. Fixed-step scheduling is the guest turn lock, not the host's thread scheduler.
+
+Struct layout of Xbox objects and host pointers written into guest RAM were not audited line by line. The rule for both is the same: guest RAM holds guest integers and guest floats, not a host address and not a host compiler's padding.
+
+### What was run
+
+`scripts/fp-cross.sh` on this Mac, 25 Oct 2026. Clang arm64, Clang x86_64 under Rosetta (`arch -x86_64`, `uname -m` reports `x86_64`), and Homebrew GCC 16.2.0 arm64, each with `-ffp-contract=off -fno-fast-math`. All three printed the same digest and `PASS`:
+
+```
+f95fc86463222bef PASS
+```
+
+The digest covers the bundled transcendentals, an 80-bit store/load round trip (including a significand that has to round), `ldexp`/`frexp`, a float mul-add chain, and a subnormal multiply. It does not boot the game.
+
+This machine has no Docker, no Podman, no QEMU, no `clang-cl`, and no xwin sysroot. A full RingHost cannot be linked x86_64 here: the Homebrew Vulkan loader is arm64. So there is no Linux x86-64 replay and no Windows x64 replay yet. The comparison that is still required, once a Linux or Windows build exists, is:
+
+```
+# on each machine, same idle.pads, same seed, fresh hdd for that instance
+env -u FUZION_AUTOSTART XBE_MUTE=1 FUZION_FIXED_STEP=1 FUZION_SEED=1 \
+  FUZION_REPLAY_INPUT=det-logs/idle.pads \
+  FUZION_STATE_LOG=det-logs/cross.detlog \
+  FUZION_FRAMES=240 FUZION_MINIMIZED=1 \
+  ./FuzionFrenzy
+python3 scripts/det-diff.py mac.detlog linux.detlog
+```
+
+The Mac binary is `RingHost`. Linux and Windows keep the name `FuzionFrenzy`. The frame-0 total from the 9:34 PM PT idle matrix will not match a build that contains this math. Two runs of the new binary still have to match each other. That re-run is recorded below when it has been done.
+
+Windows, from a Linux machine that has the xwin sysroot from the top of `cmake/windows-cross.cmake`:
+
+```
+cmake --preset host-tools && cmake --build out/build/host-tools
+cmake --preset windows-cross && cmake --build out/build/windows-cross
+```
+
+The Windows executable has to be run on Windows. This Mac cannot produce it.

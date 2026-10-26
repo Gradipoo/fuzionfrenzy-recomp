@@ -1,0 +1,1040 @@
+diff --git a/runtime/cpu/softmath.h b/runtime/cpu/softmath.h
+new file mode 100644
+index 0000000..6a75de9
+--- /dev/null
++++ b/runtime/cpu/softmath.h
+@@ -0,0 +1,41 @@
++#pragma once
++// Guest-visible transcendentals. One implementation, compiled with contraction off,
++// so arm64 and x86-64 produce the same bits. sqrt and the rounding builtins stay
++// on the hardware: IEEE-754 requires those to be correctly rounded.
++// XBE_LOCKSTEP_FP
++
++#include <cstdint>
++
++double xbe_sin(double);
++double xbe_cos(double);
++double xbe_tan(double);
++double xbe_asin(double);
++double xbe_acos(double);
++double xbe_atan(double);
++double xbe_atan2(double y, double x);
++double xbe_log(double);
++double xbe_log2(double);
++double xbe_log10(double);
++double xbe_exp(double);
++double xbe_exp2(double);
++double xbe_pow(double x, double y);
++double xbe_fmod(double x, double y);
++double xbe_remainder(double x, double y);
++double xbe_ldexp(double v, int exp);
++double xbe_frexp(double v, int* exp);
++
++float xbe_sinf(float);
++float xbe_cosf(float);
++float xbe_log2f(float);
++float xbe_exp2f(float);
++float xbe_powf(float x, float y);
++
++// 80-bit memory format. Registers in this recomp stay IEEE binary64. The
++// conversion is integer arithmetic, so it does not follow host long double.
++double xbe_load80(const uint8_t* p);
++void xbe_store80(uint8_t* p, double v);
++
++// Round to nearest even, no flush-to-zero, no denormals-are-zero.
++// The recompiled SSE/x87 arithmetic uses the host unit and does not consult
++// the guest MXCSR, so every thread is held to this mode.
++void xbe_arm_host_fp();
+diff --git a/runtime/cpu/softmath.cpp b/runtime/cpu/softmath.cpp
+new file mode 100644
+index 0000000..4c93964
+--- /dev/null
++++ b/runtime/cpu/softmath.cpp
+@@ -0,0 +1,627 @@
++// Bundled guest math. Double arithmetic only, no host libm, no FMA contraction.
++// x87 registers in this recomp are IEEE binary64 (the title's control word is
++// 53-bit precision). 80-bit values exist only as a memory encoding.
++// XBE_LOCKSTEP_FP
++#include "cpu/softmath.h"
++
++#include <cfloat>
++#include <cmath>
++#include <cstddef>
++#include <cstring>
++#include <limits>
++
++#if defined(_MSC_VER)
++#include <xmmintrin.h>
++#endif
++
++#if defined(__clang__)
++#pragma clang fp contract(off)
++#endif
++#pragma STDC FP_CONTRACT OFF
++
++static_assert(FLT_EVAL_METHOD == 0 || FLT_EVAL_METHOD == -1,
++              "float and double must evaluate in their own precision, not x87 80-bit");
++
++namespace {
++
++constexpr double kInf = std::numeric_limits<double>::infinity();
++constexpr double kNan = std::numeric_limits<double>::quiet_NaN();
++
++double Bits(uint64_t u) {
++    double d;
++    std::memcpy(&d, &u, 8);
++    return d;
++}
++
++uint64_t BitsOf(double d) {
++    uint64_t u;
++    std::memcpy(&u, &d, 8);
++    return u;
++}
++
++bool IsNan(double x) { return x != x; }
++bool IsInf(double x) { return x == kInf || x == -kInf; }
++
++double Copysign(double x, double s) {
++    uint64_t u = BitsOf(x);
++    uint64_t t = BitsOf(s);
++    u = (u & 0x7fffffffffffffffull) | (t & 0x8000000000000000ull);
++    return Bits(u);
++}
++
++double Abs(double x) { return Bits(BitsOf(x) & 0x7fffffffffffffffull); }
++
++const double kPi = Bits(0x400921fb54442d18ull);
++const double kPi2 = Bits(0x3ff921fb54442d18ull);
++const double kPi4 = Bits(0x3fe921fb54442d18ull);
++const double kLn2 = Bits(0x3fe62e42fefa39efull);
++const double kInvLn2 = Bits(0x3ff71547652b82feull);
++const double kInvLn10 = Bits(0x3fdbcb7b1526e50dull);
++const double kTanPi8 = Bits(0x3fda827999fcef34ull);  // sqrt(2) - 1
++const double kInvSqrt2 = Bits(0x3fe6a09e667f3bccull);
++
++// sin on [-pi/4, pi/4]. Horner form, coefficients are 1/n! rounded to binary64.
++double KernelSin(double y) {
++    double z = y * y;
++    double p = -Bits(0x3c62f49b46814157ull);  // 19!
++    p = p * z + Bits(0x3ce952c77030ad4aull);  // 17!
++    p = p * z - Bits(0x3d6ae7f3e733b81full);  // 15!
++    p = p * z + Bits(0x3de6124613a86d09ull);  // 13!
++    p = p * z - Bits(0x3e5ae64567f544e4ull);  // 11!
++    p = p * z + Bits(0x3ec71de3a556c734ull);  // 9!
++    p = p * z - Bits(0x3f2a01a01a01a01aull);  // 7!
++    p = p * z + Bits(0x3f81111111111111ull);  // 5!
++    p = p * z - Bits(0x3fc5555555555555ull);  // 3!
++    return y + y * z * p;
++}
++
++double KernelCos(double y) {
++    double z = y * y;
++    double p = Bits(0x3c1e542ba4020225ull);   // 20!
++    p = p * z - Bits(0x3ca6827863b97d97ull);  // 18!
++    p = p * z + Bits(0x3d2ae7f3e733b81full);  // 16!
++    p = p * z - Bits(0x3da93974a8c07c9dull);  // 14!
++    p = p * z + Bits(0x3e21eed8eff8d898ull);  // 12!
++    p = p * z - Bits(0x3e927e4fb7789f5cull);  // 10!
++    p = p * z + Bits(0x3efa01a01a01a01aull);  // 8!
++    p = p * z - Bits(0x3f56c16c16c16c17ull);  // 6!
++    p = p * z + Bits(0x3fa5555555555555ull);  // 4!
++    p = p * z - 0.5;
++    return 1.0 + z * p;
++}
++
++struct U128 {
++    uint64_t lo, hi;
++};
++
++U128 Mul64(uint64_t a, uint64_t b) {
++    uint64_t a0 = uint32_t(a), a1 = a >> 32;
++    uint64_t b0 = uint32_t(b), b1 = b >> 32;
++    uint64_t p0 = a0 * b0;
++    uint64_t p1 = a0 * b1;
++    uint64_t p2 = a1 * b0;
++    uint64_t p3 = a1 * b1;
++    uint64_t mid = (p0 >> 32) + uint32_t(p1) + uint32_t(p2);
++    U128 r;
++    r.lo = (p0 & 0xffffffffull) | (mid << 32);
++    r.hi = p3 + (p1 >> 32) + (p2 >> 32) + (mid >> 32);
++    return r;
++}
++
++void AddAt(uint64_t* limb, int n, int at, uint64_t lo, uint64_t hi) {
++    uint64_t s = limb[at] + lo;
++    uint64_t c = s < limb[at] ? 1ull : 0ull;
++    limb[at] = s;
++    for (int j = at + 1; j < n; j++) {
++        uint64_t add = (j == at + 1) ? hi : 0ull;
++        uint64_t b = limb[j];
++        uint64_t s1 = b + add;
++        uint64_t c1 = s1 < b ? 1ull : 0ull;
++        uint64_t s2 = s1 + c;
++        uint64_t c2 = s2 < s1 ? 1ull : 0ull;
++        limb[j] = s2;
++        c = c1 + c2;
++        if (c == 0 && j > at + 1) break;
++    }
++}
++
++int LimbBit(const uint64_t* limb, int index) {
++    if (index < 0) return 0;
++    int li = index >> 6;
++    if (li >= 6) return 0;
++    return int((limb[li] >> (index & 63)) & 1ull);
++}
++
++// x * 2/pi, rounded to nearest even, remainder in [-pi/4, pi/4].
++// Quadrant is n mod 4. Above 2^53 the integer no longer fits in a double,
++// so the remainder is reported as 0 and only the low two bits of n are kept.
++int RemPio2(double x, double* y) {
++    double ax = Abs(x);
++    if (ax <= kPi4) {
++        *y = x;
++        return 0;
++    }
++    uint64_t b = BitsOf(ax);
++    int exp = int((b >> 52) & 0x7ff);
++    if (exp == 0x7ff) {
++        *y = kNan;
++        return 0;
++    }
++    uint64_t sig = (b & 0x000fffffffffffffull) | 0x0010000000000000ull;
++    int e = exp - 1023;
++    // 2/pi * 2^320, most significant limb first.
++    static const uint64_t kTwoOverPi[] = {0xa2f9836e4e441529ull, 0xfc2757d1f534ddc0ull, 0xdb6295993c439041ull,
++                                          0xfe5163abdebbc561ull, 0xb7246e3a424dd2e0ull};
++    uint64_t p[6] = {};
++    for (int k = 0; k < 5; k++) {
++        U128 prod = Mul64(sig, kTwoOverPi[4 - k]);
++        AddAt(p, 6, k, prod.lo, prod.hi);
++    }
++    // x * 2/pi = P * 2^(e - 372)
++    int sh = e - 372;
++    if (sh >= 0) {
++        *y = 0;
++        return 0;
++    }
++    int rsh = -sh;
++    uint64_t n_lo = 0;
++    for (int i = 0; i < 63; i++) n_lo |= uint64_t(LimbBit(p, rsh + i)) << i;
++    int round_up = LimbBit(p, rsh - 1);
++    int sticky = 0;
++    for (int i = 0; i < rsh - 1; i++) {
++        if (LimbBit(p, i)) {
++            sticky = 1;
++            break;
++        }
++    }
++    if (round_up && (sticky || (n_lo & 1ull))) n_lo += 1;
++    bool big = n_lo >= (1ull << 53);
++    if (!big) {
++        for (int i = 63; i < 400; i++) {
++            if (LimbBit(p, rsh + i)) {
++                big = true;
++                break;
++            }
++        }
++    }
++    int q = int(n_lo & 3ull);
++    if (big) {
++        *y = 0;
++        if (BitsOf(x) >> 63) q = (-q) & 3;
++        return q;
++    }
++    double fn = double(n_lo);
++    // Split pi/2. The sum is the binary64 pi/2; the tail keeps the low bits
++    // through the subtraction below.
++    const double pio2_1 = Bits(0x3ff921fb54400000ull);
++    const double pio2_1t = Bits(0x3dd0b4611a626331ull);
++    double r = (ax - fn * pio2_1) - fn * pio2_1t;
++    if (BitsOf(x) >> 63) {
++        r = -r;
++        q = (-q) & 3;
++    }
++    *y = r;
++    return q;
++}
++
++double SinCos(double x, bool cosine) {
++    if (IsNan(x)) return x;
++    if (IsInf(x)) return kNan;
++    double y;
++    int q = RemPio2(x, &y);
++    double s = KernelSin(y);
++    double c = KernelCos(y);
++    if (cosine) {
++        switch (q & 3) {
++            case 0: return c;
++            case 1: return -s;
++            case 2: return -c;
++            default: return s;
++        }
++    }
++    switch (q & 3) {
++        case 0: return s;
++        case 1: return c;
++        case 2: return -s;
++        default: return -c;
++    }
++}
++
++double ExpKernel(double r) {
++    double p = Bits(0x3d2ae7f3e733b81full);  // 1/16!
++    p = p * r + Bits(0x3d6ae7f3e733b81full);
++    p = p * r + Bits(0x3da93974a8c07c9dull);
++    p = p * r + Bits(0x3de6124613a86d09ull);
++    p = p * r + Bits(0x3e21eed8eff8d898ull);
++    p = p * r + Bits(0x3e5ae64567f544e4ull);
++    p = p * r + Bits(0x3e927e4fb7789f5cull);
++    p = p * r + Bits(0x3ec71de3a556c734ull);
++    p = p * r + Bits(0x3efa01a01a01a01aull);
++    p = p * r + Bits(0x3f2a01a01a01a01aull);
++    p = p * r + Bits(0x3f56c16c16c16c17ull);
++    p = p * r + Bits(0x3f81111111111111ull);
++    p = p * r + Bits(0x3fa5555555555555ull);
++    p = p * r + Bits(0x3fc5555555555555ull);
++    p = p * r + Bits(0x3fe0000000000000ull);
++    p = p * r + 1.0;
++    p = p * r + 1.0;
++    return p;
++}
++
++// log(1+f) for |f| <= sqrt(2)-1. Inner coefficients (-1)^k/(k+1), k = 35..0.
++double Log1p(double f) {
++    static const uint64_t c[] = {
++        0xbf9c71c71c71c71cull, 0x3f9d41d41d41d41dull, 0xbf9e1e1e1e1e1e1eull, 0x3f9f07c1f07c1f08ull, 0xbfa0000000000000ull,
++        0x3fa0842108421084ull, 0xbfa1111111111111ull, 0x3fa1a7b9611a7b96ull, 0xbfa2492492492492ull, 0x3fa2f684bda12f68ull,
++        0xbfa3b13b13b13b14ull, 0x3fa47ae147ae147bull, 0xbfa5555555555555ull, 0x3fa642c8590b2164ull, 0xbfa745d1745d1746ull,
++        0x3fa8618618618618ull, 0xbfa999999999999aull, 0x3faaf286bca1af28ull, 0xbfac71c71c71c71cull, 0x3fae1e1e1e1e1e1eull,
++        0xbfb0000000000000ull, 0x3fb1111111111111ull, 0xbfb2492492492492ull, 0x3fb3b13b13b13b14ull, 0xbfb5555555555555ull,
++        0x3fb745d1745d1746ull, 0xbfb999999999999aull, 0x3fbc71c71c71c71cull, 0xbfc0000000000000ull, 0x3fc2492492492492ull,
++        0xbfc5555555555555ull, 0x3fc999999999999aull, 0xbfd0000000000000ull, 0x3fd5555555555555ull, 0xbfe0000000000000ull,
++        0x3ff0000000000000ull};
++    double p = Bits(c[0]);
++    for (size_t i = 1; i < sizeof(c) / sizeof(c[0]); i++) p = p * f + Bits(c[i]);
++    return f * p;
++}
++
++double AtanSeries(double x) {
++    double z = x * x;
++    static const uint64_t c[] = {
++        0x3f96c16c16c16c17ull, 0xbf97d05f417d05f4ull, 0x3f98f9c18f9c18faull, 0xbf9a41a41a41a41aull, 0x3f9bacf914c1bad0ull,
++        0xbf9d41d41d41d41dull, 0x3f9f07c1f07c1f08ull, 0xbfa0842108421084ull, 0x3fa1a7b9611a7b96ull, 0xbfa2f684bda12f68ull,
++        0x3fa47ae147ae147bull, 0xbfa642c8590b2164ull, 0x3fa8618618618618ull, 0xbfaaf286bca1af28ull, 0x3fae1e1e1e1e1e1eull,
++        0xbfb1111111111111ull, 0x3fb3b13b13b13b14ull, 0xbfb745d1745d1746ull, 0x3fbc71c71c71c71cull, 0xbfc2492492492492ull,
++        0x3fc999999999999aull, 0xbfd5555555555555ull, 0x3ff0000000000000ull};
++    double p = Bits(c[0]);
++    for (size_t i = 1; i < sizeof(c) / sizeof(c[0]); i++) p = p * z + Bits(c[i]);
++    return x * p;
++}
++
++bool IsOddInt(double y) {
++    if (IsInf(y) || IsNan(y)) return false;
++    double ay = Abs(y);
++    if (ay >= 0x1p53) return false;
++    if (std::nearbyint(y) != y) return false;
++    return (uint64_t(ay) & 1ull) != 0;
++}
++
++double PowInt(double x, int n) {
++    if (n < 0) {
++        double r = PowInt(x, -n);
++        if (r == 0.0) return Copysign(kInf, r);
++        return 1.0 / r;
++    }
++    double r = 1.0;
++    double b = x;
++    int e = n;
++    while (e) {
++        if (e & 1) r *= b;
++        e >>= 1;
++        if (e) b *= b;
++    }
++    return r;
++}
++
++int Normalize80(uint64_t& mant) {
++    int sh = 0;
++    if (mant == 0) return 0;
++    while ((mant & 0x8000000000000000ull) == 0) {
++        mant <<= 1;
++        sh++;
++    }
++    return sh;
++}
++
++}  // namespace
++
++double xbe_sin(double x) { return SinCos(x, false); }
++double xbe_cos(double x) { return SinCos(x, true); }
++
++double xbe_tan(double x) {
++    double c = xbe_cos(x);
++    if (c == 0.0) return Copysign(kInf, xbe_sin(x));
++    return xbe_sin(x) / c;
++}
++
++double xbe_ldexp(double v, int exp) {
++    if (v == 0.0 || IsNan(v) || IsInf(v)) return v;
++    uint64_t u = BitsOf(v);
++    int e = int((u >> 52) & 0x7ff);
++    uint64_t frac = u & 0x000fffffffffffffull;
++    uint64_t sign = u & 0x8000000000000000ull;
++    uint64_t sig53;
++    int E;
++    if (e == 0) {
++        if (frac == 0) return Bits(sign);
++        int sh = 0;
++        uint64_t t = frac;
++        while ((t & 0x0010000000000000ull) == 0) {
++            t <<= 1;
++            sh++;
++        }
++        sig53 = t;
++        E = -1022 - sh;
++    } else {
++        sig53 = frac | 0x0010000000000000ull;
++        E = e - 1023;
++    }
++    long long ne = (long long)E + (long long)exp;
++    if (ne >= 1024) return Copysign(kInf, v);
++    if (ne >= -1022) return Bits(sign | (uint64_t(ne + 1023) << 52) | (sig53 & 0x000fffffffffffffull));
++    if (ne <= -1022 - 64) return Copysign(0.0, v);
++    int shift = -1022 - int(ne);
++    if (shift >= 64) return Copysign(0.0, v);
++    uint64_t out = sig53 >> shift;
++    uint64_t round = (sig53 >> (shift - 1)) & 1ull;
++    uint64_t sticky = (shift > 1) && (sig53 & ((1ull << (shift - 1)) - 1ull)) != 0;
++    if (round && (sticky || (out & 1ull))) out += 1;
++    if (out >= 0x0010000000000000ull) return Bits(sign | (1ull << 52));
++    return Bits(sign | out);
++}
++
++double xbe_frexp(double v, int* exp) {
++    if (exp == nullptr) return v;
++    if (v == 0.0) {
++        *exp = 0;
++        return v;
++    }
++    if (IsNan(v) || IsInf(v)) {
++        *exp = 0;
++        return v;
++    }
++    uint64_t u = BitsOf(v);
++    int e = int((u >> 52) & 0x7ff);
++    uint64_t sign = u & 0x8000000000000000ull;
++    uint64_t sig = u & 0x000fffffffffffffull;
++    if (e == 0) {
++        int sh = 0;
++        while ((sig & 0x0010000000000000ull) == 0) {
++            sig <<= 1;
++            sh++;
++        }
++        sig &= 0x000fffffffffffffull;
++        *exp = -1021 - sh;
++        return Bits(sign | (uint64_t(1022) << 52) | sig);
++    }
++    *exp = e - 1022;
++    return Bits(sign | (uint64_t(1022) << 52) | sig);
++}
++
++double xbe_exp(double x) {
++    if (IsNan(x)) return x;
++    if (x == kInf) return kInf;
++    if (x == -kInf) return 0;
++    if (x > 709.782712893384) return kInf;
++    if (x < -745.1332191019412) return 0;
++    double n = std::nearbyint(x * kInvLn2);
++    const double ln2_hi = Bits(0x3fe62e42fee00000ull);
++    const double ln2_lo = Bits(0x3dea39ef35793c76ull);
++    double r = (x - n * ln2_hi) - n * ln2_lo;
++    return xbe_ldexp(ExpKernel(r), int(n));
++}
++
++double xbe_exp2(double x) {
++    if (IsNan(x)) return x;
++    if (x == kInf) return kInf;
++    if (x == -kInf) return 0;
++    if (x >= 1024.0) return kInf;
++    if (x <= -1075.0) return 0;
++    double n = std::nearbyint(x);
++    double f = x - n;
++    return xbe_ldexp(ExpKernel(f * kLn2), int(n));
++}
++
++double xbe_log(double x) {
++    if (IsNan(x) || x < 0) return kNan;
++    if (x == 0) return -kInf;
++    if (x == kInf) return kInf;
++    int e;
++    double m = xbe_frexp(x, &e);
++    if (m < kInvSqrt2) {
++        m *= 2;
++        e -= 1;
++    }
++    if (m == 1.0) return double(e) * kLn2;
++    return Log1p(m - 1.0) + double(e) * kLn2;
++}
++
++double xbe_log2(double x) {
++    if (IsNan(x) || x < 0) return kNan;
++    if (x == 0) return -kInf;
++    if (x == kInf) return kInf;
++    int e;
++    double m = xbe_frexp(x, &e);
++    if (m < kInvSqrt2) {
++        m *= 2;
++        e -= 1;
++    }
++    if (m == 1.0) return double(e);
++    return xbe_log(x) * kInvLn2;
++}
++
++double xbe_log10(double x) {
++    if (IsNan(x) || x < 0) return kNan;
++    if (x == 0) return -kInf;
++    if (x == kInf) return kInf;
++    return xbe_log(x) * kInvLn10;
++}
++
++double xbe_atan(double x) {
++    if (IsNan(x)) return x;
++    if (x == kInf) return kPi2;
++    if (x == -kInf) return -kPi2;
++    double ax = Abs(x);
++    int flip = 0;
++    if (ax > 1.0) {
++        ax = 1.0 / ax;
++        flip = 1;
++    }
++    double a;
++    if (ax > kTanPi8) a = kPi4 + AtanSeries((ax - 1.0) / (ax + 1.0));
++    else a = AtanSeries(ax);
++    if (flip) a = kPi2 - a;
++    return Copysign(a, x);
++}
++
++double xbe_atan2(double y, double x) {
++    if (IsNan(y) || IsNan(x)) return kNan;
++    if (x == 0.0 && y == 0.0) return Copysign(0.0, y);
++    if (x == 0.0) return Copysign(kPi2, y);
++    double a = xbe_atan(y / x);
++    if (x < 0) a += (y < 0 || (y == 0.0 && (BitsOf(y) >> 63))) ? -kPi : kPi;
++    return a;
++}
++
++double xbe_asin(double x) {
++    if (x < -1.0 || x > 1.0 || IsNan(x)) return kNan;
++    return xbe_atan2(x, std::sqrt((1.0 - x) * (1.0 + x)));
++}
++
++double xbe_acos(double x) {
++    if (x < -1.0 || x > 1.0 || IsNan(x)) return kNan;
++    return xbe_atan2(std::sqrt((1.0 - x) * (1.0 + x)), x);
++}
++
++double xbe_pow(double x, double y) {
++    if (IsNan(x) || IsNan(y)) return kNan;
++    if (y == 0.0) return 1.0;
++    if (x == 1.0) return 1.0;
++    if (x == -1.0 && IsInf(y)) return 1.0;
++    if (y == kInf) {
++        double ax = Abs(x);
++        if (ax > 1) return kInf;
++        if (ax < 1 && ax != 0) return 0;
++        return kNan;
++    }
++    if (y == -kInf) {
++        double ax = Abs(x);
++        if (ax > 1) return 0;
++        if (ax < 1) return kInf;
++        return kNan;
++    }
++    if (x == 0.0) {
++        double r = y < 0 ? kInf : 0.0;
++        if (IsOddInt(y) && (BitsOf(x) >> 63)) r = Copysign(r, -1.0);
++        return r;
++    }
++    double iy = std::nearbyint(y);
++    if (iy == y && Abs(y) <= 1024.0) return PowInt(x, int(iy));
++    if (x < 0) return kNan;
++    return xbe_exp(y * xbe_log(x));
++}
++
++double xbe_fmod(double x, double y) {
++    if (IsNan(x) || IsNan(y) || IsInf(x) || y == 0.0) return kNan;
++    if (IsInf(y)) return x;
++    double q = std::trunc(x / y);
++    if (IsInf(q) || IsNan(q)) return kNan;
++    double r = x - q * y;
++    if (Abs(r) >= Abs(y)) r -= Copysign(y, r);
++    return r;
++}
++
++double xbe_remainder(double x, double y) {
++    if (IsNan(x) || IsNan(y) || IsInf(x) || y == 0.0) return kNan;
++    if (IsInf(y)) return x;
++    double q = std::nearbyint(x / y);
++    if (IsInf(q) || IsNan(q)) return kNan;
++    return x - q * y;
++}
++
++float xbe_sinf(float x) { return float(xbe_sin(double(x))); }
++float xbe_cosf(float x) { return float(xbe_cos(double(x))); }
++float xbe_log2f(float x) { return float(xbe_log2(double(x))); }
++float xbe_exp2f(float x) { return float(xbe_exp2(double(x))); }
++float xbe_powf(float x, float y) { return float(xbe_pow(double(x), double(y))); }
++
++double xbe_load80(const uint8_t* p) {
++    uint64_t mant;
++    uint16_t se;
++    std::memcpy(&mant, p, 8);
++    std::memcpy(&se, p + 8, 2);
++    uint64_t sign = uint64_t(se >> 15) << 63;
++    int exp = se & 0x7fff;
++    if (exp == 0x7fff) {
++        if ((mant << 1) == 0) return Bits(sign | 0x7ff0000000000000ull);
++        return Bits(sign | 0x7ff8000000000000ull);
++    }
++    if (mant == 0) return Bits(sign);
++    int shift = 0;
++    if ((mant & 0x8000000000000000ull) == 0) shift = Normalize80(mant);
++    int unbiased = (exp == 0 ? -16382 : exp - 16383) - shift;
++    uint64_t frac = (mant >> 11) & 0x000fffffffffffffull;
++    uint64_t round = (mant >> 10) & 1ull;
++    uint64_t sticky = (mant & 0x3ffull) != 0;
++    if (round && (sticky || (frac & 1ull))) {
++        frac += 1;
++        if (frac == 0x0010000000000000ull) {
++            frac = 0;
++            unbiased += 1;
++        }
++    }
++    if (unbiased >= 1024) return Bits(sign | 0x7ff0000000000000ull);
++    if (unbiased <= -1023) {
++        int sh = -1022 - unbiased;
++        uint64_t full = frac | 0x0010000000000000ull;
++        if (sh >= 54) return Bits(sign);
++        uint64_t out = full >> sh;
++        uint64_t rbit = (full >> (sh - 1)) & 1ull;
++        uint64_t st = (sh >= 2) && (full & ((1ull << (sh - 1)) - 1ull)) != 0;
++        if (rbit && (st || (out & 1ull))) out += 1;
++        if (out >= 0x0010000000000000ull) return Bits(sign | (1ull << 52));
++        return Bits(sign | out);
++    }
++    return Bits(sign | (uint64_t(unbiased + 1023) << 52) | frac);
++}
++
++void xbe_store80(uint8_t* p, double v) {
++    uint64_t u = BitsOf(v);
++    uint64_t sign = u >> 63;
++    int exp = int((u >> 52) & 0x7ff);
++    uint64_t frac = u & 0x000fffffffffffffull;
++    uint64_t mant = 0;
++    uint16_t se = uint16_t(sign << 15);
++    if (exp == 0x7ff) {
++        se |= 0x7fff;
++        mant = frac ? 0xC000000000000000ull : 0x8000000000000000ull;
++    } else if (exp == 0) {
++        if (frac != 0) {
++            uint64_t m = frac;
++            int sh = 0;
++            while ((m & 0x8000000000000000ull) == 0) {
++                m <<= 1;
++                sh++;
++            }
++            mant = m;
++            // bit 0 of frac has weight 2^-1074. After the shift, bit 63 has
++            // weight 2^(-1074 + 63 - sh) = 2^(-1011 - sh).
++            se |= uint16_t(16383 - 1011 - sh);
++        }
++    } else {
++        mant = (1ull << 63) | (frac << 11);
++        se |= uint16_t(exp + 15360);
++    }
++    std::memcpy(p, &mant, 8);
++    std::memcpy(p + 8, &se, 2);
++}
++
++void xbe_arm_host_fp() {
++#if defined(__aarch64__)
++    uint64_t fpcr = 0;
++    __asm__ volatile("msr fpcr, %0" ::"r"(fpcr));
++#elif defined(__x86_64__) || defined(_M_X64)
++#if defined(_MSC_VER) && !defined(__clang__)
++    _mm_setcsr(0x1F80);
++#else
++    uint32_t mxcsr = 0x1F80;
++    __asm__ volatile("ldmxcsr %0" ::"m"(mxcsr));
++#endif
++#endif
++}
++
++namespace {
++struct ArmMain {
++    ArmMain() { xbe_arm_host_fp(); }
++};
++ArmMain g_arm_main;
++}  // namespace
+diff --git a/runtime/cpu/x86_ops.h b/runtime/cpu/x86_ops.h
+index 87bd588..8d22d69 100644
+--- a/runtime/cpu/x86_ops.h
++++ b/runtime/cpu/x86_ops.h
+@@ -5,8 +5,13 @@
+ #include <limits>
+ #include <type_traits>
+ 
++#include "cpu/softmath.h"
+ #include "x86_context.h"
+ 
++#if defined(__clang__)
++#pragma clang fp contract(off)
++#endif
++
+ typedef uint16_t __attribute__((aligned(1), may_alias)) x86_u16u;
+ typedef uint32_t __attribute__((aligned(1), may_alias)) x86_u32u;
+ typedef uint64_t __attribute__((aligned(1), may_alias)) x86_u64u;
+@@ -112,39 +117,8 @@ inline int64_t x87_to_i64(X86Context& ctx, double v) {
+     return int64_t(r);
+ }
+ 
+-inline double x87_load80(const uint8_t* p) {
+-    uint64_t mant;
+-    uint16_t se;
+-    std::memcpy(&mant, p, 8);
+-    std::memcpy(&se, p + 8, 2);
+-    int sign = se >> 15;
+-    int exp = se & 0x7FFF;
+-    double v;
+-    if (exp == 0 && mant == 0) v = 0.0;
+-    else if (exp == 0x7FFF) v = (mant << 1) ? NAN : INFINITY;
+-    else v = std::ldexp(double(mant), exp - 16383 - 63);
+-    return sign ? -v : v;
+-}
+-
+-inline void x87_store80(uint8_t* p, double v) {
+-    uint64_t mant = 0;
+-    uint16_t se = std::signbit(v) ? 0x8000 : 0;
+-    double a = std::fabs(v);
+-    if (std::isnan(v)) {
+-        se |= 0x7FFF;
+-        mant = 0xC000000000000000ull;
+-    } else if (std::isinf(v)) {
+-        se |= 0x7FFF;
+-        mant = 0x8000000000000000ull;
+-    } else if (a != 0.0) {
+-        int e;
+-        double m = std::frexp(a, &e);  // a = m * 2^e, m in [0.5,1)
+-        mant = uint64_t(std::ldexp(m, 64));
+-        se |= uint16_t(e - 1 + 16383);
+-    }
+-    std::memcpy(p, &mant, 8);
+-    std::memcpy(p + 8, &se, 2);
+-}
++inline double x87_load80(const uint8_t* p) { return xbe_load80(p); }
++inline void x87_store80(uint8_t* p, double v) { xbe_store80(p, v); }
+ 
+ inline uint32_t x87_examine(X86Context& ctx) {
+     // FXAM class into C3 C2 C0, C1 = sign
+diff --git a/runtime/gpu/d3d12.cpp b/runtime/gpu/d3d12.cpp
+index ab38b02..6041ac9 100644
+--- a/runtime/gpu/d3d12.cpp
++++ b/runtime/gpu/d3d12.cpp
+@@ -15,6 +15,8 @@
+ #include <algorithm>
+ #include <chrono>
+ #include <cmath>
++
++#include "cpu/softmath.h"
+ #include <cstdlib>
+ #include <cstdio>
+ #include <cstring>
+@@ -216,6 +218,7 @@ float4 psmain(O i) : SV_Target {
+ float Pq(float nits) {
+     constexpr float m1 = 2610.0f / 16384, m2 = 2523.0f / 4096 * 128;
+     constexpr float c1 = 3424.0f / 4096, c2 = 2413.0f / 4096 * 32, c3 = 2392.0f / 4096 * 32;
++    // Display tone map only. Not guest state, so it stays on the host libm.
+     float y = std::pow(nits / 10000, m1);
+     return std::pow((c1 + c2 * y) / (1 + c3 * y), m2);
+ }
+@@ -2369,8 +2372,8 @@ void LightToView(const std::array<uint32_t, kLightFloats>& l, const float* vm, f
+     o[5][0] = f[kLightAttenuation0];
+     o[5][1] = f[kLightAttenuation1];
+     o[5][2] = f[kLightAttenuation2];
+-    o[6][0] = std::cos(f[kLightTheta] * 0.5f);
+-    o[6][1] = std::cos(f[kLightPhi] * 0.5f);
++    o[6][0] = xbe_cosf(f[kLightTheta] * 0.5f);
++    o[6][1] = xbe_cosf(f[kLightPhi] * 0.5f);
+ }
+ 
+ void FillLightConstants(const State& s, const FixedKey& fk, DrawConstants& c) {
+diff --git a/runtime/xdk/crt_math.cpp b/runtime/xdk/crt_math.cpp
+index c530ba6..54b4422 100644
+--- a/runtime/xdk/crt_math.cpp
++++ b/runtime/xdk/crt_math.cpp
+@@ -3,6 +3,7 @@
+ // the host instead.
+ #include <cmath>
+ 
++#include "cpu/softmath.h"
+ #include "xdk/hle.h"
+ 
+ // each function's body, shared by its stack entry (sin) and its register entry (_CIsin): x in st0, popped by its ret
+@@ -24,32 +25,32 @@
+ #define SYM_crt_log10 FFFFFD08
+ #define SYM_crt_pow FFFFFD09
+ #endif
+-CRT_MATH(crt_sin, std::sin)
+-CRT_MATH(crt_cos, std::cos)
+-CRT_MATH(crt_tan, std::tan)
+-CRT_MATH(crt_asin, std::asin)
+-CRT_MATH(crt_acos, std::acos)
+-CRT_MATH(crt_atan, std::atan)
++CRT_MATH(crt_sin, xbe_sin)
++CRT_MATH(crt_cos, xbe_cos)
++CRT_MATH(crt_tan, xbe_tan)
++CRT_MATH(crt_asin, xbe_asin)
++CRT_MATH(crt_acos, xbe_acos)
++CRT_MATH(crt_atan, xbe_atan)
+ CRT_MATH(crt_sqrt, std::sqrt)
+-CRT_MATH(crt_log, std::log)
+-CRT_MATH(crt_log10, std::log10)
++CRT_MATH(crt_log, xbe_log)
++CRT_MATH(crt_log10, xbe_log10)
+ #undef CRT_MATH
+ 
+ // x and y above the return address, y in st0
+ X86_FUNC(GUEST(crt_pow)) {
+-    X87_ST(0) = std::pow(double(X86_MEMF64(ctx.esp + 4)), double(X86_MEMF64(ctx.esp + 12)));
++    X87_ST(0) = xbe_pow(double(X86_MEMF64(ctx.esp + 4)), double(X86_MEMF64(ctx.esp + 12)));
+     ctx.esp += 4;
+ }
+ 
+ // configs written before the bodies had names
+ X86_FUNC(GUEST(_CIacos)) {
+     (void)base;
+-    X87_ST(0) = std::acos(X87_ST(0));
++    X87_ST(0) = xbe_acos(X87_ST(0));
+     ctx.esp += 4;
+ }
+ 
+ X86_FUNC(GUEST(_CIasin)) {
+     (void)base;
+-    X87_ST(0) = std::asin(X87_ST(0));
++    X87_ST(0) = xbe_asin(X87_ST(0));
+     ctx.esp += 4;
+ }
+diff --git a/tools/recomp/codegen_fp.cpp b/tools/recomp/codegen_fp.cpp
+index 559f112..5d7b88e 100644
+--- a/tools/recomp/codegen_fp.cpp
++++ b/tools/recomp/codegen_fp.cpp
+@@ -163,44 +163,44 @@ bool CodeGen::EmitX87(uint32_t va, const ZydisDecodedInstruction& in, const Zydi
+         case ZYDIS_MNEMONIC_FABS: emit("X87_ST(0) = std::fabs(X87_ST(0));"); return true;
+         case ZYDIS_MNEMONIC_FSQRT: emit("X87_ST(0) = x87_prec(ctx, std::sqrt(X87_ST(0)));"); return true;
+         // clearing C2 (0x400) reports the argument in range
+-        case ZYDIS_MNEMONIC_FSIN: emit("X87_ST(0) = std::sin(X87_ST(0)); ctx.fsw &= ~0x400;"); return true;
+-        case ZYDIS_MNEMONIC_FCOS: emit("X87_ST(0) = std::cos(X87_ST(0)); ctx.fsw &= ~0x400;"); return true;
++        case ZYDIS_MNEMONIC_FSIN: emit("X87_ST(0) = xbe_sin(X87_ST(0)); ctx.fsw &= ~0x400;"); return true;
++        case ZYDIS_MNEMONIC_FCOS: emit("X87_ST(0) = xbe_cos(X87_ST(0)); ctx.fsw &= ~0x400;"); return true;
+         case ZYDIS_MNEMONIC_FSINCOS:
+-            emit("double v = X87_ST(0); X87_ST(0) = std::sin(v); x87_push(ctx, std::cos(v)); ctx.fsw &= ~0x400;");
++            emit("double v = X87_ST(0); X87_ST(0) = xbe_sin(v); x87_push(ctx, xbe_cos(v)); ctx.fsw &= ~0x400;");
+             return true;
+         case ZYDIS_MNEMONIC_FPTAN:
+-            emit("X87_ST(0) = std::tan(X87_ST(0)); x87_push(ctx, 1.0); ctx.fsw &= ~0x400;");
++            emit("X87_ST(0) = xbe_tan(X87_ST(0)); x87_push(ctx, 1.0); ctx.fsw &= ~0x400;");
+             return true;
+         case ZYDIS_MNEMONIC_FPATAN:
+-            emit("double v = std::atan2(X87_ST(1), X87_ST(0)); x87_pop(ctx); X87_ST(0) = v;");
++            emit("double v = xbe_atan2(X87_ST(1), X87_ST(0)); x87_pop(ctx); X87_ST(0) = v;");
+             return true;
+-        case ZYDIS_MNEMONIC_F2XM1: emit("X87_ST(0) = std::exp2(X87_ST(0)) - 1.0;"); return true;
++        case ZYDIS_MNEMONIC_F2XM1: emit("X87_ST(0) = xbe_exp2(X87_ST(0)) - 1.0;"); return true;
+         case ZYDIS_MNEMONIC_FYL2X:
+-            emit("double v = X87_ST(1) * std::log2(X87_ST(0)); x87_pop(ctx); X87_ST(0) = v;");
++            emit("double v = X87_ST(1) * xbe_log2(X87_ST(0)); x87_pop(ctx); X87_ST(0) = v;");
+             return true;
+         case ZYDIS_MNEMONIC_FYL2XP1:
+-            emit("double v = X87_ST(1) * std::log2(X87_ST(0) + 1.0); x87_pop(ctx); X87_ST(0) = v;");
++            emit("double v = X87_ST(1) * xbe_log2(X87_ST(0) + 1.0); x87_pop(ctx); X87_ST(0) = v;");
+             return true;
+         case ZYDIS_MNEMONIC_FSCALE:
+-            emit("X87_ST(0) = std::ldexp(X87_ST(0), (int)std::trunc(X87_ST(1)));");
++            emit("X87_ST(0) = xbe_ldexp(X87_ST(0), (int)std::trunc(X87_ST(1)));");
+             return true;
+         case ZYDIS_MNEMONIC_FRNDINT: emit("X87_ST(0) = x87_round(ctx, X87_ST(0));"); return true;
+         case ZYDIS_MNEMONIC_FPREM:
+-            emit("X87_ST(0) = std::fmod(X87_ST(0), X87_ST(1)); ctx.fsw &= ~0x400;");
++            emit("X87_ST(0) = xbe_fmod(X87_ST(0), X87_ST(1)); ctx.fsw &= ~0x400;");
+             return true;
+         case ZYDIS_MNEMONIC_FPREM1:
+-            emit("X87_ST(0) = std::remainder(X87_ST(0), X87_ST(1)); ctx.fsw &= ~0x400;");
++            emit("X87_ST(0) = xbe_remainder(X87_ST(0), X87_ST(1)); ctx.fsw &= ~0x400;");
+             return true;
+         case ZYDIS_MNEMONIC_FXTRACT:
+-            emit("int e; double v = X87_ST(0); double mnt = std::frexp(v, &e); X87_ST(0) = (double)(e - 1); x87_push(ctx, mnt * 2.0);");
++            emit("int e; double v = X87_ST(0); double mnt = xbe_frexp(v, &e); X87_ST(0) = (double)(e - 1); x87_push(ctx, mnt * 2.0);");
+             return true;
+         case ZYDIS_MNEMONIC_FLD1: emit("x87_push(ctx, 1.0);"); return true;
+         case ZYDIS_MNEMONIC_FLDZ: emit("x87_push(ctx, 0.0);"); return true;
+-        case ZYDIS_MNEMONIC_FLDPI: emit("x87_push(ctx, 3.14159265358979323846);"); return true;
+-        case ZYDIS_MNEMONIC_FLDL2E: emit("x87_push(ctx, 1.44269504088896340736);"); return true;
+-        case ZYDIS_MNEMONIC_FLDL2T: emit("x87_push(ctx, 3.32192809488736234787);"); return true;
+-        case ZYDIS_MNEMONIC_FLDLN2: emit("x87_push(ctx, 0.693147180559945309417);"); return true;
+-        case ZYDIS_MNEMONIC_FLDLG2: emit("x87_push(ctx, 0.301029995663981195214);"); return true;
++        case ZYDIS_MNEMONIC_FLDPI: emit("x87_push(ctx, 0x1.921fb54442d18p+1);"); return true;
++        case ZYDIS_MNEMONIC_FLDL2E: emit("x87_push(ctx, 0x1.71547652b82fep+0);"); return true;
++        case ZYDIS_MNEMONIC_FLDL2T: emit("x87_push(ctx, 0x1.a934f0979a371p+1);"); return true;
++        case ZYDIS_MNEMONIC_FLDLN2: emit("x87_push(ctx, 0x1.62e42fefa39efp-1);"); return true;
++        case ZYDIS_MNEMONIC_FLDLG2: emit("x87_push(ctx, 0x1.34413509f79ffp-2);"); return true;
+         case ZYDIS_MNEMONIC_FLDCW: emit("ctx.fcw = X86_MEM16(ea);"); return true;
+         case ZYDIS_MNEMONIC_FNSTCW: emit("X86_MEM16(ea) = ctx.fcw;"); return true;
+         case ZYDIS_MNEMONIC_FNSTSW:
+--- a/runtime/cpu/dispatch.cpp
++++ b/runtime/cpu/dispatch.cpp
+@@ -74,6 +74,7 @@
+ }  // namespace dispatch
+ 
+ void x86_icall(X86Context& ctx, uint8_t* base, uint32_t target) {
++    xbe_arm_host_fp();
+     ctx.last_icall = target;
+     if (target >= g_lo && target < g_hi && g_continuation[target - g_lo]) throw X86Resume{target, ctx.esp};
+     if (X86Func* f = dispatch::Find(target)) {
+@@ -103,6 +104,7 @@
+ }
+ 
+ void x86_resume(X86Context& ctx, uint8_t* base, const X86Resume& r) {
++    xbe_arm_host_fp();
+     ctx.esp = r.esp;
+     dispatch::Find(r.target)(ctx, base);
+ }
+@@ -110,6 +112,7 @@
+ void x86_kernel(X86Context& ctx, uint8_t* base, uint32_t ordinal) {
+     if (ordinal < 400 && g_exports[ordinal].fn) {
+         g_exports[ordinal].fn(ctx, base);
++        xbe_arm_host_fp();
+         return;
+     }
+     LOGE("kernel export %u (%s) is not implemented, return address %08X", ordinal, kernel::ExportName(ordinal),
+--- a/runtime/kernel/threads.cpp
++++ b/runtime/kernel/threads.cpp
+@@ -7,4 +7,5 @@
+ #include "kernel/kernel.h"
++#include "cpu/softmath.h"
+ 
+ #ifdef _WIN32
+ #define WIN32_LEAN_AND_MEAN
+@@ -104,6 +105,7 @@
+     auto* f = new std::function<void()>(std::move(fn));
+ #ifdef _WIN32
+     auto entry = [](void* p) -> DWORD {
++        xbe_arm_host_fp();
+         std::unique_ptr<std::function<void()>> g(static_cast<std::function<void()>*>(p));
+         (*g)();
+         return 0;
+@@ -116,6 +118,7 @@
+     pthread_attr_setstacksize(&attr, 64u << 20);
+     pthread_t th;
+     pthread_create(&th, &attr, [](void* p) -> void* {
++        xbe_arm_host_fp();
+         std::unique_ptr<std::function<void()>> g(static_cast<std::function<void()>*>(p));
+         (*g)();
+         return nullptr;
+--- a/runtime/xdk/dsound.cpp
++++ b/runtime/xdk/dsound.cpp
+@@ -13,6 +13,7 @@
+ #include "xbe/xbe.h"
+ #include "xdk/hle.h"
+ #include "xdk/layout.h"
++#include "cpu/softmath.h"
+ 
+ using namespace kernel;
+ 
+@@ -159,7 +160,7 @@
+ float g_stat_peak = 0.0f;
+ 
+ 
+-float Db(int32_t hundredths) { return hundredths <= -10000 ? 0.0f : std::pow(10.0f, hundredths / 2000.0f); }
++float Db(int32_t hundredths) { return hundredths <= -10000 ? 0.0f : xbe_powf(10.0f, hundredths / 2000.0f); }
+ 
+ uint32_t FramesOf(const Voice& v, uint32_t bytes) {
+     if (v.tag == 0x69) return bytes / (36u * v.channels) * 64;  // WAVE_FORMAT_XBOX_ADPCM
+@@ -331,7 +332,7 @@
+                         v.pos = 0;
+                         break;
+                     }
+-                    v.pos = start + std::fmod(v.pos - start, double(end - start));
++                    v.pos = start + xbe_fmod(v.pos - start, double(end - start));
+                     f = uint32_t(v.pos);
+                 }
+                 if (!v.data) break;
+--- a/runtime/gpu/vulkan.cpp
++++ b/runtime/gpu/vulkan.cpp
+@@ -10,6 +10,8 @@
+ #include <array>
+ #include <chrono>
+ #include <cmath>
++
++#include "cpu/softmath.h"
+ #include <cstdio>
+ #include <cstring>
+ #include <filesystem>
+@@ -1613,7 +1615,7 @@
+             for (int j = 0; j < 4; j++) { o[0][j] = f[1 + j]; o[1][j] = f[5 + j]; o[2][j] = f[9 + j]; }
+             for (int j = 0; j < 3; j++) { o[3][j] = f[13] * vm[j] + f[14] * vm[4 + j] + f[15] * vm[8 + j] + vm[12 + j]; o[4][j] = f[16] * vm[j] + f[17] * vm[4 + j] + f[18] * vm[8 + j]; }
+             o[3][3] = f[19]; o[4][3] = f[20]; o[5][0] = f[21]; o[5][1] = f[22]; o[5][2] = f[23];
+-            o[6][0] = std::cos(f[24] * 0.5f); o[6][1] = std::cos(f[25] * 0.5f);
++            o[6][0] = xbe_cosf(f[24] * 0.5f); o[6][1] = xbe_cosf(f[25] * 0.5f);
+         }
+     }
+ }
+@@ -1834,16 +1836,16 @@
+                 case 12: for (int i = 0; i < 4; i++) mr[i] = A[i] >= B[i] ? 1.0f : 0.0f; break;
+                 default: break;
+             }
+-            float x = C[0], whole = std::floor(x), mag = std::fabs(x), l2 = std::log2(mag), ex = std::floor(l2);
++            float x = C[0], whole = std::floor(x), mag = std::fabs(x), l2 = xbe_log2f(mag), ex = std::floor(l2);
+             switch (ilu) {
+                 case 1: std::memcpy(ir, C, sizeof(ir)); break;
+                 case 2: ir[0] = ir[1] = ir[2] = ir[3] = 1.0f / x; break;
+                 case 3: ir[0] = ir[1] = ir[2] = ir[3] = VsMagClamp(1.0f / x); break;
+                 case 4: ir[0] = ir[1] = ir[2] = ir[3] = x == 0 ? INFINITY : 1.0f / std::sqrt(mag); break;
+-                case 5: ir[0] = std::exp2(whole); ir[1] = x - whole; ir[2] = std::exp2(x); ir[3] = 1; break;
+-                case 6: if (mag == 0) { ir[0] = ir[2] = -INFINITY; ir[1] = ir[3] = 1; } else { ir[0] = ex; ir[1] = mag / std::exp2(ex); ir[2] = l2; ir[3] = 1; } break;
++                case 5: ir[0] = xbe_exp2f(whole); ir[1] = x - whole; ir[2] = xbe_exp2f(x); ir[3] = 1; break;
++                case 6: if (mag == 0) { ir[0] = ir[2] = -INFINITY; ir[1] = ir[3] = 1; } else { ir[0] = ex; ir[1] = mag / xbe_exp2f(ex); ir[2] = l2; ir[3] = 1; } break;
+                 case 7: { const float cap = 127.99609375f; float d = std::max(C[0], 0.0f);
+-                          ir[0] = 1; ir[1] = d; ir[2] = d > 0 ? std::exp2(std::clamp(C[3], -cap, cap) * std::log2(std::max(C[1], 0.0f))) : 0; ir[3] = 1; break; }
++                          ir[0] = 1; ir[1] = d; ir[2] = d > 0 ? xbe_exp2f(std::clamp(C[3], -cap, cap) * xbe_log2f(std::max(C[1], 0.0f))) : 0; ir[3] = 1; break; }
+                 default: break;
+             }
+             uint32_t r = VsField(t, 3, 20, 4), omask = VsField(t, 3, 12, 4);
+--- a/runtime/kernel/objects.cpp
++++ b/runtime/kernel/objects.cpp
+@@ -141,10 +141,20 @@
+         return s;
+     };
+     std::string want = fold(name);
+-    for (auto& [key, weak] : g_names)
+-        if (fold(key) == want)
+-            if (ObjectRef found = weak.lock()) return found;
+-    return nullptr;
++    // Hash order is not stable across standard libraries. When two names differ
++    // only by case, the lowest key wins so every platform resolves the same object.
++    ObjectRef best;
++    std::string best_key;
++    for (auto& [key, weak] : g_names) {
++        if (fold(key) != want) continue;
++        ObjectRef found = weak.lock();
++        if (!found) continue;
++        if (!best || key < best_key) {
++            best = std::move(found);
++            best_key = key;
++        }
++    }
++    return best;
+ }
+ 
+ void AddNamed(const std::string& name, ObjectRef obj) {
