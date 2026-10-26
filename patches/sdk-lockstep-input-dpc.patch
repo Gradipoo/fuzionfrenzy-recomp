@@ -1,0 +1,93 @@
+diff --git a/runtime/kernel/kernel.h b/runtime/kernel/kernel.h
+--- a/runtime/kernel/kernel.h
++++ b/runtime/kernel/kernel.h
+@@ -143,6 +143,9 @@
+ void SetDeterministicClocks(uint64_t interrupt_100ns, uint64_t system_100ns, uint32_t tick_ms);
+ void FireDueTimers(X86Context& ctx);
+ void QueueDpc(uint32_t dpc, uint32_t arg1, uint32_t arg2);
++// XBE_INPUT_DPC: fixed step runs queued DPCs on the present thread, or on the
++// thread that is about to wait. Returns true if a DPC ran.
++bool DrainFixedDpcs(X86Context& ctx);
+ struct Thread;
+ // apc_routine runs on apc_thread with (apc_context, due low, due high) each time the timer fires
+ void SetTimer(ObjectRef timer, int64_t due, int32_t period_ms, uint32_t dpc, std::shared_ptr<Thread> apc_thread = nullptr,
+diff --git a/runtime/kernel/objects.cpp b/runtime/kernel/objects.cpp
+--- a/runtime/kernel/objects.cpp
++++ b/runtime/kernel/objects.cpp
+@@ -264,6 +264,14 @@
+             }
+         }
+         if (!infinite && det::SimTick() >= deadline) return kTimeout;
++        // A DPC queued by the USB timer completes the input IRP. Run it on
++        // this thread before parking, or the open wait never gets signalled.
++        if (self && self->ctx) {
++            lock.unlock();
++            bool ran = DrainFixedDpcs(*self->ctx);
++            lock.lock();
++            if (ran) continue;
++        }
+         // The presenter consumes a finite timeout in virtual time, then yields
+         // so a loader whose own delay just came due can signal this wait.
+         // An infinite presenter wait parks until that signal. It does not poll
+@@ -450,16 +458,51 @@
+     }
+ }
+ 
++// Set while DrainFixedDpcs is running a DPC on this thread. A DPC that queues
++// another one only appends; the outer drain runs it before returning.
++// g_fixed_dpc_mu keeps a second guest thread from running a DPC at the same
++// time. The nested call returns before taking the mutex.
++static std::mutex g_fixed_dpc_mu;
++static thread_local int t_dpc_drain = 0;
++
+ void QueueDpc(uint32_t dpc, uint32_t arg1, uint32_t arg2) {
+     std::lock_guard<std::mutex> lock(g_dpc_lock);
+     W32(dpc + 0x14, arg1);  // KDPC.SystemArgument1 and 2
+     W32(dpc + 0x18, arg2);
+     g_dpcs.push_back({dpc, arg1, arg2});
++    // XBE_INPUT_DPC: the host DPC thread races the title's input poll. Fixed
++    // step leaves the DPC queued. FireDueTimers drains it on the next present,
++    // after that frame's poll and before the state hash. A wait drains first
++    // so the open path can be signalled. Normal play keeps the host thread.
++    if (det::FixedStep()) return;
+     g_dpc_cv.notify_one();
+     if (!g_dpc_thread) {
+         g_dpc_thread = true;
+         StartHostThread("dpc", [](X86Context& ctx) { RunDpcs(ctx); });
++    }
++}
++
++bool DrainFixedDpcs(X86Context& ctx) {
++    if (!det::FixedStep() || t_dpc_drain) return false;
++    std::lock_guard<std::mutex> gate(g_fixed_dpc_mu);
++    t_dpc_drain++;
++    bool ran = false;
++    for (;;) {
++        std::array<uint32_t, 3> d;
++        {
++            std::lock_guard<std::mutex> lock(g_dpc_lock);
++            if (g_dpcs.empty()) break;
++            d = g_dpcs.front();
++            g_dpcs.pop_front();
++        }
++        ran = true;
++        uint32_t dpc = d[0];
++        G<uint8_t>(dpc + 2) = 0;  // Inserted
++        uint32_t routine = R32(dpc + 0x0C), context = R32(dpc + 0x10);
++        if (routine) CallGuest(ctx, routine, {dpc, context, d[1], d[2]});
+     }
++    t_dpc_drain--;
++    return ran;
+ }
+ 
+ static void TimerLoop() {
+@@ -528,6 +571,9 @@
+ 
+ void FireDueTimers(X86Context& ctx) {
+     if (!det::FixedStep()) return;
++    // DPCs queued by the previous present's timers. The title has already
++    // polled input for this frame. The state hash below then sees the completion.
++    DrainFixedDpcs(ctx);
+     std::vector<TimerEntry> due;
+     {
+         std::lock_guard<std::mutex> lock(g_timer_lock);

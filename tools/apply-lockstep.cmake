@@ -83,6 +83,23 @@ if(EXISTS "${SDK}/runtime/core/determinism.cpp" AND EXISTS "${_load}")
     endif()
 endif()
 
+# Fixed-step input IRPs stay queued until the next present drains them, after
+# that frame's poll and before the state hash. A wait drains first so device
+# open can be signalled. The host patch already has the load-yield marker, so
+# this follows that patch there and follows the load-yield patch on Mac.
+set(_input "${REPO}/patches/sdk-lockstep-input-dpc.patch")
+if(EXISTS "${SDK}/runtime/kernel/objects.cpp" AND EXISTS "${_input}")
+    file(READ "${SDK}/runtime/kernel/objects.cpp" _dpc_src)
+    if(NOT _dpc_src MATCHES "XBE_INPUT_DPC")
+        execute_process(COMMAND "${GIT_EXE}" -C "${SDK}" apply --whitespace=nowarn "${_input}"
+                        RESULT_VARIABLE _rc)
+        if(NOT _rc EQUAL 0)
+            message(FATAL_ERROR "patches/sdk-lockstep-input-dpc.patch failed (${_rc})")
+        endif()
+        message(STATUS "applied patches/sdk-lockstep-input-dpc.patch")
+    endif()
+endif()
+
 file(READ "${SDK}/runtime/kernel/memory.cpp" _mem)
 if(NOT _mem MATCHES "XBE_LOCKSTEP_COMMIT")
     if(_mem MATCHES "HostProtect")
