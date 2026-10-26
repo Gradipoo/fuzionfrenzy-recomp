@@ -225,7 +225,9 @@ f95fc86463222bef PASS
 
 The digest covers the bundled transcendentals, an 80-bit store/load round trip (including a significand that has to round), `ldexp`/`frexp`, a float mul-add chain, and a subnormal multiply. It does not boot the game.
 
-This machine has no Docker, no Podman, no QEMU, no `clang-cl`, and no xwin sysroot. A full RingHost cannot be linked x86_64 here: the Homebrew Vulkan loader is arm64. So there is no Linux x86-64 replay and no Windows x64 replay yet. The comparison that is still required, once a Linux or Windows build exists, is:
+The rebuilt Mac arm64 `RingHost` then replayed the idle pads twice, 25 Oct 2026 10:01 PM PT. Instance 2, fresh `hdd2` each time, muted, minimized, fixed-step, seed 1, 240 frames. `scripts/det-diff.py` printed `PASS 240 frames match`. Frame 0 total `adaa8469791e9640`. Frame 239 total `23c7bcee96e7f23a`, delay count 3, seed `00000001`. Those are the same totals as the 9:34 PM PT matrix, so this idle path did not move. The generated guest code calls `xbe_sin` (and the other bundled names) and no longer calls `std::sin`.
+
+This machine has no Docker, no Podman, no QEMU, no `clang-cl`, and no xwin sysroot. A full RingHost cannot be linked x86_64 here: the Homebrew Vulkan loader is arm64. So there is no Linux x86-64 replay and no Windows x64 replay yet. Rosetta covered the math digest only. The comparison that is still required, once a Linux or Windows build exists, is:
 
 ```
 # on each machine, same idle.pads, same seed, fresh hdd for that instance
