@@ -25,7 +25,7 @@ enum Pipeline {
         let fm = FileManager.default
         let support = URL(fileURLWithPath: job.support, isDirectory: true)
         let src = support.appendingPathComponent("src", isDirectory: true)
-        let binary = src.appendingPathComponent("out/build/macos-release/FuzionFrenzy")
+        let binary = src.appendingPathComponent("out/build/macos-release/RingHost")
         do {
             try fm.createDirectory(at: support, withIntermediateDirectories: true)
             let blockers = PrereqScan.blockers(PrereqScan.scan())

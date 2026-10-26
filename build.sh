@@ -13,11 +13,17 @@ else
 fi
 
 GAME_XBE="default.xbe"
-GAME_EXE="FuzionFrenzy"
+if [ "$(uname -s)" = "Darwin" ]; then
+    GAME_EXE="RingHost"
+    BANNER="Ring Host"
+else
+    GAME_EXE="FuzionFrenzy"
+    BANNER="Fuzion Frenzy"
+fi
 OUT="out/build/${PRESET}"
 
 echo
-echo "  Fuzion Frenzy - build (${PRESET})"
+echo "  ${BANNER} - build (${PRESET})"
 echo "  ================================================"
 echo
 
@@ -65,6 +71,6 @@ echo "      first build recompiles ${GAME_XBE}, expect a long build ..."
 cmake --build --preset "${PRESET}"
 
 echo
-echo "  Fuzion Frenzy built."
+echo "  ${BANNER} built."
 echo "  ${OUT}/${GAME_EXE}"
 echo

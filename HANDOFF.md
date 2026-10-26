@@ -204,11 +204,14 @@ brew install cmake ninja openssl@3 glslang molten-vk vulkan-loader vulkan-header
 #   cmake --preset macos-release
 #   cmake --build --preset macos-release
 
-file out/build/macos-release/FuzionFrenzy    # Mach-O 64-bit executable arm64
-out/build/macos-release/FuzionFrenzy
+file out/build/macos-release/RingHost    # Mach-O 64-bit executable arm64
+out/build/macos-release/RingHost
 ```
 
-Logs land in `out/build/macos-release/logs/`. That directory is gitignored. Do not commit it,
+The Mac executable and window title are Ring Host. Linux and Windows still produce
+`FuzionFrenzy`. Earlier notes in this file that name `FuzionFrenzy` are the binary
+those runs actually launched. Logs now land in `out/build/macos-release/logs/ringhost.log`.
+The logs directory is gitignored. Do not commit it,
 screenshots, or anything under `generated/`.
 
 Useful environment variables are the ones in the README (`XBE_PERF`, `XBE_MUTE`,
@@ -278,25 +281,27 @@ black-macos-runtime's NV2A renderer are GPL as well.
 
 `macos/launcher/package-dmg.sh` compiles the SwiftUI app with the Command Line Tools
 `swiftc` (arm64, macOS 14 deployment target, `-parse-as-library`) and packs
-`macos/launcher/dist/Fuzion Frenzy.app` plus
-`macos/launcher/dist/FuzionFrenzy-macos-launcher.dmg`. The script copies tracked files
+`macos/launcher/dist/Ring Host.app` plus
+`macos/launcher/dist/RingHost-macos.dmg`. The script copies tracked files
 with `git ls-files`, then replaces `sdk/` with `git archive` of the pinned commit so the
 image does not carry this machine's patched worktree. `tools/apply-macos-sdk.sh` applies
 the patch at build time, and if that sdk has no `.git` it runs `git init` first. The
 packaging check refuses an xbe, an iso, recompiled guest sources, or a `FuzionFrenzy`
-binary inside the app. The product directory and `*.dmg` are gitignored, and the
+or `RingHost` binary inside the app. The product directory and `*.dmg` are gitignored, and the
 pre-commit hook refuses them. Ad-hoc `codesign` only. Notarization is future work.
 `hdiutil create -format UDZO` warns that it is deprecated and still writes the image.
 
-The app bundle id is `local.fuzionfrenzy.launcher`. The executable is
-`FuzionFrenzyLauncher`, so it does not collide with the game. There is no sandbox, so
+The app bundle id is `local.ringhost.launcher`. The executable is
+`RingHostLauncher`, so it does not collide with the game process `RingHost`. The
+icon is `RingHost.icns`, drawn at package time (black, yellow rule, yellow ring).
+There is no sandbox, so
 the chosen path is stored as a string (`launcher.json` in the support folder). A
 security-scoped bookmark is best-effort.
 
-Support folder: `~/Library/Application Support/FuzionFrenzy`, or `--support` for a test
+Support folder: `~/Library/Application Support/RingHost`, or `--support` for a test
 directory. Layout: `src/` (port copy), `src/assets` as a symlink to the chosen folder
-or to `disc/` after an iso extract, `src/out/build/macos-release/FuzionFrenzy` with
-`settings.toml` beside it, `logs/fuzion.log`, `launcher.json`, `build.log`,
+or to `disc/` after an iso extract, `src/out/build/macos-release/RingHost` with
+`settings.toml` beside it, `logs/ringhost.log`, `launcher.json`, `build.log`,
 `built-version`. The game walks up from the executable to find `assets/`. Children get
 `/opt/homebrew/bin` and `/usr/local/bin` on `PATH`. `GIT_TERMINAL_PROMPT=0`.
 
@@ -322,12 +327,14 @@ key. Scripted pad is `FUZION_AUTOSTART=1` and defaults off. HDR keys are written
 The keyboard map is the fixed table in `src/common/input_kbm.cpp`. Controllers follow
 SDL plug order. There is no 4K movie path; `docs/movie-path.md` records 640×480 Bink.
 
-The window is a black field. The wordmark is the two words in a heavy system face,
-yellow, with a yellow rule and a plain yellow ring. Menu rows are lowercase. The
-current one is white and the rest are a dusty blue. Faint blue digits and a few
-outlined shapes sit on the right. A thin yellow bar shows compile progress. The
-selected page lives on the model (`@Published`) because the Command Line Tools
-`swiftc` has no SwiftUI macro plugin, so `@State` does not compile here.
+The window is a black field. The wordmark is RING / HOST in Helvetica Neue Condensed
+Black, yellow, with a yellow rule and a plain yellow ring. Menu rows are Helvetica
+Neue, lowercase, with a short white shadow (radius about 0.7) so the type is a little
+soft, the way a 480p menu looks, and still readable. The current row is white and the
+rest are a dusty blue. Faint blue digits and a few outlined shapes sit on the right.
+A thin yellow bar shows compile progress. The selected page lives on the model
+(`@Published`) because the Command Line Tools `swiftc` has no SwiftUI macro plugin,
+so `@State` does not compile here.
 
 A full play through the previous launcher binary, with `--disc` pointed at this
 machine's extracted `assets/`, `--fps 30`, `--windowed`, `--mute`, and `--perf`,

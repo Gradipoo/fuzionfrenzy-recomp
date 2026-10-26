@@ -17,7 +17,7 @@ struct ArenaBackground: View {
                         state = state &* 1664525 &+ 1013904223
                         let bit = (state >> 28) & 1
                         let label = Text(bit == 0 ? "0" : "1")
-                            .font(.system(size: 11, weight: .regular, design: .monospaced))
+                            .font(.custom("Helvetica Neue", size: 11))
                             .foregroundColor(Arena.hud.opacity(0.5))
                         context.draw(label, at: CGPoint(x: originX + CGFloat(col) * 26, y: y), anchor: .center)
                         y += 18
@@ -41,13 +41,14 @@ struct ArenaBackground: View {
 struct Wordmark: View {
     var body: some View {
         HStack(alignment: .center, spacing: 14) {
-            VStack(alignment: .leading, spacing: -2) {
-                Text("FUZION")
-                Text("FRENZY")
+            VStack(alignment: .leading, spacing: -4) {
+                Text("RING")
+                Text("HOST")
             }
-            .font(.system(size: 34, weight: .black))
-            .tracking(-0.4)
+            .font(.custom("HelveticaNeue-CondensedBlack", size: 36))
+            .tracking(0.6)
             .foregroundStyle(Arena.yellow)
+            .arenaSoft()
             Rectangle()
                 .fill(Arena.yellow)
                 .frame(height: 3)

@@ -56,3 +56,9 @@ endif()
 # target name = GAME_EXE in build.bat and release.bat, xbe = GAME_XBE; add_xbe_image reads
 # assets/default.xbe and config/game.toml, and adds src/game/*.cpp to this image alone
 add_xbe_image(FuzionFrenzy default.xbe game.toml ${GAME_PARTITIONS} game)
+# The Mac process and window are Ring Host. Linux and Windows keep the
+# target's original file name. The CMake target stays FuzionFrenzy so an
+# existing macos-release build relinks instead of recompiling the guest.
+if(APPLE)
+    set_target_properties(FuzionFrenzy PROPERTIES OUTPUT_NAME RingHost)
+endif()

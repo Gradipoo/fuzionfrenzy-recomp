@@ -246,9 +246,11 @@ You supply the game: the USA Xbox release, as either
    ```
 
    `./build.sh` with no argument selects `macos-release` on Darwin and `linux-release` on Linux.
-   The executable is `out/build/macos-release/FuzionFrenzy`. Run it from anywhere; it walks up
+   The executable is `out/build/macos-release/RingHost`. Run it from anywhere; it walks up
    from its own directory to find `assets/`. `file` on the binary should report
-   `Mach-O 64-bit executable arm64`.
+   `Mach-O 64-bit executable arm64`. Linux and Windows still build `FuzionFrenzy`. The
+   Mac process is named Ring Host so the dock and the window are not the game's title.
+   The log prefix on Mac is `ringhost`.
 
    A release run is quiet unless something fails. `XBE_PERF=1` prints a `perf:` line once a
    second (the macOS patch logs those at report level, so they show up in a Release build).
@@ -256,19 +258,24 @@ You supply the game: the USA Xbox release, as either
    `HANDOFF.md`.
 
    `macos/launcher/package-dmg.sh` builds a player app and a compressed disk image at
-   `macos/launcher/dist/` (gitignored). The image holds the SwiftUI launcher and this
-   port's sources. The player points it at their own USA disc image or extracted folder.
-   The launcher checks the `default.xbe` SHA-1, copies the port into
-   `~/Library/Application Support/FuzionFrenzy`, applies the Darwin patch, and runs
-   `./build.sh macos-release` there. The game binary and `settings.toml` stay in that
-   folder and are rebuilt when the port version inside the app changes. MoltenVK, cmake,
-   and ninja are detected, with the Homebrew line above when one is missing. The first
-   compile downloads SDL. The app is ad-hoc signed. Notarization is future work.
+   `macos/launcher/dist/` (gitignored): `Ring Host.app` and `RingHost-macos.dmg`. The
+   image holds the SwiftUI launcher and this port's sources. The player points it at
+   their own USA disc image or extracted folder. The launcher checks the `default.xbe`
+   SHA-1, copies the port into `~/Library/Application Support/RingHost`, applies the
+   Darwin patch, and runs `./build.sh macos-release` there. The game binary
+   (`RingHost`) and `settings.toml` stay in that folder and are rebuilt when the port
+   version inside the app changes. An older `Application Support/FuzionFrenzy` folder
+   is not reused. MoltenVK, cmake, and ninja are detected, with the Homebrew line above
+   when one is missing. The first compile downloads SDL. The app is ad-hoc signed.
+   Notarization is future work. The icon is drawn by the package script: a black
+   field, a yellow rule, and a yellow ring.
 
-   The window is black. A yellow two-line wordmark is set in a system face, with a yellow
-   rule that ends in a plain ring. The menu is a vertical list: the current row is white
-   and the others are a dusty blue, with faint blue digits along the right edge. The
-   drawing is original. The pages are play, picture, sound, controls, and disc.
+   The window is black. The wordmark is RING / HOST in Helvetica Neue Condensed Black,
+   with a yellow rule that ends in a plain ring. Menu type is Helvetica Neue with a
+   short same-color shadow, about one old 480p pixel, so it is slightly soft and still
+   readable. The current row is white and the others are a dusty blue, with faint blue
+   digits along the right edge. The drawing is original. The pages are play, picture,
+   sound, controls, and disc.
 
    Picture writes `display_mode`, size, `fps_cap` (30 is the low-power cap, 60 is the
    default), `vsync`, `render_percent`, `aspect_ratio`, the ultrawide flag (extra-wide

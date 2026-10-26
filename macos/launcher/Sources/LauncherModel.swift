@@ -29,7 +29,7 @@ final class LauncherModel: ObservableObject {
             return URL(fileURLWithPath: path, isDirectory: true)
         }
         let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
-        return base.appendingPathComponent("FuzionFrenzy", isDirectory: true)
+        return base.appendingPathComponent("RingHost", isDirectory: true)
     }
 
     func bootstrap() {

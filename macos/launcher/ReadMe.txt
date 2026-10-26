@@ -1,6 +1,7 @@
-Fuzion Frenzy for Mac
+Ring Host for Mac
 
-This disk image is a launcher. It does not contain the game, a recompiled
+This disk image is a launcher. It plays a legally owned copy of the original
+Xbox game Fuzion Frenzy (USA). It does not contain that game, a recompiled
 binary, or any art from the disc.
 
 On first launch, choose your own USA disc image (.iso) or a folder that
@@ -8,7 +9,10 @@ already holds default.xbe plus the rest of the extracted disc. The launcher
 checks that it is the release this port supports, then compiles the game on
 your Mac. The built game stays in:
 
-  ~/Library/Application Support/FuzionFrenzy
+  ~/Library/Application Support/RingHost
+
+An older build under Application Support/FuzionFrenzy is left where it is.
+Point Ring Host at the same disc folder and it compiles again.
 
 You need an Apple Silicon Mac, Xcode Command Line Tools, and git, cmake,
 ninja, python3, MoltenVK, and glslang. Homebrew is the straightforward way
