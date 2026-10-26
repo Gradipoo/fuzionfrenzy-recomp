@@ -43,14 +43,14 @@ That repeat rule is what gets past boot. `sub_0004C510` samples RDTSC, then spin
 | `KeQuerySystemTime`, `KeSystemTime`, `NtSetSystemTime`'s read | epoch + interrupt time. Epoch is 2026-01-01 00:00:00 UTC as 100 ns since 1601 (`134116992000000000`). |
 | `KeTickCount` | `(frame * 1000) / 60` milliseconds. The step alternates 16 and 17 and lands on 1000 at frame 60. |
 | `RDTSC` (`x86_rdtsc`) | `frame * 12222222` (733333333/60). `.text`, DSOUND, XGRPH, and WMADEC all come through this. |
-| `KeDelayExecutionThread`, `KeStallExecutionProcessor` | On the thread that presents: consume whole ticks of the guest duration, then yield. A delay shorter than one tick does not move time by itself. The yield runs every other guest thread that is already waiting until each of them is blocked again, so a `Sleep(0)` poll observes the same APC every run. If that delay was non-zero and no other thread ran, one sim tick is added so a timed poll cannot spin. On any other thread: drop the turn, block until sim time has covered the delay (at least one tick), then wait for the turn again. No wall-clock sleep. |
+| `KeDelayExecutionThread`, `KeStallExecutionProcessor` | On the thread that presents: consume whole ticks of the guest duration, then yield. A delay shorter than one tick does not move time by itself. The yield runs every other guest thread that is already waiting until each of them is blocked again, so a `Sleep(0)` poll observes the same APC every run. If that delay was non-zero and no other thread ran, one sim tick is added so a timed poll cannot spin. On any other thread: arm the deadline while that thread still holds the turn, drop the turn, block until sim time has covered the delay (at least one tick), then wait for the turn again. No wall-clock sleep. The present yield does not resume the title while that deadline is already due or the thread is between the delay and its next block. A delay that still has ticks left stays blocked, and the yield returns. If the presenter is blocked in a kernel wait, that delay advances virtual time itself so the loader can finish and signal. A present yield does not grant that time. |
 | Timer DPCs | Deadline is guest 100 ns. The timer thread does not pop. Present fires due timers inline, in deadline order, on the present thread, then rearms a period by `period_ms * 10000` (100 ns). |
 | Vblank | The free-running thread does not increment. Present bumps the count once. `BlockUntilVerticalBlank` returns at once. |
 | `app::Pace` | Skipped, so the harness is not fps-capped. A Vulkan present can still wait on vsync. |
 
-`Wait` timeouts are still wall-clock. A title that waits on an object with a timeout can diverge. The stall row is the check for that.
+Under fixed step, `Wait` timeouts are sim ticks. A waiting thread stays off the turn until the object is signaled, an alertable APC is queued, or that sim deadline arrives. It does not wake on the wall clock. The stall row is the check for that.
 
-Guest threads take turns while fixed-step is on. `CallGuest` takes the turn, and a kernel wait gives it up. The title thread is the presenter from the moment it starts, because the boot `Sleep(0)` loop runs before the first present that used to mark it. That loop is `sub_0001C836`: it calls `sub_0004CF90(1)`, which queues an APC (`NtQueueApcThread`, thunk `0x34269`) onto the background loader, and spins on `Sleep(0)` until the loader's APC sets the dword at `0x2D02D0`. Each extra spin queues another APC, and each APC decrements the scheduler count at `0x2D02D4`. The spin used to be as long as the host took to schedule the loader, so two runs diverged at frame 3 in `.data` with different delay counts and that dword equal to `-(delay count + 1)`. The yield makes the loader run the APC inside the first `Sleep(0)`. The delay count at frame 3 is 1. `NtQueueApcThread` notifies under the dispatcher lock, so the alertable wait cannot miss the APC.
+Guest threads take turns while fixed-step is on. `CallGuest` takes the turn, and a kernel wait gives it up. The thread that blocked earliest runs next. A thread created while another holds the turn is given its place before it starts, so the order does not follow which host thread wakes first. Each present yields after the clock steps, so a background load runs until it blocks even when that frame never calls `KeDelayExecutionThread`. Without that yield the title thread keeps presenting and the load never finishes. The yield stays there until a loader delay that has already come due runs to its next block, so that load does not depend on which host thread the scheduler runs first. A thread sleeping on a sim deadline records the kick it has acknowledged. The yield does not resume the title while any sleeper is still asleep on an older kick. A kick that is not that delay's deadline does not end the wait. The title thread is the presenter from the moment it starts, because the boot `Sleep(0)` loop runs before the first present that used to mark it. That loop is `sub_0001C836`: it calls `sub_0004CF90(1)`, which queues an APC (`NtQueueApcThread`, thunk `0x34269`) onto the background loader, and spins on `Sleep(0)` until the loader's APC sets the dword at `0x2D02D0`. Each extra spin queues another APC, and each APC decrements the scheduler count at `0x2D02D4`. The spin used to be as long as the host took to schedule the loader, so two runs diverged at frame 3 in `.data` with different delay counts and that dword equal to `-(delay count + 1)`. The yield makes the loader run the APC inside the first `Sleep(0)`. The delay count at frame 3 is 1. `NtQueueApcThread` notifies under the dispatcher lock, so the alertable wait cannot miss the APC.
 
 `PsTerminateSystemThread` ends in `pthread_exit`, which does not run C++ destructors. A thread that exits that way used to leave the turn taken: both surviving guest threads then sat in `UnblockGuest` and presents stopped (idle replay, frame 107, `g_busy` still 1, `g_waiting` 2, no thread left inside `CallGuest`). Exit releases the turn before `pthread_exit`.
 
@@ -96,6 +96,8 @@ Excluded, and zeroed before the hash:
 - GPU scratch push buffer. The host writes command words there on its own timeline.
 - Color and depth surface payloads (the size comes from the surface size dword). The GPU writes pixels when it retires work. A matching guest command stream can still disagree if those bytes were hashed. Surface headers stay in the hash.
 - Stacks at `0xD0000000`. They hold spills and return addresses, and the host schedules the threads.
+
+Under fixed step a submit waits until the render thread finishes that batch, and a readback is copied into guest RAM only after that wait. The previous frame is not left overlapping the next one.
 
 Included on purpose: audio sample bytes in physical RAM, and the packet status words the mixer writes. A mixer divergence shows up as a physical slice. The fixed-step SDL callback writes silence and does not move a voice cursor. Present mixes exactly 800 frames (48000/60) on the present thread, then runs the completion callbacks there, before the hash.
 
@@ -149,6 +151,8 @@ Nothing in these idle rows diverged. They do not cover menus, character select, 
 
 The openlibm rebuild, 25 Oct 2026 10:20 PM PT, was two more instance-2 idle replays, not a full a/b/c matrix. They match each other. Frame 0 total `574c0f97185e0166`. Frame 239 total `41a20ce3c40f8974`, delay count 3, seed `00000001`. The 9:34 PM totals above are the previous math.
 
+On 26 Oct 2026, after the present yield and fixed-step GPU completion, `FUZION_DET_FRAMES=240 ./scripts/det-matrix.sh` on this Mac printed `MATRIX PASS`. Rows a, b, and c match, including the 30 ms stall and instances 2 and 3 at once. Frame 0 is still `574c0f97185e0166`. Frame 60 is `baaf36e0af926229`. Frame 120 is `5d0383df0cdc90d9`. Frame 180 is `fe93328f826a54bb` on a1, a2, both parallel instances, and the stall run. Row d is still unrecorded.
+
 ## Manual check
 
 A normal launch, with none of the variables above set, should look and pace the way it does today. Sound stays on unless `XBE_MUTE` is set.
@@ -156,6 +160,8 @@ A normal launch, with none of the variables above set, should look and pace the 
 To record the gameplay row with one controller, quit any Ring Host already open. Plug that pad in and leave the other ports empty. Do not set `FUZION_PORT2_KEYS` or `FUZION_PORT2_MASH`. The pad takes port 1. Ports 2–4 record as disconnected, and the title fills those seats with AI. The keyboard map still merges into port 1 while the new flag is unset, so leave the keyboard alone during this recording or those keys are part of port 1. One Start/A on the pad is enough to join; the match does not wait for a second connected port.
 
 A wired Xbox Series pad on macOS is opened through GameController. Apple's XboxGamepad driver owns USB id 045e:0b12, and SDL reports that pad as `driver=mfi` with an empty path. The product id in the log is `0b13`, SDL's stand-in for a Series pad with a Share button, and `connection=unknown`. The port line follows the hint line by about 150 ms; until then the log can say `no gamepads yet`. A pad Apple's driver does not claim still uses HIDAPI. `driver=libusb` is that path. `driver=iohid` (`DevSrvsID:`) is an IOHID pad. The build links libusb and does not load a kernel extension. If configure stops because libusb is missing, `brew install libusb` and rebuild. The first button or a hard stick move on that pad prints one `first report` line.
+
+The parent directory of those two paths is created when the run starts. `../../../det-logs` is the repo's `det-logs/` only when the shell is already in `out/build/macos-release`. Rebuild `RingHost` before recording. A binary from before the present yield plays the intro and then never runs the background loader, so the menus stay empty. Leave `FUZION_AUTOSTART` unset. Those presses would be written into the pads file. Fixed step stays on so the file can be replayed.
 
 ```
 cd out/build/macos-release
@@ -206,9 +212,8 @@ The menus and the minigames should follow the recording with the controllers ign
 
 ## Still wall-clock, even when the idle rows match
 
-- `Wait` timeouts.
 - A `srand` after image load replaces `--seed`. The seed column shows it. Fixed time keeps a clock-seeded `srand` stable across runs.
-- A host thread that writes guest RAM without taking the turn (an IO status block, a GPU fence). The 240-frame stall row matched, so that did not show up on the idle replay. An earlier 8-frame stall differed once at frame 0 in `user_0` only, and the raw dumps were identical; it did not repeat.
+- A host thread that writes guest RAM without taking the turn (an IO status block). Fixed step finishes a GPU batch before the guest continues, so a fence readback is not sampled on the host clock. The 240-frame stall row matched. An earlier 8-frame stall differed once at frame 0 in `user_0` only, and the raw dumps were identical; it did not repeat.
 - Stacks are not hashed, so a value that only ever lived in a spill is invisible.
 - GPU pixels are not hashed, so a render-only divergence does not fail a row. That is deliberate.
 
@@ -221,6 +226,7 @@ Upstream already builds those hosts. `build.bat` is the native Windows build. `c
 - `patches/sdk-lockstep.patch` — bundled math, codegen, CRT, mixer, CPU vertex math, and the host rounding mode. Marker: `XBE_LOCKSTEP_FP`.
 - `patches/sdk-lockstep-memory.patch` — zero a freshly committed page on Linux and Windows.
 - `patches/sdk-lockstep-memory-apple.patch` — the same zeroing for the Darwin commit path.
+- `patches/sdk-lockstep-load-yield.patch` — each present yields the guest turn, object-wait timeouts follow sim ticks, and a fixed-step GPU submit finishes before the guest continues. Marker: `XBE_LOAD_YIELD`. `tools/apply-lockstep.cmake` applies it after `patches/sdk-lockstep-harness.patch` when `determinism.cpp` is already in the tree.
 
 `tools/apply-lockstep.cmake` picks the memory patch from whether `HostProtect` is already in the tree, and it does nothing if the marker is already present. Do not fold these hunks back into the Apple patch. A full `git -C sdk diff` would.
 

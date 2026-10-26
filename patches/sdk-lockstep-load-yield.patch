@@ -1,0 +1,959 @@
+diff --git a/runtime/core/determinism.cpp b/runtime/core/determinism.cpp
+--- a/runtime/core/determinism.cpp
++++ b/runtime/core/determinism.cpp
+@@ -2,7 +2,6 @@
+ // Off unless a flag or env var is set. See docs/netplay-determinism.md.
+ // XBE_LOCKSTEP_HARNESS
+ #include "core/determinism.h"
+-
+ #include "core/input.h"
+ #include "core/log.h"
+ #include "kernel/kernel.h"
+@@ -16,6 +15,7 @@
+ #include <cstdio>
+ #include <cstdlib>
+ #include <cstring>
++#include <filesystem>
+ #include <fstream>
+ #include <mutex>
+ #include <string>
+@@ -195,6 +195,14 @@ bool g_replay_held = false;
+ uint32_t g_rng_va = 0;
+ FILE* g_state = nullptr;
+ bool g_state_header = false;
++bool g_state_failed = false;
++
++void EnsureParentDir(const char* path) {
++    if (!path || !path[0]) return;
++    std::error_code ec;
++    std::filesystem::path parent = std::filesystem::path(path).parent_path();
++    if (!parent.empty()) std::filesystem::create_directories(parent, ec);
++}
+ 
+ uint64_t Mix(uint64_t h, uint64_t v) { return (h ^ v) * kHashPrime; }
+ 
+@@ -359,6 +367,7 @@ void WritePads(uint64_t frame) {
+     static bool opened = false;
+     if (!opened) {
+         opened = true;
++        EnsureParentDir(C().record);
+         f = std::fopen(C().record, "w");
+         if (!f) {
+             LOGE("det: cannot write %s", C().record);
+@@ -394,9 +403,11 @@ uint32_t RngNow() {
+ }
+ 
+ void OpenState() {
+-    if (g_state || !C().state_log) return;
++    if (g_state || g_state_failed || !C().state_log) return;
++    EnsureParentDir(C().state_log);
+     g_state = std::fopen(C().state_log, "w");
+     if (!g_state) {
++        g_state_failed = true;
+         LOGE("det: cannot write %s", C().state_log);
+         return;
+     }
+@@ -818,28 +829,333 @@ void Consume100ns(uint64_t hundred_ns) {
+ void NotePacer() { t_pacer = true; }
+ bool OnPacer() { return t_pacer; }
+ 
++bool g_logged_grant = false;
++bool g_logged_due = false;
++int g_pacer_waiting = 0;  // under g_time_mu. Presenter is inside a kernel wait.
++
++// A non-presenter delay registers its deadline before it drops the turn.
++// g_waking counts threads that have left that wait (or not entered it yet) and
++// have not taken the turn again. Both sit under g_time_mu. The present yield
++// will not resume the title while a registered deadline is already due or
++// g_waking is non-zero. XBE_LOAD_YIELD.
++struct DeadlineEnt {
++    uint64_t token;
++    uint64_t deadline;
++};
++std::vector<DeadlineEnt> g_deadlines;
++uint64_t g_deadline_seq = 1;
++int g_waking = 0;
++thread_local uint64_t t_deadline_token = 0;
++thread_local uint64_t t_deadline_ticks = 0;
++thread_local bool t_waking = false;
++
++void PublishSched();
++extern thread_local bool t_guest_hold;
++
++void RegisterDeadlineLocked(uint64_t ticks) {
++    t_deadline_ticks = g_time.load(std::memory_order_relaxed) + ticks;
++    t_deadline_token = g_deadline_seq++;
++    if (!t_deadline_token) t_deadline_token = g_deadline_seq++;
++    g_deadlines.push_back({t_deadline_token, t_deadline_ticks});
++}
++
++void EraseDeadlineLocked() {
++    if (!t_deadline_token) return;
++    for (auto it = g_deadlines.begin(); it != g_deadlines.end(); ++it) {
++        if (it->token == t_deadline_token) {
++            g_deadlines.erase(it);
++            break;
++        }
++    }
++    t_deadline_token = 0;
++    t_deadline_ticks = 0;
++}
++
++bool AnyDueLocked() {
++    uint64_t now = g_time.load(std::memory_order_relaxed);
++    for (const DeadlineEnt& ent : g_deadlines)
++        if (ent.deadline <= now) return true;
++    return false;
++}
++
++void BeginDelay(uint64_t ticks) {
++    if (!FixedStep() || !t_guest_hold) return;
++    if (!ticks) ticks = 1;
++    if (t_waking || t_deadline_token) return;
++    {
++        std::lock_guard<std::mutex> lock(g_time_mu);
++        RegisterDeadlineLocked(ticks);
++        t_waking = true;
++        g_waking++;
++    }
++    PublishSched();
++}
++
++std::atomic<uint64_t> g_kick{0};
++bool g_logged_park = false;
++
++// A thread asleep on the sim clock. seen is the kick value it has acknowledged.
++// The present yield does not resume the title while a sleeper's seen is behind
++// g_kick: that thread was notified and has not gone back to sleep or run yet.
++struct TimeSleeper {
++    uint64_t seen = 0;
++    bool asleep = false;
++    bool registered = false;
++    ~TimeSleeper();
++};
++thread_local TimeSleeper t_sl;
++std::vector<TimeSleeper*> g_sleepers;
++
++TimeSleeper::~TimeSleeper() {
++    if (!registered) return;
++    std::lock_guard<std::mutex> lock(g_time_mu);
++    g_sleepers.erase(std::remove(g_sleepers.begin(), g_sleepers.end(), this), g_sleepers.end());
++    registered = false;
++    asleep = false;
++}
++
++void EnsureSleeperLocked() {
++    if (t_sl.registered) return;
++    g_sleepers.push_back(&t_sl);
++    t_sl.registered = true;
++}
++
++int UnackedKicksLocked() {
++    uint64_t kick = g_kick.load(std::memory_order_relaxed);
++    int n = 0;
++    for (TimeSleeper* s : g_sleepers)
++        if (s->asleep && s->seen != kick) n++;
++    return n;
++}
++
++uint64_t SimTick() { return g_time.load(std::memory_order_relaxed); }
++
++uint64_t TimeoutTick(int64_t due) {
++    uint64_t now_tick = g_time.load(std::memory_order_relaxed);
++    uint64_t span = 0;
++    if (due < 0) {
++        span = due == INT64_MIN ? ~0ull : uint64_t(-due);
++    } else {
++        uint64_t now_sys = kEpoch100ns + now_tick * kInterruptPerFrame;
++        if (uint64_t(due) <= now_sys) return now_tick;
++        span = uint64_t(due) - now_sys;
++    }
++    if (!span) return now_tick;
++    uint64_t ticks = span / kInterruptPerFrame;
++    if (!ticks) ticks = 1;
++    if (ticks > ~1ull - now_tick) return ~1ull;
++    return now_tick + ticks;
++}
++
++void KickTimeWaiters() {
++    std::lock_guard<std::mutex> lock(g_time_mu);
++    g_kick.fetch_add(1, std::memory_order_relaxed);
++    g_time_cv.notify_all();
++}
++
++void ArmWait(uint64_t deadline_tick) {
++    if (!FixedStep() || !t_guest_hold) return;
++    if (t_waking || t_deadline_token) return;
++    {
++        std::lock_guard<std::mutex> lock(g_time_mu);
++        if (deadline_tick != ~0ull) {
++            t_deadline_ticks = deadline_tick;
++            t_deadline_token = g_deadline_seq++;
++            if (!t_deadline_token) t_deadline_token = g_deadline_seq++;
++            g_deadlines.push_back({t_deadline_token, t_deadline_ticks});
++        }
++        t_waking = true;
++        g_waking++;
++    }
++    if (!g_logged_park) {
++        g_logged_park = true;
++        LOGR("det: an object wait follows sim ticks instead of the wall clock");
++    }
++    PublishSched();
++}
++
++void Park() {
++    std::unique_lock<std::mutex> lock(g_time_mu);
++    EnsureSleeperLocked();
++    bool finite = t_deadline_token != 0;
++    uint64_t deadline = t_deadline_ticks;
++    for (;;) {
++        uint64_t now = g_time.load(std::memory_order_relaxed);
++        if (finite && now >= deadline) break;
++        // The presenter is blocked in its own kernel wait, so presents are not
++        // stepping the clock. Grant this deadline. The presenter's own wait does
++        // not come through here with a deadline, or it would grant itself.
++        if (finite && g_pacer_waiting) {
++            if (now < deadline) AdvanceTicksLocked(deadline - now);
++            break;
++        }
++        uint64_t kick = g_kick.load(std::memory_order_relaxed);
++        // Asleep before g_waking drops, so a yield cannot observe neither.
++        t_sl.seen = kick;
++        t_sl.asleep = true;
++        if (t_waking) {
++            t_waking = false;
++            if (g_waking > 0) g_waking--;
++            lock.unlock();
++            PublishSched();
++            lock.lock();
++            now = g_time.load(std::memory_order_relaxed);
++            if (finite && now >= deadline) break;
++            if (g_kick.load(std::memory_order_relaxed) != kick) break;
++        }
++        g_time_cv.wait(lock, [&] {
++            uint64_t t = g_time.load(std::memory_order_relaxed);
++            return g_kick.load(std::memory_order_relaxed) != kick || (finite && (t >= deadline || g_pacer_waiting != 0));
++        });
++        if (g_kick.load(std::memory_order_relaxed) != kick) break;
++    }
++    t_sl.asleep = false;
++    t_sl.seen = g_kick.load(std::memory_order_relaxed);
++    EraseDeadlineLocked();
++    if (!t_waking) {
++        t_waking = true;
++        g_waking++;
++    }
++    lock.unlock();
++    PublishSched();
++}
++
++void AdvanceToTick(uint64_t tick) {
++    std::lock_guard<std::mutex> lock(g_time_mu);
++    uint64_t now = g_time.load(std::memory_order_relaxed);
++    if (tick > now) AdvanceTicksLocked(tick - now);
++}
++
+ void WaitTicks(uint64_t ticks) {
+     if (!ticks) ticks = 1;
+     std::unique_lock<std::mutex> lock(g_time_mu);
+-    uint64_t deadline = g_time.load(std::memory_order_relaxed) + ticks;
+-    g_time_cv.wait(lock, [&] { return g_time.load(std::memory_order_relaxed) >= deadline; });
++    EnsureSleeperLocked();
++    if (!t_deadline_token) RegisterDeadlineLocked(ticks);
++    bool granted = false;
++    while (g_time.load(std::memory_order_relaxed) < t_deadline_ticks) {
++        // The presenter is blocked in a kernel wait, so presents are not
++        // stepping the clock. Grant the rest of this delay. A Sleep on the
++        // loader then returns and can signal the presenter. A present yield
++        // does not set this flag: granting there would let a poll never block.
++        if (g_pacer_waiting) {
++            AdvanceTicksLocked(t_deadline_ticks - g_time.load(std::memory_order_relaxed));
++            granted = true;
++            break;
++        }
++        uint64_t kick = g_kick.load(std::memory_order_relaxed);
++        t_sl.seen = kick;
++        t_sl.asleep = true;
++        if (t_waking) {
++            // The deadline is still ahead. Leave the in-transit count so the
++            // yield can resume the title, then recheck before sleeping.
++            t_waking = false;
++            if (g_waking > 0) g_waking--;
++            lock.unlock();
++            PublishSched();
++            lock.lock();
++            if (g_time.load(std::memory_order_relaxed) >= t_deadline_ticks || g_pacer_waiting) continue;
++            if (g_kick.load(std::memory_order_relaxed) != kick) {
++                t_sl.asleep = false;
++                t_sl.seen = g_kick.load(std::memory_order_relaxed);
++                continue;
++            }
++        }
++        g_time_cv.wait(lock, [&] {
++            return g_time.load(std::memory_order_relaxed) >= t_deadline_ticks || g_pacer_waiting != 0 ||
++                   g_kick.load(std::memory_order_relaxed) != kick;
++        });
++        // A kick is not this delay ending. Acknowledge it and keep waiting,
++        // or the present yield stays in the kick forever.
++        if (g_kick.load(std::memory_order_relaxed) != kick && g_time.load(std::memory_order_relaxed) < t_deadline_ticks &&
++            !g_pacer_waiting) {
++            t_sl.asleep = false;
++            t_sl.seen = g_kick.load(std::memory_order_relaxed);
++            lock.unlock();
++            PublishSched();
++            lock.lock();
++        }
++    }
++    t_sl.asleep = false;
++    t_sl.seen = g_kick.load(std::memory_order_relaxed);
++    EraseDeadlineLocked();
++    if (!t_waking) {
++        t_waking = true;
++        g_waking++;
++    }
++    bool tell = false;
++    if (granted && !g_logged_grant) {
++        g_logged_grant = true;
++        tell = true;
++    }
++    lock.unlock();
++    PublishSched();
++    if (tell) LOGR("det: presenter is inside a wait, so a guest delay advances virtual time");
++}
++
++void SetPacerWaiting(bool waiting) {
++    if (!t_pacer) return;
++    std::lock_guard<std::mutex> lock(g_time_mu);
++    g_pacer_waiting = waiting ? 1 : 0;
++    if (waiting) g_time_cv.notify_all();
+ }
+ 
+ uint64_t WholeTicks(uint64_t hundred_ns) { return hundred_ns / kInterruptPerFrame; }
+ 
+-// One thread holds the turn (g_busy). Waiters queue on g_waiting. A yield clears the turn
+-// and waits until every other thread has gone back to a kernel wait, and until alertable
+-// APCs queued while a thread was waiting have been popped. Ticket numbers are not used:
+-// a counter that moves past a waiter leaves both threads blocked in UnblockGuest.
++// One thread holds the turn (g_busy). Waiters are served in the order they blocked.
++// The ticket is taken while the thread still holds the turn, so a later wake-up
++// cannot reorder them. A thread that is parked is not waiting, and its ticket
++// does not block anyone else. A single "now serving" counter is not used: a
++// ticket whose thread stays parked would leave every later thread stuck.
++struct SchedWait {
++    uint64_t ticket = 0;
++    bool waiting = false;
++    bool has_ticket = false;
++    bool registered = false;
++    ~SchedWait();
++};
++thread_local SchedWait t_sw;
++std::vector<SchedWait*> g_sw;
++uint64_t g_next_ticket = 1;
++
++void EnsureSchedLocked() {
++    if (t_sw.registered) return;
++    g_sw.push_back(&t_sw);
++    t_sw.registered = true;
++}
++
++bool LowestTicketLocked() {
++    for (SchedWait* other : g_sw) {
++        if (other == &t_sw || !other->waiting || !other->has_ticket) continue;
++        if (other->ticket < t_sw.ticket) return false;
++        if (other->ticket == t_sw.ticket && other < &t_sw) return false;
++    }
++    return true;
++}
++
+ std::mutex g_sched_mu;
+ std::condition_variable g_sched_cv;
+ int g_busy = 0;
+ int g_waiting = 0;
++uint64_t g_sched_epoch = 0;  // under g_sched_mu. Bumped when g_waking changes.
+ std::atomic<int> g_deliverable{0};
+ std::atomic<uint64_t> g_handoffs{0};
++
++SchedWait::~SchedWait() {
++    if (!registered) return;
++    std::lock_guard<std::mutex> lock(g_sched_mu);
++    g_sw.erase(std::remove(g_sw.begin(), g_sw.end(), this), g_sw.end());
++    registered = false;
++}
++
++void PublishSched() {
++    std::lock_guard<std::mutex> lock(g_sched_mu);
++    g_sched_epoch++;
++    g_sched_cv.notify_all();
++}
+ thread_local int t_guest_depth = 0;
+ thread_local bool t_guest_hold = false;
+ bool g_logged_yield = false;
++bool g_logged_load_yield = false;
+ 
+ void NoteDeliverable(int delta) {
+     if (!delta || !FixedStep()) return;
+@@ -849,13 +1165,21 @@ void NoteDeliverable(int delta) {
+ 
+ void AcquireTurn() {
+     std::unique_lock<std::mutex> lock(g_sched_mu);
+-    if (g_busy) {
++    EnsureSchedLocked();
++    if (!t_sw.has_ticket) {
++        t_sw.ticket = g_next_ticket++;
++        t_sw.has_ticket = true;
++    }
++    if (g_busy || !LowestTicketLocked()) {
++        t_sw.waiting = true;
+         g_waiting++;
+-        g_sched_cv.wait(lock, [] { return g_busy == 0; });
++        g_sched_cv.wait(lock, [] { return g_busy == 0 && LowestTicketLocked(); });
+         g_waiting--;
++        t_sw.waiting = false;
+     }
+     g_busy = 1;
+     t_guest_hold = true;
++    t_sw.has_ticket = false;
+ }
+ 
+ void ReleaseTurn() {
+@@ -867,6 +1191,20 @@ void ReleaseTurn() {
+     g_sched_cv.notify_all();
+ }
+ 
++uint64_t ReserveTicket() {
++    if (!FixedStep()) return 0;
++    std::lock_guard<std::mutex> lock(g_sched_mu);
++    return g_next_ticket++;
++}
++
++void ClaimTicket(uint64_t ticket) {
++    if (!FixedStep() || !ticket) return;
++    std::lock_guard<std::mutex> lock(g_sched_mu);
++    EnsureSchedLocked();
++    t_sw.ticket = ticket;
++    t_sw.has_ticket = true;
++}
++
+ void EnterGuest() {
+     if (!FixedStep()) return;
+     if (t_guest_depth++ > 0) return;
+@@ -882,17 +1220,62 @@ void LeaveGuest() {
+ 
+ void BlockGuest() {
+     if (!FixedStep() || !t_guest_hold) return;
++    SetPacerWaiting(true);
++    {
++        std::lock_guard<std::mutex> lock(g_sched_mu);
++        EnsureSchedLocked();
++        t_sw.ticket = g_next_ticket++;
++        t_sw.has_ticket = true;
++    }
+     ReleaseTurn();
+ }
+ 
+ void UnblockGuest() {
+     if (!FixedStep() || t_guest_depth == 0 || t_guest_hold) return;
+     AcquireTurn();
++    if (t_waking) {
++        {
++            std::lock_guard<std::mutex> lock(g_time_mu);
++            t_waking = false;
++            if (g_waking > 0) g_waking--;
++        }
++        PublishSched();
++    }
++    SetPacerWaiting(false);
+ }
+ 
+ void AbandonGuest() {
+     if (!FixedStep() || t_guest_depth == 0) return;
+     t_guest_depth = 0;
++    bool wake = false;
++    {
++        std::lock_guard<std::mutex> lock(g_time_mu);
++        if (t_deadline_token) EraseDeadlineLocked();
++        if (t_waking) {
++            t_waking = false;
++            if (g_waking > 0) g_waking--;
++            wake = true;
++        }
++        if (t_sl.asleep || t_sl.registered) {
++            t_sl.asleep = false;
++            t_sl.seen = g_kick.load(std::memory_order_relaxed);
++            if (t_sl.registered) {
++                g_sleepers.erase(std::remove(g_sleepers.begin(), g_sleepers.end(), &t_sl), g_sleepers.end());
++                t_sl.registered = false;
++            }
++            wake = true;
++        }
++    }
++    if (wake) PublishSched();
++    {
++        std::lock_guard<std::mutex> lock(g_sched_mu);
++        t_sw.waiting = false;
++        t_sw.has_ticket = false;
++        if (t_sw.registered) {
++            g_sw.erase(std::remove(g_sw.begin(), g_sw.end(), &t_sw), g_sw.end());
++            t_sw.registered = false;
++        }
++    }
+     if (!t_guest_hold) return;
+     LOGR("det: a guest thread exited while it held the turn; the turn is released");
+     ReleaseTurn();
+@@ -908,12 +1291,46 @@ void YieldGuest() {
+     t_guest_hold = false;
+     g_busy = 0;
+     g_sched_cv.notify_all();
++    // SignalChanged kicks object waits, and that kick takes the time lock.
++    // Drop the scheduler lock first. WaitTicks holds the time lock and then
++    // this one.
++    lock.unlock();
+     kernel::SignalChanged();
++    lock.lock();
+     // While an alertable APC is still queued, g_deliverable stays above zero, so the
+-    // loader claims g_busy and pops it before this wait can return.
+-    g_sched_cv.wait(lock, [] {
+-        return g_busy == 0 && g_waiting == 0 && g_deliverable.load(std::memory_order_acquire) == 0;
+-    });
++    // loader claims g_busy and pops it before this wait can return. A delay whose
++    // deadline is already due, or a thread between that delay and AcquireTurn, is
++    // also still work: g_waking and the deadline list live under g_time_mu, and
++    // this loop does not hold g_sched_mu across that lock.
++    while (true) {
++        g_sched_cv.wait(lock, [] {
++            return g_busy == 0 && g_waiting == 0 && g_deliverable.load(std::memory_order_acquire) == 0;
++        });
++        uint64_t epoch = g_sched_epoch;
++        lock.unlock();
++        bool due = false;
++        int waking = 0;
++        int unacked = 0;
++        {
++            std::lock_guard<std::mutex> tlock(g_time_mu);
++            due = AnyDueLocked();
++            waking = g_waking;
++            unacked = UnackedKicksLocked();
++            if (due || unacked) g_time_cv.notify_all();
++        }
++        if (due && !g_logged_due) {
++            g_logged_due = true;
++            LOGR("det: a guest delay that is already due runs before the present continues");
++        }
++        lock.lock();
++        bool idle = g_busy == 0 && g_waiting == 0 && g_deliverable.load(std::memory_order_acquire) == 0;
++        if (!due && waking == 0 && unacked == 0 && idle && g_sched_epoch == epoch) break;
++        // The sample said a due delay was still outstanding, or a kicked waiter
++        // has not acknowledged yet. Sleep until that thread publishes, instead
++        // of spinning. A publish bumps the epoch under this mutex, so a change
++        // that landed before the wait is visible and this does not sleep through it.
++        if ((due || waking != 0 || unacked != 0) && idle && g_sched_epoch == epoch) g_sched_cv.wait(lock);
++    }
+     g_busy = 1;
+     t_guest_hold = true;
+ }
+@@ -1045,7 +1462,20 @@ void OnPresented(X86Context& ctx) {
+     if (c.fixed) {
+         std::lock_guard<std::mutex> lock(g_time_mu);
+         AdvanceTicksLocked(1);
+-        d3d::BumpVblank();
++    }
++    // BumpVblank signals the vblank event. That kick takes g_time_mu, so it
++    // stays outside the lock above.
++    if (c.fixed) d3d::BumpVblank();
++    // XBE_LOAD_YIELD: the title thread holds the guest turn from boot. A frame
++    // that never calls KeDelay never lets the loader run, so the picture keeps
++    // presenting and the load never finishes. Yield after the clock steps.
++    // g_in_present stays set so a nested present does not step the clock again.
++    if (c.fixed) {
++        if (!g_logged_load_yield) {
++            g_logged_load_yield = true;
++            LOGR("det: each present yields the guest turn so a background load can run");
++        }
++        YieldGuest();
+     }
+     g_in_present = false;
+     if (c.frames && next >= c.frames) {
+diff --git a/runtime/core/determinism.h b/runtime/core/determinism.h
+--- a/runtime/core/determinism.h
++++ b/runtime/core/determinism.h
+@@ -49,7 +49,20 @@ void Consume100ns(uint64_t hundred_ns);
+ void NotePacer();
+ bool OnPacer();
+ void WaitTicks(uint64_t ticks);
++// Call while this thread still holds the turn, before BlockGuest. Registers the
++// deadline and marks the thread in transit so a present yield cannot return
++// until the delay is waiting on a future tick or the thread has blocked again.
++void BeginDelay(uint64_t ticks);
+ uint64_t WholeTicks(uint64_t hundred_ns);
++// Sim tick and object waits. A guest timeout becomes an absolute sim tick.
++// ArmWait while the turn is held, then BlockGuest, then Park. Park returns when
++// that tick arrives or a dispatcher signal kicks. UINT64_MAX waits only for a kick.
++uint64_t SimTick();
++uint64_t TimeoutTick(int64_t due_100ns);
++void ArmWait(uint64_t deadline_tick);
++void Park();
++void AdvanceToTick(uint64_t tick);
++void KickTimeWaiters();
+ 
+ // One guest thread runs at a time while fixed-step is on. Enter/Leave wrap a guest call.
+ // Block/Unblock drop the turn across a kernel wait. Yield runs every thread that is
+@@ -60,6 +73,10 @@ void LeaveGuest();
+ void BlockGuest();
+ void UnblockGuest();
+ void YieldGuest();
++// Taken while the creator still holds the turn, then claimed on the new thread
++// before its first guest call. The new thread's place in line is fixed then.
++uint64_t ReserveTicket();
++void ClaimTicket(uint64_t ticket);
+ // PsTerminateSystemThread ends in pthread_exit, which does not run the CallGuest
+ // destructor. Drop the turn first. Leaving it set blocks every other thread in UnblockGuest.
+ void AbandonGuest();
+diff --git a/runtime/kernel/objects.cpp b/runtime/kernel/objects.cpp
+--- a/runtime/kernel/objects.cpp
++++ b/runtime/kernel/objects.cpp
+@@ -33,7 +33,10 @@ std::unordered_map<std::string, std::weak_ptr<Object>> g_names;
+ }  // namespace
+ 
+ std::mutex& DispatchLock() { return g_dispatch; }
+-void SignalChanged() { g_cv.notify_all(); }
++void SignalChanged() {
++    g_cv.notify_all();
++    if (det::FixedStep()) det::KickTimeWaiters();
++}
+ 
+ uint32_t NewHandle(ObjectRef obj) {
+     std::lock_guard<std::mutex> lock(g_handles_lock);
+@@ -226,7 +229,66 @@ int64_t ToDeadline(int64_t due) {
+     return AddSpan100(now, due - Now100ns());
+ }
+ 
++static uint32_t WaitForFixed(const std::vector<ObjectRef>& objs, bool wait_all, int64_t timeout, bool alertable) {
++    Thread* self = Current();
++    uint32_t me = Me();
++    bool infinite = timeout == INT64_MAX;
++    // One absolute sim tick for the whole wait. Recomputing a relative timeout
++    // on every wake would stretch it.
++    uint64_t deadline = infinite ? 0 : det::TimeoutTick(timeout);
++    std::unique_lock<std::mutex> lock(g_dispatch);
++    for (;;) {
++        if (wait_all) {
++            bool all = std::all_of(objs.begin(), objs.end(), [&](const ObjectRef& o) { return o && Satisfied(*o, me); });
++            if (all) {
++                for (auto& o : objs) Consume(*o, me);
++                return kWait0;
++            }
++        } else {
++            for (size_t i = 0; i < objs.size(); i++)
++                if (objs[i] && Satisfied(*objs[i], me)) {
++                    Consume(*objs[i], me);
++                    return kWait0 + uint32_t(i);
++                }
++        }
++        if (alertable && self) {
++            bool pending;
++            {
++                std::lock_guard<std::mutex> al(self->apc_lock);
++                pending = !self->apcs.empty();
++            }
++            if (pending) {
++                lock.unlock();
++                RunApcs(*self);
++                return kUserApc;
++            }
++        }
++        if (!infinite && det::SimTick() >= deadline) return kTimeout;
++        // The presenter consumes a finite timeout in virtual time, then yields
++        // so a loader whose own delay just came due can signal this wait.
++        // An infinite presenter wait parks until that signal. It does not poll
++        // the wall clock.
++        if (det::OnPacer() && !infinite) {
++            lock.unlock();
++            det::YieldGuest();
++            det::AdvanceToTick(deadline);
++            det::YieldGuest();
++            lock.lock();
++            continue;
++        }
++        if (alertable && self) SetAlertable(true);
++        det::ArmWait(infinite ? ~0ull : deadline);
++        det::BlockGuest();
++        lock.unlock();
++        det::Park();
++        if (alertable && self) SetAlertable(false);
++        det::UnblockGuest();
++        lock.lock();
++    }
++}
++
+ static uint32_t WaitFor(const std::vector<ObjectRef>& objs, bool wait_all, int64_t timeout, bool alertable) {
++    if (det::FixedStep()) return WaitForFixed(objs, wait_all, timeout, alertable);
+     using namespace std::chrono;
+     Thread* self = Current();
+     uint32_t me = Me();
+@@ -293,7 +355,7 @@ int32_t SetEvent(Object& o) {
+     std::lock_guard<std::mutex> lock(g_dispatch);
+     int32_t old = o.signal;
+     SetSignal(o, 1);
+-    g_cv.notify_all();
++    SignalChanged();
+     return old;
+ }
+ 
+@@ -309,7 +371,7 @@ int32_t PulseEvent(Object& o) {
+     std::lock_guard<std::mutex> lock(g_dispatch);
+     int32_t old = o.signal;
+     SetSignal(o, 1);
+-    g_cv.notify_all();
++    SignalChanged();
+     return old;
+ }
+ 
+@@ -322,7 +384,7 @@ int32_t ReleaseSemaphore(Object& o, int32_t count, uint32_t& status) {
+     }
+     SetSignal(o, old + count);
+     status = kSuccess;
+-    g_cv.notify_all();
++    SignalChanged();
+     return old;
+ }
+ 
+@@ -337,7 +399,7 @@ int32_t ReleaseMutant(Object& o, uint32_t& status) {
+     if (--o.recursion == 0) {
+         o.owner = 0;
+         SetSignal(o, 1);
+-        g_cv.notify_all();
++        SignalChanged();
+     }
+     status = kSuccess;
+     return old;
+@@ -426,7 +488,7 @@ static void TimerLoop() {
+         {
+             std::lock_guard<std::mutex> dl(g_dispatch);
+             SetSignal(*e.timer, 1);
+-            g_cv.notify_all();
++            SignalChanged();
+         }
+         if (e.dpc) QueueDpc(e.dpc, uint32_t(Now100ns()), uint32_t(Now100ns() >> 32));
+         if (auto t = e.apc_thread.lock(); t && e.apc_routine)
+@@ -484,7 +546,7 @@ void FireDueTimers(X86Context& ctx) {
+         {
+             std::lock_guard<std::mutex> dl(g_dispatch);
+             SetSignal(*e.timer, 1);
+-            g_cv.notify_all();
++            SignalChanged();
+         }
+         uint64_t now = det::SystemTime100ns();
+         if (e.dpc) {
+diff --git a/runtime/kernel/xboxkrnl.cpp b/runtime/kernel/xboxkrnl.cpp
+--- a/runtime/kernel/xboxkrnl.cpp
++++ b/runtime/kernel/xboxkrnl.cpp
+@@ -273,6 +273,7 @@ KERNEL_EXPORT(151, KeStallExecutionProcessor, 1) {
+     if (det::FixedStep()) {
+         if (det::OnPacer()) det::Consume100ns(uint64_t(a[0]) * 10ull);
+         else if (a[0]) {
++            det::BeginDelay(1);
+             det::BlockGuest();
+             det::WaitTicks(1);
+             det::UnblockGuest();
+@@ -301,9 +302,11 @@ KERNEL_EXPORT(99, KeDelayExecutionThread, 3) {
+             // PacerDelay yields the turn so that APC runs once, on every launch.
+             det::PacerDelay(hundred);
+         } else {
+-            det::BlockGuest();
+             uint64_t ticks = det::WholeTicks(hundred);
+-            det::WaitTicks(ticks ? ticks : 1);
++            if (!ticks) ticks = 1;
++            det::BeginDelay(ticks);
++            det::BlockGuest();
++            det::WaitTicks(ticks);
+             det::UnblockGuest();
+         }
+         return kSuccess;
+diff --git a/runtime/kernel/iocp.cpp b/runtime/kernel/iocp.cpp
+--- a/runtime/kernel/iocp.cpp
++++ b/runtime/kernel/iocp.cpp
+@@ -3,6 +3,7 @@
+ // as every other dispatcher object and wakes through SignalChanged.
+ #include <chrono>
+ 
++#include "core/determinism.h"
+ #include "kernel/exports.h"
+ 
+ namespace kernel {
+@@ -152,6 +153,11 @@ KERNEL_EXPORT(223, NtRemoveIoCompletion, 5) {
+             }
+         }
+         int64_t wait_arg = INT64_MAX;
++        if (det::FixedStep()) {
++            uint32_t r = Wait({port}, false, nt_timeout, false);
++            if (r == kTimeout) return kTimeout;
++            continue;
++        }
+         if (!infinite) {
+             int64_t remaining = deadline - now_ns();
+             if (remaining <= 0) return kTimeout;
+diff --git a/runtime/kernel/threads.cpp b/runtime/kernel/threads.cpp
+--- a/runtime/kernel/threads.cpp
++++ b/runtime/kernel/threads.cpp
+@@ -159,7 +159,9 @@ ThreadRef CreateThread(uint32_t stack_size, uint32_t tls_size, uint32_t system_r
+ 
+ void StartThread(ThreadRef t) {
+     Register(t);
+-    Spawn([t] {
++    uint64_t ticket = det::ReserveTicket();
++    Spawn([t, ticket] {
++        det::ClaimTicket(ticket);
+         t_current = t;
+         char name[32];
+         std::snprintf(name, sizeof(name), "guest %X", t->id);
+@@ -187,10 +189,14 @@ void StartThread(ThreadRef t) {
+             code = CallGuest(ctx, si.system_routine, {si.start_routine, si.start_context});
+         else
+             code = CallGuest(ctx, si.start_routine, {si.start_context});
++        // CallGuest has dropped the turn. Take it back so the exit writes are
++        // visible before the presenter hashes the next frame.
++        if (det::FixedStep()) det::EnterGuest();
+         LOGI("thread %X returned %08X", t->id, code);
+         MarkExited(*t, code);
+         Unregister(t.get());
+         t_current.reset();
++        if (det::FixedStep()) det::LeaveGuest();
+     });
+ }
+ 
+@@ -211,8 +217,9 @@ void StartHostThread(const char* name, std::function<void(X86Context&)> fn) {
+ }
+ 
+ void ExitThread(uint32_t code) {
+-    // pthread_exit does not unwind CallGuest, so the turn would stay taken.
+-    det::AbandonGuest();
++    // pthread_exit does not unwind CallGuest, so this thread still holds the
++    // turn. Write the guest-visible exit state before releasing it. Doing it
++    // after the release races the presenter's next hash.
+     Thread* t = Current();
+     if (t) {
+         LOGI("thread %X exits with %08X", t->id, code);
+@@ -220,6 +227,7 @@ void ExitThread(uint32_t code) {
+         Unregister(t);
+     }
+     t_current.reset();
++    det::AbandonGuest();
+ #ifdef _WIN32
+     ::ExitThread(code);
+ #else
+diff --git a/runtime/gpu/render_thread.cpp b/runtime/gpu/render_thread.cpp
+--- a/runtime/gpu/render_thread.cpp
++++ b/runtime/gpu/render_thread.cpp
+@@ -31,6 +31,7 @@
+ #include <unordered_set>
+ #include <vector>
+ 
++#include "core/determinism.h"
+ #include "core/diag.h"
+ #include "core/log.h"
+ #include "gpu/backend.h"
+@@ -187,6 +188,7 @@ public:
+         Use(s.zs.header);
+         Written(s.rt);
+         if (cur_->cmds.size() >= kBatchCommands) Submit();
++        DrainFixed();
+         perf.Add(g_perf_capture_ns);
+     }
+ 
+@@ -208,6 +210,7 @@ public:
+         Use(s.rt.header);
+         Use(s.zs.header);
+         if (flags & kClearTarget) Written(s.rt);
++        DrainFixed();
+         perf.Add(g_perf_capture_ns);
+     }
+ 
+@@ -226,6 +229,7 @@ public:
+         Use(src.header);
+         Use(dst.header);
+         Written(dst);
++        DrainFixed();
+         perf.Add(g_perf_capture_ns);
+     }
+ 
+@@ -238,14 +242,18 @@ public:
+         Use(front.header);
+         uint64_t id = Submit();
+         perf.Add(g_perf_capture_ns);
+-        // the title records one frame while the one before it draws
+-        Wait(last_present_, WaitFor::Frame, nullptr);
++        // Fixed step already waited for this frame inside Submit. The overlap with the
++        // previous frame is wall-clock GPU progress, and a lock would sample it.
++        if (!det::FixedStep()) Wait(last_present_, WaitFor::Frame, nullptr);
+         last_present_ = id;
+     }
+ 
+     void Sync(uint32_t data, uint32_t size) override { ReadBack(data, false, size); }
+ 
+     void SyncLate(uint32_t data, uint32_t size) override {
++        // DeliverLate reports whatever fence has signalled. Under fixed step that is
++        // host time, so finish recorded work first and only then copy.
++        if (det::FixedStep()) DrainFixed();
+         if (!inner_->DeliverLate(data, size)) {
+             if (diag::Perf()) LOG_FIRST(16, "render thread: no finished copy of %08X for a NOOVERWRITE lock, reading it back now", data);
+             written_.insert(data);
+@@ -254,6 +262,7 @@ public:
+         Cmd c{Op::RecordLate};
+         c.a = data;
+         cur_->cmds.push_back(c);
++        DrainFixed();
+     }
+ 
+     void Flush() override {
+@@ -265,12 +274,20 @@ public:
+         Cmd c{Op::Gamma};
+         c.data = Put(ramp, 768);
+         cur_->cmds.push_back(c);
++        DrainFixed();
+     }
+ 
+-    uint32_t Fence() override { return uint32_t(cur_->id); }
++    uint32_t Fence() override {
++        if (det::FixedStep()) {
++            DrainFixed();
++            return uint32_t(done_.load());
++        }
++        return uint32_t(cur_->id);
++    }
+     bool FencePending(uint32_t fence) override { return fence > done_.load(); }
+     void WaitFence(uint32_t fence) override { Wait(fence, WaitFor::Fence, "fence"); }
+     bool Busy(uint32_t resource) override {
++        if (det::FixedStep()) DrainFixed();
+         auto it = last_use_.find(resource);
+         return it != last_use_.end() && it->second > done_.load();
+     }
+@@ -442,6 +459,13 @@ private:
+         if (s.header) written_.insert(mem::VirtualFromPhysical(s.data));
+     }
+ 
++    // Fixed step must not return to the guest while a batch is still drawing.
++    // A lock, IsBusy, or a fence would otherwise follow the GPU's wall clock.
++    void DrainFixed() {
++        if (!det::FixedStep() || cur_->cmds.empty()) return;
++        Submit();
++    }
++
+     uint64_t Submit() {
+         uint64_t id = cur_->id;
+         {
+@@ -450,6 +474,14 @@ private:
+         }
+         cv_.notify_one();
+         cur_ = NewBatch();
++        if (det::FixedStep()) {
++            static bool logged = false;
++            if (!logged) {
++                logged = true;
++                LOGR("det: fixed step finishes GPU work before the guest continues");
++            }
++            Wait(id, WaitFor::Flush, nullptr);
++        }
+         return id;
+     }
+ 

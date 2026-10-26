@@ -47,6 +47,21 @@ if(EXISTS "${SDK}/runtime/core/determinism.cpp")
     endif()
 endif()
 
+# Present yields so a background load runs under fixed step. Applies on top of
+# the harness. A tree with no determinism.cpp skips it.
+set(_load "${REPO}/patches/sdk-lockstep-load-yield.patch")
+if(EXISTS "${SDK}/runtime/core/determinism.cpp" AND EXISTS "${_load}")
+    file(READ "${SDK}/runtime/core/determinism.cpp" _load_src)
+    if(NOT _load_src MATCHES "XBE_LOAD_YIELD")
+        execute_process(COMMAND "${GIT_EXE}" -C "${SDK}" apply --whitespace=nowarn "${_load}"
+                        RESULT_VARIABLE _rc)
+        if(NOT _rc EQUAL 0)
+            message(FATAL_ERROR "patches/sdk-lockstep-load-yield.patch failed (${_rc})")
+        endif()
+        message(STATUS "applied patches/sdk-lockstep-load-yield.patch")
+    endif()
+endif()
+
 file(READ "${SDK}/runtime/kernel/memory.cpp" _mem)
 if(NOT _mem MATCHES "XBE_LOCKSTEP_COMMIT")
     if(_mem MATCHES "HostProtect")
