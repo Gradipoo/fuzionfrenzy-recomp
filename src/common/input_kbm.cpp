@@ -50,6 +50,7 @@
 #include <atomic>
 #include <chrono>
 #include <cmath>
+#include <cstdio>
 #include <cstdlib>
 #include <iterator>
 
@@ -229,6 +230,34 @@ float g_anchor_x = 0.0f, g_anchor_y = 0.0f;  // where the right button went down
 
 bool PlatformFocused() { return app::platform::HasFocus(); }
 
+// FUZION_KEYLOG=<path>: append one line each time a mapped key goes down or up.
+// The line is "<ms> DOWN|UP <token>" with the same token names FUZION_STEP reads,
+// so a play-through can be replayed. Unset: nothing is written.
+void NoteKeyLog(const State& state) {
+    static const char* path = std::getenv("FUZION_KEYLOG");
+    if (!path || !path[0]) return;
+    static const char* kName[] = {
+        "LSLEFT", "LSRIGHT", "LSDOWN", "LSUP", "CAMLEFT", "CAMRIGHT", "CAMOUT", "CAMIN",
+        "UP",     "DOWN",    "LEFT",   "RIGHT", "START",  "BACK",     "LTHUMB", "RTHUMB",
+        "A",      "B",       "X",      "Y",     "BLACK",  "WHITE",    "LT",     "RT",
+    };
+    static_assert(std::size(kName) == size_t(Key::Count));
+    static std::mutex mu;
+    static bool prev[size_t(Key::Count)]{};
+    static FILE* out = nullptr;
+    std::lock_guard lock(mu);
+    if (!out) {
+        out = std::fopen(path, "a");
+        if (!out) return;
+    }
+    for (size_t i = 0; i < size_t(Key::Count); i++) {
+        if (state.down[i] == prev[i]) continue;
+        prev[i] = state.down[i];
+        std::fprintf(out, "%lld %s %s\n", static_cast<long long>(NowMs()), state.down[i] ? "DOWN" : "UP", kName[i]);
+        std::fflush(out);
+    }
+}
+
 bool Collect(State& state) {
     const bool* keys = SDL_GetKeyboardState(nullptr);
     if (!keys) return false;
@@ -274,6 +303,7 @@ bool Collect(State& state) {
     state.mouse_y = y;
     state.anchor_x = g_anchor_x;
     state.anchor_y = g_anchor_y;
+    NoteKeyLog(state);
     return true;
 }
 
