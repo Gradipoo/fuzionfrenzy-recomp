@@ -3158,3 +3158,72 @@ index 3783383..5a4059e 100644
                  UpdatePorts();
              }
          }).detach();
+diff --git a/cmake/XbeRecomp.cmake b/cmake/XbeRecomp.cmake
+index 15638ea..43074e3 100644
+--- a/cmake/XbeRecomp.cmake
++++ b/cmake/XbeRecomp.cmake
+@@ -102,6 +102,13 @@ list(REMOVE_ITEM XBE_RUNTIME_SOURCES
+     ${XBE_SDK_DIR}/runtime/gpu/spirv.cpp
+     ${XBE_SDK_DIR}/runtime/audio/sdl_audio.cpp)
+ else()
++if(APPLE)
++    # Homebrew's prefix is not on CMake's default search path.
++    list(PREPEND CMAKE_PREFIX_PATH "/opt/homebrew" "/usr/local")
++    if(DEFINED ENV{VULKAN_SDK})
++        list(PREPEND CMAKE_PREFIX_PATH "$ENV{VULKAN_SDK}")
++    endif()
++endif()
+ # Win32-only sources out; the SDL/Vulkan counterparts in (globbed above,
+ # appended explicitly so the contract survives a stale glob)
+ list(REMOVE_ITEM XBE_RUNTIME_SOURCES
+@@ -124,11 +131,22 @@ find_package(ZLIB REQUIRED)  # runtime/app/image_decode.cpp: the splash PNG deco
+ # offered when found. XBE_SHADER_BACKEND makes one of them required instead of optional.
+ set(XBE_SHADER_BACKEND "" CACHE STRING "require a Vulkan shader compiler: dxc or glslang (empty: whatever is found)")
+ set_property(CACHE XBE_SHADER_BACKEND PROPERTY STRINGS dxc glslang)
+-find_path(XBE_DXC_INCLUDE dxc/dxcapi.h HINTS /opt/dxc/include)
+-find_library(XBE_GLSLANG glslang)
+-find_library(XBE_SPIRV SPIRV)
+-find_library(XBE_GLSLANG_RES glslang-default-resource-limits)
+-find_path(XBE_GLSLANG_INCLUDE glslang/Public/ShaderLang.h)
++set(_XBE_DXC_HINTS /opt/dxc/include)
++if(DEFINED ENV{VULKAN_SDK})
++    list(APPEND _XBE_DXC_HINTS "$ENV{VULKAN_SDK}/include")
++endif()
++find_path(XBE_DXC_INCLUDE dxc/dxcapi.h HINTS ${_XBE_DXC_HINTS})
++find_library(XBE_GLSLANG glslang HINTS /opt/homebrew/lib /usr/local/lib)
++find_library(XBE_SPIRV SPIRV HINTS /opt/homebrew/lib /usr/local/lib)
++find_library(XBE_GLSLANG_RES glslang-default-resource-limits HINTS /opt/homebrew/lib /usr/local/lib)
++find_path(XBE_GLSLANG_INCLUDE glslang/Public/ShaderLang.h HINTS /opt/homebrew/include /usr/local/include)
++# Ubuntu ships these as separate static archives. Homebrew's dylibs already
++# pull them in, so a miss here is fine.
++find_library(XBE_GLSLANG_MI MachineIndependent HINTS /opt/homebrew/lib /usr/local/lib)
++find_library(XBE_GLSLANG_OS OSDependent HINTS /opt/homebrew/lib /usr/local/lib)
++find_library(XBE_GLSLANG_GEN GenericCodeGen HINTS /opt/homebrew/lib /usr/local/lib)
++find_library(XBE_SPIRV_TOOLS_OPT SPIRV-Tools-opt HINTS /opt/homebrew/lib /usr/local/lib)
++find_library(XBE_SPIRV_TOOLS SPIRV-Tools HINTS /opt/homebrew/lib /usr/local/lib)
+ set(XBE_SHADER_LIBS "")
+ set(XBE_SHADER_DEFINES "")
+ set(XBE_SHADER_INCLUDES "")
+@@ -139,6 +157,11 @@ if(XBE_DXC_INCLUDE)
+ endif()
+ if(XBE_GLSLANG AND XBE_SPIRV AND XBE_GLSLANG_RES AND XBE_GLSLANG_INCLUDE)
+     list(APPEND XBE_SHADER_LIBS ${XBE_GLSLANG} ${XBE_SPIRV} ${XBE_GLSLANG_RES})
++    foreach(_xbe_shader_extra XBE_GLSLANG_MI XBE_GLSLANG_OS XBE_GLSLANG_GEN XBE_SPIRV_TOOLS_OPT XBE_SPIRV_TOOLS)
++        if(${_xbe_shader_extra})
++            list(APPEND XBE_SHADER_LIBS ${${_xbe_shader_extra}})
++        endif()
++    endforeach()
+     list(APPEND XBE_SHADER_INCLUDES ${XBE_GLSLANG_INCLUDE})
+     set(XBE_HAVE_GLSLANG_FOUND TRUE)
+ endif()
+@@ -212,6 +235,10 @@ function(add_xbe_image target xbe config partitions game_dir)
+         message(FATAL_ERROR "the recompiled image links with lld-link; CMAKE_LINKER is ${CMAKE_LINKER}")
+     endif()
+     target_link_options(${target} PRIVATE /DEBUG)
++    elseif(APPLE)
++    # Mach-O ld64 keeps a strong host definition over the recompiler's weak
++    # one. Apple clang rejects -fuse-ld=lld.
++    target_link_options(${target} PRIVATE -g)
+     else()
+     target_link_options(${target} PRIVATE -fuse-ld=lld -g)
+     endif()
