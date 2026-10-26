@@ -28,6 +28,12 @@ project(FuzionFrenzy LANGUAGES C CXX)
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
+# x86-64-v2 enables SSE4.1. render_thread checks __SSE4_1__. The preset used
+# to pass this flag to every Linux host, which arm64 clang rejects.
+if(UNIX AND NOT APPLE AND CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|AMD64|amd64")
+    add_compile_options(-march=x86-64-v2)
+endif()
+
 # the SDK: sdk/ here, a checkout beside this repository, else downloaded
 if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/sdk/cmake/XbeRecomp.cmake)
     set(SDK ${CMAKE_CURRENT_SOURCE_DIR}/sdk)

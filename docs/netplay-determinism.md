@@ -279,24 +279,29 @@ On 26 Oct 2026 (Pacific) the paced Mac `RingHost` replayed `det-logs/gameplay2.p
 
 GitHub CI does not run that comparison. The workflow builds the math digest, `det-diff.py --self-check`, the host tools, and the runtime against `tools/ci/stub_symbols.py`. It never checks out a disc image or a detlog. The real cross-check stays on this Mac.
 
-This Mac has no Docker, OrbStack, Lima, UTM, or QEMU installed, and the Homebrew Vulkan loader is arm64, so a Linux `FuzionFrenzy` cannot be linked on the host itself. The local path is a Linux VM or container whose disk never leaves the machine. Arm64 Linux first (native on this M3). x86_64 Linux second, under emulation, for correctness. Generated C, the XBE, pads, and detlogs stay in the VM's mount of this repo and are not committed or pushed.
+The Homebrew Vulkan loader is arm64, so a Linux `FuzionFrenzy` cannot be linked on the host itself. The local path is a Linux VM or container whose disk never leaves the machine. Arm64 Linux first (native on this M3). x86_64 Linux second, under emulation, for correctness. Generated C, the XBE, pads, and detlogs stay on the guest disk and are not committed or pushed. On 26 Oct 2026 (Pacific) Lima 2.2.1 was installed with Homebrew and an arm64 Ubuntu 26.04 guest was started as `ff-det` (`limactl start --name ff-det --cpus 6 --memory 8 template:ubuntu`).
 
 Install one of these, then the packages inside the guest:
 
 - OrbStack, Lima, or Docker Desktop. A Lima VM is `brew install lima` and `limactl start`.
 - In the guest: `clang`, `cmake`, `ninja`, `python3`, `pkg-config`, `zlib1g-dev`, `libvulkan-dev`, `glslang-dev`, `mesa-vulkan-drivers`, `xvfb`, and the X11 headers SDL's CMake fetch needs (`libx11-dev`, `libxext-dev`, `libxrandr-dev`, `libxcursor-dev`, `libxi-dev`).
 
-From the repo root inside the guest, with `assets/default.xbe` visible only because the repo is mounted:
+Lima's Ubuntu template mounts the home directory read-only. Configure writes the lockstep patch into `sdk/` and the recompiled guest into `out/`, so copy the tree onto the guest disk first. A writable mount is the other way. Either copy stays on this Mac.
 
 ```
+# Lima mounts the Mac home read-only at the same path. $HOME is the guest disk.
+rsync -a --copy-links --exclude out \
+  /Users/gsrvm3/Documents/projects/ff-linux-det/ "$HOME/ff-src/"
+cd "$HOME/ff-src"
 ./build.sh
 # lavapipe is the software Vulkan ICD. GPU pixels are not in the hash.
-# The filename is lvp_icd.aarch64.json, lvp_icd.x86_64.json, or lvp_icd.json.
-export VK_DRIVER_FILES=/usr/share/vulkan/icd.d/lvp_icd.aarch64.json
+# This Ubuntu 26.04 image names it lvp_icd.json. Other images use
+# lvp_icd.aarch64.json or lvp_icd.x86_64.json in the same directory.
+export VK_DRIVER_FILES=/usr/share/vulkan/icd.d/lvp_icd.json
 cd out/build/linux-release
 rm -rf hdd2
 xvfb-run -a env -u FUZION_AUTOSTART XBE_MUTE=1 FUZION_FIXED_STEP=1 FUZION_SEED=1 \
-  FUZION_REPLAY_INPUT=../../../det-logs/idle.pads \
+  FUZION_REPLAY_INPUT=/Users/gsrvm3/Documents/projects/fuzionfrenzy-recomp/det-logs/idle.pads \
   FUZION_STATE_LOG=/tmp/linux-idle.detlog \
   FUZION_FRAMES=240 FUZION_MINIMIZED=1 \
   ./FuzionFrenzy --instance 2
@@ -310,7 +315,7 @@ python3 scripts/det-diff.py mac-idle.detlog linux-idle.detlog
 
 The same command with `det-logs/gameplay2.pads`, `FUZION_FRAMES=7766`, and `FUZION_STATE_EXPECT` pointed at `det-logs/gameplay2.detlog` is the gameplay check. The Mac binary is `RingHost`. Linux and Windows keep the name `FuzionFrenzy`.
 
-x86_64 uses the same steps in an emulated guest (`limactl start --arch=x86_64 template://ubuntu`, or Docker `--platform linux/amd64`). The ICD filename is `lvp_icd.x86_64.json`. Emulation is enough to compare checksums. It is not a frame-rate test.
+x86_64 uses the same steps in an emulated guest (`limactl start --arch=x86_64 template:ubuntu`, or Docker `--platform linux/amd64`). Point `VK_DRIVER_FILES` at that image's lavapipe ICD. Emulation is enough to compare checksums. It is not a frame-rate test. `brew install lima-additional-guestagents` is what provides the non-native Lima guest agent.
 
 Windows, from a Linux machine that has the xwin sysroot from the top of `cmake/windows-cross.cmake`:
 
