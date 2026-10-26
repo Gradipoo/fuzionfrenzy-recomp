@@ -13,7 +13,7 @@ What each runner builds:
 | `scripts/fp-digest-host.sh` | No. Native clang only. The printed hash must be `tools/fp-digest.expected` (`06a5a5d542b715f9`). |
 | `scripts/det-diff.py --self-check` | No. Synthetic logs. |
 | `XBE_HOST_TOOLS_ONLY` | No. `xbe_recomp` and `xbe_symbols`. |
-| `XBE_CI_RUNTIME` | No. The runtime is compiled against a synthetic symbol header written in the build directory by `tools/ci/stub_symbols.py`. Those tokens are not guest addresses. On Linux the job sets `SDL_UNIX_CONSOLE_BUILD` so SDL3 configures with X11 and Wayland off. |
+| `XBE_CI_RUNTIME` | No. The runtime is compiled against a synthetic symbol header written in the build directory by `tools/ci/stub_symbols.py`. Those tokens are not guest addresses. On Linux the job sets `SDL_UNIX_CONSOLE_BUILD` so SDL3 configures with X11 and Wayland off. On macOS 14, `patches/sdk-macos-pipe.patch` replaces `pipe2` (the 14 SDK does not declare it) with `pipe` and `FD_CLOEXEC` for the relaunch handover. |
 | Launcher `swiftc` | No, and only on macOS. The disk-image pack stays a local script. |
 
 Ubuntu also runs the digest under valgrind (`FP_VALGRIND=1`). That is the

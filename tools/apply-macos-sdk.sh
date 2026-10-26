@@ -8,6 +8,19 @@ if [ ! -f sdk/runtime/kernel/memory.cpp ]; then
     exit 1
 fi
 
+# macOS 14's SDK does not declare pipe2. Idempotent: the marker is in boot.cpp.
+apply_macos_pipe() {
+    if grep -q "XBE_MACOS_PIPE" sdk/runtime/kernel/boot.cpp; then
+        return 0
+    fi
+    if [ ! -f patches/sdk-macos-pipe.patch ]; then
+        echo "missing patches/sdk-macos-pipe.patch" >&2
+        exit 1
+    fi
+    git -C sdk apply --whitespace=nowarn ../patches/sdk-macos-pipe.patch
+    echo "applied patches/sdk-macos-pipe.patch"
+}
+
 # GCController publishes a wired Series pad after SDL_Init. This second patch
 # opens it on the main thread. Idempotent: the marker is inside input.cpp.
 apply_gamepad_watch() {
@@ -46,6 +59,7 @@ if grep -q "XBE_DARWIN_GUEST" sdk/runtime/kernel/memory.cpp; then
         echo "refreshed sdk/runtime/core/input.cpp from patches/sdk-macos-arm64.patch"
     fi
     apply_gamepad_watch
+    apply_macos_pipe
     exit 0
 fi
 
@@ -65,3 +79,4 @@ else
 fi
 echo "applied patches/sdk-macos-arm64.patch"
 apply_gamepad_watch
+apply_macos_pipe
