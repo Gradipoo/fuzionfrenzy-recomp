@@ -41,29 +41,33 @@ diff --git a/runtime/kernel/kernel.h b/runtime/kernel/kernel.h
 diff --git a/runtime/kernel/threads.cpp b/runtime/kernel/threads.cpp
 --- a/runtime/kernel/threads.cpp
 +++ b/runtime/kernel/threads.cpp
-@@ -185,17 +185,18 @@ void StartThread(ThreadRef t) {
+@@ -183,20 +183,22 @@ void StartThread(ThreadRef t) {
+         // The title thread is the one that presents. Mark it before the first Sleep, which
+         // happens before the first present on the way into a level.
          static std::atomic<int> pace_once{0};
-         if (det::FixedStep() && pace_once.exchange(1) == 0) det::NotePacer();
+-        if (det::FixedStep() && pace_once.exchange(1) == 0) det::NotePacer();
++        const bool boot = det::FixedStep() && pace_once.exchange(1) == 0;
++        if (boot) det::NotePacer();
          uint32_t code;
-+        // XBE_THREAD_EXIT: the entry thread returns before the first present.
-+        // Dropping the turn first lets the new thread present and hash while
-+        // this thread's signal is still clear. A fast host usually wins that
-+        // race. Write the exit, then release the turn.
++        // XBE_THREAD_EXIT: the boot thread returns before the first present.
++        // Only that return keeps the turn until the exit signal is stored.
++        // Holding every return dropped one QPC read and moved a later Mac frame.
          if (si.system_routine)
 -            code = CallGuest(ctx, si.system_routine, {si.start_routine, si.start_context});
-+            code = CallGuest(ctx, si.system_routine, {si.start_routine, si.start_context}, false);
++            code = CallGuest(ctx, si.system_routine, {si.start_routine, si.start_context}, !boot);
          else
 -            code = CallGuest(ctx, si.start_routine, {si.start_context});
 -        // CallGuest has dropped the turn. Take it back so the exit writes are
 -        // visible before the presenter hashes the next frame.
 -        if (det::FixedStep()) det::EnterGuest();
-+            code = CallGuest(ctx, si.start_routine, {si.start_context}, false);
++            code = CallGuest(ctx, si.start_routine, {si.start_context}, !boot);
++        if (!boot && det::FixedStep()) det::EnterGuest();
          LOGI("thread %X returned %08X", t->id, code);
          MarkExited(*t, code);
          Unregister(t.get());
          t_current.reset();
 -        if (det::FixedStep()) det::LeaveGuest();
-+        det::LeaveGuest();
++        if (boot || det::FixedStep()) det::LeaveGuest();
      });
  }
  
