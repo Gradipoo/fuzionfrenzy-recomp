@@ -255,6 +255,11 @@ You supply the game: the USA Xbox release, as either
    Mac process is named Ring Host so the dock and the window are not the game's title.
    The log prefix on Mac is `ringhost`.
 
+   GitHub Actions (`.github/workflows/ci.yml`, `docs/ci.md`) builds the SDK
+   tools, the runtime, the math digest, and det-diff on Ubuntu and on macOS 14.
+   It does not use a disc image. The digest on every runner must match
+   `tools/fp-digest.expected`.
+
    `./build.sh macos-asan` is the ASan+UBSan preset (RelWithDebInfo, `-O1`).
    `tools/asan/autostart.sh` runs a muted scripted session on `--instance 5`.
    What that build ignores on purpose, and why MSan is not a macOS preset, is

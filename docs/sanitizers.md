@@ -61,8 +61,9 @@ this game on macOS: every library the process loads, including the system libc,
 has to be built with MSan. There is no such libc here. A macOS MSan preset
 would false-fail or fail to link. It is not offered.
 
-An uninitialized-use check that does not need the XBE belongs on Linux, against
-the math digest, and is part of CI rather than this preset.
+An uninitialized-use check that does not need a disc image is the Linux CI
+valgrind run of the math digest (`FP_VALGRIND=1`, `docs/ci.md`). That is not
+MemorySanitizer. MSan needs an instrumented libc, which CI does not have.
 
 ## Running
 

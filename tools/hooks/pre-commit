@@ -6,66 +6,14 @@
 #   ln -sfn ../../tools/hooks/pre-commit .git/hooks/pre-commit
 #
 # core.hooksPath replaces every other hook in .git/hooks. This repository
-# ships no other hooks.
+# ships no other hooks. The path rules live in forbid-game-paths.sh so CI
+# checks the same list.
 set -eu
 
-fail=0
+cd "$(git rev-parse --show-toplevel)"
 files=$(git diff --cached --name-only --diff-filter=ACMRDT)
-
-for f in $files; do
-    case "$f" in
-        sdk|sdk/*)
-            echo "pre-commit: refusing an sdk submodule change: $f" >&2
-            echo "pre-commit: macOS edits belong in patches/sdk-macos-arm64.patch" >&2
-            fail=1
-            continue
-            ;;
-    esac
-    case "$f" in
-        assets|assets/*|generated|generated/*|out|out/*|build|build/*|\
-        logs|logs/*|hdd|hdd/*|CrashDumps|CrashDumps/*|shadercache|shadercache/*|\
-        tools/bin|tools/bin/*|.toolchain|.toolchain/*|\
-        macos/launcher/dist|macos/launcher/dist/*)
-            echo "pre-commit: refusing game, asset, or build path: $f" >&2
-            fail=1
-            continue
-            ;;
-    esac
-    case "$f" in
-        *.xbe|*.XBE|*.iso|*.ISO|*.xiso|*.XISO|*.dmp|*.DMP|*.d3dcap|*.pdb|*.exe|*.dmg|*.DMG)
-            echo "pre-commit: refusing disc, dump, binary, or disk image: $f" >&2
-            fail=1
-            continue
-            ;;
-    esac
-    case "$f" in
-        det-logs|det-logs/*|*/det-logs|*/det-logs/*|\
-        det-desync|det-desync/*|*/det-desync|*/det-desync/*|\
-        *.pads|*.detlog|desync_*.txt|*/desync_*.txt|frame_*_*.bin|*/frame_*_*.bin)
-            echo "pre-commit: refusing determinism log derived from game RAM: $f" >&2
-            fail=1
-            continue
-            ;;
-    esac
-    case "$f" in
-        re|re/*|*.gpr|*.rep|*.rep/*|*.gzf|time-rng-map.txt|*/time-rng-map.txt)
-            echo "pre-commit: refusing Ghidra project, export, or symbol dump: $f" >&2
-            echo "pre-commit: those are derived from the XBE and stay on this machine." >&2
-            fail=1
-            continue
-            ;;
-    esac
-    case "$f" in
-        *x86_recomp*|*x86_func_mapping*|*image_symbols.h)
-            echo "pre-commit: refusing recompiled guest code: $f" >&2
-            fail=1
-            continue
-            ;;
-    esac
-done
-
-if [ "$fail" -ne 0 ]; then
-    echo "pre-commit: commit blocked. Game files and recompiled output stay on this machine." >&2
-    exit 1
+if [ -z "$files" ]; then
+    exit 0
 fi
-exit 0
+# shellcheck disable=SC2086
+printf '%s\n' $files | tools/hooks/forbid-game-paths.sh

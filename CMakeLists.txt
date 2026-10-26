@@ -55,6 +55,7 @@ endif()
 # ASan + UBSan for the runtime, vendored SDL/imgui/openlibm, and the game.
 # macOS preset: macos-asan. Guest translation units opt out of two checks
 # below; those are x86 semantics, not host bugs. See docs/sanitizers.md.
+option(XBE_CI_RUNTIME "Compile the SDK runtime without a game image" OFF)
 option(XBE_SANITIZE "Instrument the runtime and the game with ASan and UBSan" OFF)
 if(XBE_SANITIZE)
     if(MSVC AND NOT CMAKE_CXX_COMPILER_ID MATCHES "Clang")
@@ -77,7 +78,46 @@ if(APPLE)
     set(SDL_HIDAPI_LIBUSB ON CACHE BOOL "HIDAPI opens Xbox pads through libusb" FORCE)
     set(SDL_HIDAPI_LIBUSB_SHARED OFF CACHE BOOL "Link libusb instead of dlopen(libusb-1.0.dylib)" FORCE)
 endif()
+# CI compiles the runtime. It does not open a disc image, so SDL does not
+# need a window system. These have to be set before SDL is fetched.
+if(XBE_CI_RUNTIME AND NOT APPLE)
+    set(SDL_X11 OFF CACHE BOOL "" FORCE)
+    set(SDL_WAYLAND OFF CACHE BOOL "" FORCE)
+endif()
 include(${SDK}/cmake/XbeRecomp.cmake)
+
+# Compile the runtime with no disc image and no recompiled guest. CI uses
+# this. The symbol header is synthetic (tools/ci/stub_symbols.py) and lives
+# in the build directory. It is not a substitute for a real image.
+if(XBE_CI_RUNTIME)
+    set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
+        "${CMAKE_CURRENT_SOURCE_DIR}/tools/ci/stub_symbols.py")
+    set(_xbe_ci_syms "${CMAKE_BINARY_DIR}/ci-symbols/image_symbols.h")
+    execute_process(
+        COMMAND python3
+            "${CMAKE_CURRENT_SOURCE_DIR}/tools/ci/stub_symbols.py" "${_xbe_ci_syms}"
+        RESULT_VARIABLE _xbe_ci_stub)
+    if(NOT _xbe_ci_stub EQUAL 0)
+        message(FATAL_ERROR "tools/ci/stub_symbols.py failed (${_xbe_ci_stub})")
+    endif()
+    add_library(xbe_runtime OBJECT ${XBE_RUNTIME_SOURCES})
+    target_include_directories(xbe_runtime BEFORE PRIVATE
+        "${CMAKE_BINARY_DIR}/ci-symbols"
+        "${CMAKE_CURRENT_SOURCE_DIR}/src"
+        "${SDK}/runtime")
+    target_include_directories(xbe_runtime SYSTEM PRIVATE ${imgui_SOURCE_DIR} ${XBE_SHADER_INCLUDES})
+    target_compile_definitions(xbe_runtime PRIVATE UNICODE _UNICODE _CRT_SECURE_NO_WARNINGS ${XBE_SHADER_DEFINES})
+    target_link_libraries(xbe_runtime PRIVATE tomlplusplus::tomlplusplus SDL3::SDL3-static Vulkan::Vulkan ${XBE_SHADER_LIBS} ZLIB::ZLIB)
+    if(MSVC)
+        target_compile_options(xbe_runtime PRIVATE /fp:precise)
+    else()
+        target_compile_options(xbe_runtime PRIVATE -ffp-contract=off -fno-fast-math -fno-strict-aliasing)
+        if(CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|AMD64|amd64")
+            target_compile_options(xbe_runtime PRIVATE -mfpmath=sse -msse2)
+        endif()
+    endif()
+    return()
+endif()
 
 file(GLOB XBE_HOST_SOURCES CONFIGURE_DEPENDS src/*/*.cpp)
 list(FILTER XBE_HOST_SOURCES EXCLUDE REGEX "/src/game/")
