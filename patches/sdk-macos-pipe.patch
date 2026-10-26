@@ -1,0 +1,18 @@
+diff --git a/runtime/kernel/boot.cpp b/runtime/kernel/boot.cpp
+--- a/runtime/kernel/boot.cpp
++++ b/runtime/kernel/boot.cpp
+@@ -290,7 +290,14 @@
+     // connect. Closing the pipe instead releases it just the same (it
+     // execs on EOF too), so no failure below can leave it blocked.
+     int sync_pipe[2] = {-1, -1};
++#if defined(__APPLE__)
++    // XBE_MACOS_PIPE: the macOS 14 SDK does not declare pipe2. pipe plus
++    // FD_CLOEXEC is the same handover the child waits on.
++    if (pipe(sync_pipe) != 0 || fcntl(sync_pipe[0], F_SETFD, FD_CLOEXEC) != 0 ||
++        fcntl(sync_pipe[1], F_SETFD, FD_CLOEXEC) != 0) {
++#else
+     if (pipe2(sync_pipe, O_CLOEXEC) != 0) {
++#endif
+         LOGE("relaunch: cannot start %s (%s)", exe, std::strerror(errno));
+         std::_Exit(0);
+     }
