@@ -44,6 +44,11 @@
 // event-shaped input: WM_MOUSEWHEEL on Windows, kbm::NoteWheel forwarded from ImGui's wheel by
 // overlay::Draw on Linux. While the F1 settings panel is up the overlay owns the keyboard and
 // the mouse and nothing here reaches the game.
+//
+// FUZION_PORT2_KEYS (unset, empty, or "0" leaves this off) moves that same map onto port 2
+// and does not also merge it into port 1. Port 2 stays connected with no buttons while the
+// window is unfocused, so the title sees a second human. The harness records whatever Poll
+// returns, so those keys land in the pads file when recording is on.
 #include "common/input_kbm.h"
 
 #include <algorithm>
@@ -52,6 +57,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <iterator>
 
 #if defined(_WIN32)
@@ -382,9 +388,23 @@ void NoteMouse(float x, float y, bool right, bool middle) {
 
 #endif
 
+// Same test as det::C()'s FUZION_PORT2_KEYS read. Env only: this file does not see argv.
+static bool Port2Keyboard() {
+    static const bool on = [] {
+        const char* v = std::getenv("FUZION_PORT2_KEYS");
+        return v && v[0] && std::strcmp(v, "0") != 0;
+    }();
+    return on;
+}
+
 void Apply(int port, input::Pad& pad) {
-    if (port != 0) return;
-    pad.connected = true;  // the keyboard is the port 0 pad when no controller is plugged in
+    const bool port2 = Port2Keyboard();
+    if (port2) {
+        if (port != 1) return;
+    } else if (port != 0) {
+        return;
+    }
+    pad.connected = true;  // keyboard pad: port 0, or port 2 when FUZION_PORT2_KEYS is set
     // no focus: nothing is held. The overlay's settings panel owns both devices while it is up
     if (!PlatformFocused() || overlay::SettingsOpen()) return;
 
@@ -437,7 +457,7 @@ void Apply(int port, input::Pad& pad) {
     const bool active = buttons != 0 || lx != 0.0f || ly != 0.0f || rx != 0.0f || ry != 0.0f ||
                         std::any_of(std::begin(analog), std::end(analog), [](uint8_t b) { return b != 0; });
     if (active && !logged.exchange(true))
-        LOGI("input: keyboard and mouse on port 0 (WASD walk, arrows D-pad, right drag and wheel camera)");
+        LOGI("input: keyboard and mouse on port %d (WASD walk, arrows D-pad, right drag and wheel camera)", port + 1);
 }
 
 }  // namespace kbm

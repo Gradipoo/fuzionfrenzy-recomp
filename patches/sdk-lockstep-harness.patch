@@ -1,3 +1,4 @@
+diff --git a/runtime/core/determinism.cpp b/runtime/core/determinism.cpp
 --- a/runtime/core/determinism.cpp
 +++ b/runtime/core/determinism.cpp
 @@ -1,5 +1,6 @@
@@ -20,7 +21,7 @@
  
  namespace kernel {
  extern const xbe::Image* g_image;
-@@ -85,6 +90,7 @@
+@@ -85,11 +90,18 @@ struct Cfg {
      const char* state_log = nullptr;
      const char* dump_dir = nullptr;
      const char* dump_region = nullptr;
@@ -28,7 +29,18 @@
      int64_t dump_frame = -1;
      uint64_t frames = 0;
      uint32_t stall_ms = 0;
-@@ -102,6 +108,7 @@
+     bool have_seed = false;
+     uint32_t seed = 1;
++    // Off unless set. Port 2 is runtime index 1. Keys move the existing keyboard
++    // map onto that port (input_kbm.cpp). Mash replaces it with a pure function
++    // of the frame and a seed, including over a replay of the other ports.
++    bool port2_keys = false;
++    bool port2_mash = false;
++    uint32_t port2_seed = 1;
+ };
+ 
+ const Cfg& C() {
+@@ -102,6 +114,7 @@ const Cfg& C() {
          c.state_log = EnvOrOpt("FUZION_STATE_LOG", "state-log");
          c.dump_dir = EnvOrOpt("FUZION_STATE_DUMP", "state-dump");
          c.dump_region = EnvOrOpt("FUZION_STATE_DUMP_REGION", "state-dump-region");
@@ -36,7 +48,26 @@
          if (const char* v = EnvOrOpt("FUZION_STATE_DUMP_FRAME", "state-dump-frame")) c.dump_frame = std::atoll(v);
          if (const char* v = EnvOrOpt("FUZION_FRAMES", "frames")) c.frames = std::strtoull(v, nullptr, 10);
          if (const char* v = EnvOrOpt("FUZION_STALL_MS", "stall-ms")) c.stall_ms = uint32_t(std::strtoul(v, nullptr, 10));
-@@ -173,15 +180,35 @@
+@@ -109,6 +122,18 @@ const Cfg& C() {
+             c.have_seed = true;
+             c.seed = uint32_t(std::strtoul(v, nullptr, 0));
+         }
++        // Env only, same test as input_kbm.cpp. --port2-keys is not read here:
++        // the keyboard move lives in that file, which does not see argv.
++        if (const char* v = std::getenv("FUZION_PORT2_KEYS"))
++            c.port2_keys = v[0] && std::strcmp(v, "0") != 0;
++        if (const char* v = EnvOrOpt("FUZION_PORT2_MASH", "port2-mash")) {
++            unsigned long n = std::strtoul(v, nullptr, 0);
++            if (n != 0) {
++                c.port2_mash = true;
++                // "1" means on, and the mash seed follows FUZION_SEED when that is set.
++                c.port2_seed = (n == 1 && c.have_seed) ? c.seed : uint32_t(n);
++            }
++        }
+         return c;
+     }();
+     return cfg;
+@@ -173,15 +198,35 @@ bool g_state_header = false;
  
  uint64_t Mix(uint64_t h, uint64_t v) { return (h ^ v) * kHashPrime; }
  
@@ -73,7 +104,7 @@
      if (i < n) h = Mix(h, tail);
      return h;
  }
-@@ -244,16 +271,9 @@
+@@ -244,16 +289,9 @@ void LoadReplay() {
          LOGE("det: replay file missing: %s", path);
          kernel::Shutdown(1);
      }
@@ -93,7 +124,7 @@
          size_t need = (size_t(frame) + 1) * kPorts;
          if (g_replay.size() < need) g_replay.resize(need);
          Sample& s = g_replay[size_t(frame) * kPorts + (port - 1)];
-@@ -264,6 +284,39 @@
+@@ -264,6 +302,39 @@ void LoadReplay() {
          s.rx = int16_t(rx);
          s.ry = int16_t(ry);
          for (int i = 0; i < 8; i++) s.analog[i] = uint8_t(analog[i]);
@@ -133,7 +164,7 @@
      }
      LOGR("det: replay %s, %zu frames", path, g_replay.size() / kPorts);
  }
-@@ -293,17 +346,20 @@
+@@ -293,17 +364,23 @@ void WritePads(uint64_t frame) {
              LOGE("det: cannot write %s", C().record);
              return;
          }
@@ -144,6 +175,9 @@
 +        std::fprintf(f, "# BizHawk-style movie text. One line per frame. Four ports, pipe-separated.\n");
 +        std::fprintf(f, "# LogKey:frame|P1 c,buttons,lx,ly,rx,ry,a,b,x,y,black,white,lt,rt|P2 ...|P3 ...|P4 ...\n");
 +        std::fprintf(f, "# buttons and analog bytes are hex. sticks are signed. version 1 (one line per port) still loads.\n");
++        if (C().port2_mash)
++            std::fprintf(f, "# port 2 mash seed %u. 8-present holds. menu cadence for the first 4500 presents, then a mash.\n",
++                         C().port2_seed);
      }
      if (!f) return;
 +    std::fprintf(f, "%llu", (unsigned long long)frame);
@@ -160,7 +194,7 @@
      std::fflush(f);
  }
  
-@@ -342,6 +398,7 @@
+@@ -342,6 +419,7 @@ void StateHeader(const std::vector<Exc>& exc) {
      std::fprintf(g_state, "# F frame total data phys system user seed qpc rdtsc delay\n");
      std::fprintf(g_state, "# P frame 64 hashes of 1MB physical slices from 80000000\n");
      std::fprintf(g_state, "# D frame section=hash. U frame index=hash for committed user slices.\n");
@@ -168,7 +202,7 @@
  }
  
  void DumpRegion(uint64_t frame, const char* name, uint32_t va, uint32_t size, const std::vector<Exc>& exc) {
-@@ -369,6 +426,175 @@
+@@ -369,6 +447,175 @@ void DumpRegion(uint64_t frame, const char* name, uint32_t va, uint32_t size, co
      LOGR("det: dumped %s", path.c_str());
  }
  
@@ -344,7 +378,7 @@
  void WriteState(uint64_t frame) {
      OpenState();
      std::vector<Exc> exc;
-@@ -463,6 +689,7 @@
+@@ -463,6 +710,7 @@ void WriteState(uint64_t frame) {
      }
      if ((frame % 60ull) == 0)
          LOGR("det: frame %llu total %016llx seed %08x", (unsigned long long)frame, (unsigned long long)total, seed);
@@ -352,7 +386,97 @@
  }
  
  void LogMode() {
-@@ -708,7 +935,7 @@
+@@ -479,6 +727,12 @@ void LogMode() {
+         LOGR("det: presenter KeDelay yields the guest turn, vblank advances on present, mixer advances %u samples",
+              kAudioFrames);
+     }
++    if (c.port2_mash && c.port2_keys)
++        LOGR("det: port 2 mash seed %08x overrides FUZION_PORT2_KEYS", c.port2_seed);
++    else if (c.port2_mash)
++        LOGR("det: port 2 is a seeded mash, seed %08x, and a recording stores that sample", c.port2_seed);
++    else if (c.port2_keys)
++        LOGR("det: keyboard drives port 2; a recording stores that sample");
+ }
+ 
+ }  // namespace
+@@ -689,13 +943,74 @@ void OnImageLoaded() {
+     }
+ }
+ 
++// Port 2 (index 1), connected from the first sample. A pure function of the
++// frame and the mash seed: the same presents always produce the same report,
++// and the recording stores that report so a later replay does not roll again.
++// The first 4500 presents (75 s, the same window FUZION_AUTOSTART uses to get
++// through the intro and the menus) repeat a 600-present cycle: Start, D-pad
++// Up, A. After that, Start is rare and the rest is an 8-present mash.
++Sample MashPort2(uint64_t frame) {
++    constexpr uint64_t kCycle = 600;
++    constexpr uint64_t kMenuFrames = 4500;
++    Sample s;
++    s.connected = true;
++    const uint32_t slot = uint32_t(frame / 8);
++    uint32_t r = C().port2_seed + slot * 0x9E3779B9u;
++    r ^= r << 13;
++    r ^= r >> 17;
++    r ^= r << 5;
++    if (r == 0) r = 0xA5A5A5A5u;
++    auto cardinal = [&](unsigned dir) {
++        if (dir == 1) {
++            s.buttons = uint16_t(s.buttons | 0x0001);
++            s.ly = 32767;
++        } else if (dir == 2) {
++            s.buttons = uint16_t(s.buttons | 0x0002);
++            s.ly = -32767;
++        } else if (dir == 3) {
++            s.buttons = uint16_t(s.buttons | 0x0004);
++            s.lx = -32767;
++        } else if (dir == 4) {
++            s.buttons = uint16_t(s.buttons | 0x0008);
++            s.lx = 32767;
++        }
++    };
++    if (frame < kMenuFrames) {
++        const uint64_t phase = frame % kCycle;
++        if (phase < 30) s.buttons = uint16_t(s.buttons | 0x0010);
++        else if (phase >= 180 && phase < 210) cardinal(1);
++        else if (phase >= 300 && phase < 330) s.analog[0] = 0xFF;
++        if ((r % 5u) == 0) cardinal(1u + (r % 4u));
++        return s;
++    }
++    if ((r % 32u) == 0) s.buttons = uint16_t(s.buttons | 0x0010);
++    cardinal(r % 5u);
++    if ((r & 1u) == 0) s.analog[0] = 0xFF;
++    if ((r % 7u) == 0) s.analog[1] = 0xFF;
++    if ((r % 11u) == 0) s.analog[2] = 0xFF;
++    if ((r % 13u) == 0) s.analog[3] = 0xFF;
++    if (s.lx == 0 && s.ly == 0) {
++        switch ((r >> 8) & 3u) {
++            case 0: s.lx = 32767; break;
++            case 1: s.lx = -32767; break;
++            case 2: s.ly = 32767; break;
++            default: s.ly = -32767; break;
++        }
++    }
++    return s;
++}
++
+ void FilterPad(int port, input::Pad& pad) {
+     if (port < 0 || port >= kPorts) return;
+     std::lock_guard<std::mutex> lock(g_pad_lock);
+-    if (C().replay) {
++    const bool mash = C().port2_mash && port == 1;
++    if (C().replay && !mash) {
+         pad = ReplayAt(g_frame.load(std::memory_order_relaxed), port).Pad();
+-        return;
++        // Mash plus record stores the replayed ports and the mash together.
++        // Replay alone still returns here, so an unset mash flag changes nothing.
++        if (!(C().port2_mash && C().record)) return;
+     }
++    if (mash) pad = MashPort2(g_frame.load(std::memory_order_relaxed)).Pad();
+     if (C().record || C().fixed) {
+         g_pending[port] = Sample(pad);
+         if (!g_seen[port]) {
+@@ -708,7 +1023,7 @@ void FilterPad(int port, input::Pad& pad) {
  
  void OnPresented(X86Context& ctx) {
      const Cfg& c = C();
@@ -361,7 +485,7 @@
      if (g_in_present) return;
      g_in_present = true;
      NotePacer();
-@@ -719,7 +946,7 @@
+@@ -719,7 +1034,7 @@ void OnPresented(X86Context& ctx) {
      if (c.fixed) kernel::FireDueTimers(ctx);
  
      uint64_t frame = g_frame.load(std::memory_order_relaxed);
