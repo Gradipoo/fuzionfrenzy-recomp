@@ -55,7 +55,12 @@ The walker now tracks the load register as device state, exactly as the hardware
 `out/shots/fx_55s_zoom.png` and `out/shots/pass_55s_zoom.png` show Jet, Geena and Samson
 rendering correctly; `out/shots/deep_90s.png` shows a solid, textured arena in play.
 
-## The white arena floor: cause found, fix not yet proven on the scene
+## The white arena floor: Twisted System resolved; the older offscreen theory is not that scene
+
+The flat white floor on Twisted System, seen with the flat white characters, is gone on
+the stage-1 skip build. Play on 2026-10-25 went through the countdown and the round with
+both textured. The writeup below is an earlier capture of a different arena, and it was
+never shown to be this scene.
 
 One arena's floor shaded flat `(255,255,255)` while every object standing on it textured and
 shaded correctly — `out/shots/speed_125s.png`, where 313,545 of 320,000 pixels sampled in the
@@ -92,7 +97,7 @@ cause of the white floor. That scene was only ever reproduced once, before the f
 roughly 25 minutes of driven play afterwards it has not recurred, but absence over eleven
 sampled frames and two 450 s capture runs is not the same as a demonstrated repair.
 
-## Twisted System characters drew flat white — solved
+## Twisted System white characters and white floor — solved
 
 Recorded 2026-10-25 on the macOS arm64 build, Twisted System, manual play.
 
@@ -127,9 +132,10 @@ Frenzy's D3D8 is 3925. Their later-XDK constants, which match this shader's case
 draws would become `BLENDFACTORALPHA`. The texture factor on them is `0x60000000`
 (alpha 96/255) and arg1 would still be the missing texture, sampled white, so the stage
 would mix white back into the texel. That is a different picture from the skip, which
-was played through the countdown and the round with the characters textured and with no
-other scene in that session looking wrong. The decoder is unchanged so the skip still
-sees op 14.
+was played through the countdown and the round with the characters textured, the floor
+textured, and no other scene in that session looking wrong. The decoder is unchanged
+so the skip still sees op 14.
 
-The floor mesh in that round is separate: fixed-function, 8192 vertices, stage 0
-`MODULATE2X` on a 64×64 P8 texture, stage 1 disabled. This skip does not run on it.
+The white floor cleared on that same build. One 8192-vertex floor draw in the capture
+had stage 1 disabled, so that mesh is not itself the skip; the level surfaces that were
+flat white in play are textured now. The defect is closed.
