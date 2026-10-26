@@ -21,7 +21,8 @@ check_one() {
         assets|assets/*|generated|generated/*|out|out/*|build|build/*|\
         logs|logs/*|hdd|hdd/*|CrashDumps|CrashDumps/*|shadercache|shadercache/*|\
         tools/bin|tools/bin/*|.toolchain|.toolchain/*|\
-        macos/launcher/dist|macos/launcher/dist/*)
+        macos/launcher/dist|macos/launcher/dist/*|\
+        screen-ref|screen-ref/*|screen-out|screen-out/*)
             refuse "refusing game, asset, or build path: $f"
             return 1
             ;;
@@ -64,6 +65,7 @@ self_test() {
         re/ghidra/project.gpr \
         notes.pads \
         det-logs/a.txt \
+        screen-ref/title.bmp \
         frame_1_D.bin \
         disc.iso \
         sdk/runtime/cpu/softmath.cpp

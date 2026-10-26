@@ -1,0 +1,12 @@
+# Present index in a fixed-step replay of the local pads file.
+# A dash means that present has not been measured. The harness skips it.
+# References are written under screen-ref/ and are not committed.
+#
+# name present
+title -
+board -
+character-select -
+twisted-system-countdown -
+twisted-system-round -
+sumo-balls -
+jetstream -
