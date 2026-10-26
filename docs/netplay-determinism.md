@@ -41,12 +41,16 @@ That repeat rule is what gets past boot. `sub_0004C510` samples RDTSC, then spin
 | `KeQuerySystemTime`, `KeSystemTime`, `NtSetSystemTime`'s read | epoch + interrupt time. Epoch is 2026-01-01 00:00:00 UTC as 100 ns since 1601 (`134116992000000000`). |
 | `KeTickCount` | `(frame * 1000) / 60` milliseconds. The step alternates 16 and 17 and lands on 1000 at frame 60. |
 | `RDTSC` (`x86_rdtsc`) | `frame * 12222222` (733333333/60). `.text`, DSOUND, XGRPH, and WMADEC all come through this. |
-| `KeDelayExecutionThread`, `KeStallExecutionProcessor` | On the thread that presents: consume the guest duration in whole ticks (a delay shorter than one tick does not move time), then return. On any other thread: block until sim time has covered the delay, and at least one tick, so a 1 ms loop cannot outrun the presenter. No wall-clock sleep. |
+| `KeDelayExecutionThread`, `KeStallExecutionProcessor` | On the thread that presents: consume whole ticks of the guest duration, then yield. A delay shorter than one tick does not move time by itself. The yield runs every other guest thread that is already waiting until each of them is blocked again, so a `Sleep(0)` poll observes the same APC every run. If that delay was non-zero and no other thread ran, one sim tick is added so a timed poll cannot spin. On any other thread: drop the turn, block until sim time has covered the delay (at least one tick), then wait for the turn again. No wall-clock sleep. |
 | Timer DPCs | Deadline is guest 100 ns. The timer thread does not pop. Present fires due timers inline, in deadline order, on the present thread, then rearms a period by `period_ms * 10000` (100 ns). |
 | Vblank | The free-running thread does not increment. Present bumps the count once. `BlockUntilVerticalBlank` returns at once. |
 | `app::Pace` | Skipped, so the harness is not fps-capped. A Vulkan present can still wait on vsync. |
 
 `Wait` timeouts are still wall-clock. A title that waits on an object with a timeout can diverge. The stall row is the check for that.
+
+Guest threads take turns while fixed-step is on. `CallGuest` takes the turn, and a kernel wait gives it up. The title thread is the presenter from the moment it starts, because the boot `Sleep(0)` loop runs before the first present that used to mark it. That loop is `sub_0001C836`: it calls `sub_0004CF90(1)`, which queues an APC (`NtQueueApcThread`, thunk `0x34269`) onto the background loader, and spins on `Sleep(0)` until the loader's APC sets the dword at `0x2D02D0`. Each extra spin queues another APC, and each APC decrements the scheduler count at `0x2D02D4`. The spin used to be as long as the host took to schedule the loader, so two runs diverged at frame 3 in `.data` with different delay counts and that dword equal to `-(delay count + 1)`. The yield makes the loader run the APC inside the first `Sleep(0)`. The delay count at frame 3 is 1. `NtQueueApcThread` notifies under the dispatcher lock, so the alertable wait cannot miss the APC.
+
+`PsTerminateSystemThread` ends in `pthread_exit`, which does not run C++ destructors. A thread that exits that way used to leave the turn taken: both surviving guest threads then sat in `UnblockGuest` and presents stopped (idle replay, frame 107, `g_busy` still 1, `g_waiting` 2, no thread left inside `CallGuest`). Exit releases the turn before `pthread_exit`.
 
 There is no `GetTickCount` import.
 
@@ -158,6 +162,6 @@ The menus and the minigames should follow the recording with the controllers ign
 
 - `Wait` timeouts.
 - A `srand` after image load replaces `--seed`. The seed column shows it. Fixed time keeps a clock-seeded `srand` stable across runs.
-- Guest threads that are not the present thread, if they touch RAM the hash covers.
+- A host thread that writes guest RAM without taking the turn (an IO status block, a GPU fence). The stall row is where that shows up. One early stall run differed at frame 0 in `user_0` only; repeats of that pair matched, so it is not yet a stable failure.
 - Stacks are not hashed, so a value that only ever lived in a spill is invisible.
 - GPU pixels are not hashed, so a render-only divergence does not fail a row. That is deliberate.

@@ -307,10 +307,10 @@ index b2cd099..1304c37 100644
          uintmax_t size = std::filesystem::file_size(exe, ec);
 diff --git a/runtime/core/determinism.cpp b/runtime/core/determinism.cpp
 new file mode 100644
-index 0000000..dc54f3e
+index 0000000..c8d6258
 --- /dev/null
 +++ b/runtime/core/determinism.cpp
-@@ -0,0 +1,642 @@
+@@ -0,0 +1,743 @@
 +// Frame-derived clocks, latched pads, and a per-present guest RAM checksum.
 +// Off unless a flag or env var is set. See docs/netplay-determinism.md.
 +#include "core/determinism.h"
@@ -789,7 +789,7 @@ index 0000000..dc54f3e
 +        LOGR("det: clocks are frame-derived (qpc +%llu, interrupt +%llu 100ns, rdtsc +%llu, tick ms = frame*1000/60)",
 +             (unsigned long long)kPerfPerFrame, (unsigned long long)kInterruptPerFrame,
 +             (unsigned long long)(kRdtscHz / 60ull));
-+        LOGR("det: KeDelayExecutionThread returns at once, vblank advances on present, mixer advances %u samples",
++        LOGR("det: presenter KeDelay yields the guest turn, vblank advances on present, mixer advances %u samples",
 +             kAudioFrames);
 +    }
 +}
@@ -886,6 +886,107 @@ index 0000000..dc54f3e
 +
 +uint64_t WholeTicks(uint64_t hundred_ns) { return hundred_ns / kInterruptPerFrame; }
 +
++// One thread holds the turn (g_busy). Waiters queue on g_waiting. A yield clears the turn
++// and waits until every other thread has gone back to a kernel wait, and until alertable
++// APCs queued while a thread was waiting have been popped. Ticket numbers are not used:
++// a counter that moves past a waiter leaves both threads blocked in UnblockGuest.
++std::mutex g_sched_mu;
++std::condition_variable g_sched_cv;
++int g_busy = 0;
++int g_waiting = 0;
++std::atomic<int> g_deliverable{0};
++std::atomic<uint64_t> g_handoffs{0};
++thread_local int t_guest_depth = 0;
++thread_local bool t_guest_hold = false;
++bool g_logged_yield = false;
++
++void NoteDeliverable(int delta) {
++    if (!delta || !FixedStep()) return;
++    g_deliverable.fetch_add(delta, std::memory_order_acq_rel);
++    g_sched_cv.notify_all();
++}
++
++void AcquireTurn() {
++    std::unique_lock<std::mutex> lock(g_sched_mu);
++    if (g_busy) {
++        g_waiting++;
++        g_sched_cv.wait(lock, [] { return g_busy == 0; });
++        g_waiting--;
++    }
++    g_busy = 1;
++    t_guest_hold = true;
++}
++
++void ReleaseTurn() {
++    std::lock_guard<std::mutex> lock(g_sched_mu);
++    if (!t_guest_hold) return;
++    t_guest_hold = false;
++    g_busy = 0;
++    g_handoffs.fetch_add(1, std::memory_order_relaxed);
++    g_sched_cv.notify_all();
++}
++
++void EnterGuest() {
++    if (!FixedStep()) return;
++    if (t_guest_depth++ > 0) return;
++    AcquireTurn();
++}
++
++void LeaveGuest() {
++    if (!FixedStep()) return;
++    if (t_guest_depth == 0) return;
++    if (--t_guest_depth > 0) return;
++    ReleaseTurn();
++}
++
++void BlockGuest() {
++    if (!FixedStep() || !t_guest_hold) return;
++    ReleaseTurn();
++}
++
++void UnblockGuest() {
++    if (!FixedStep() || t_guest_depth == 0 || t_guest_hold) return;
++    AcquireTurn();
++}
++
++void AbandonGuest() {
++    if (!FixedStep() || t_guest_depth == 0) return;
++    t_guest_depth = 0;
++    if (!t_guest_hold) return;
++    LOGR("det: a guest thread exited while it held the turn; the turn is released");
++    ReleaseTurn();
++}
++
++void YieldGuest() {
++    if (!FixedStep() || !t_guest_hold) return;
++    if (!g_logged_yield) {
++        g_logged_yield = true;
++        LOGR("det: presenter yield runs other guest threads until they block");
++    }
++    std::unique_lock<std::mutex> lock(g_sched_mu);
++    t_guest_hold = false;
++    g_busy = 0;
++    g_sched_cv.notify_all();
++    kernel::SignalChanged();
++    // While an alertable APC is still queued, g_deliverable stays above zero, so the
++    // loader claims g_busy and pops it before this wait can return.
++    g_sched_cv.wait(lock, [] {
++        return g_busy == 0 && g_waiting == 0 && g_deliverable.load(std::memory_order_acquire) == 0;
++    });
++    g_busy = 1;
++    t_guest_hold = true;
++}
++
++void PacerDelay(uint64_t hundred_ns) {
++    if (hundred_ns) Consume100ns(hundred_ns);
++    uint64_t before = g_handoffs.load(std::memory_order_relaxed);
++    YieldGuest();
++    if (!hundred_ns || hundred_ns >= kInterruptPerFrame) return;
++    if (g_handoffs.load(std::memory_order_relaxed) != before) return;
++    std::lock_guard<std::mutex> lock(g_time_mu);
++    AdvanceTicksLocked(1);
++}
++
 +void WatchRng(uint32_t guest_va) { g_rng_va = guest_va; }
 +
 +void OnImageLoaded() {
@@ -955,10 +1056,10 @@ index 0000000..dc54f3e
 +}  // namespace det
 diff --git a/runtime/core/determinism.h b/runtime/core/determinism.h
 new file mode 100644
-index 0000000..ff78c11
+index 0000000..8b72ff7
 --- /dev/null
 +++ b/runtime/core/determinism.h
-@@ -0,0 +1,54 @@
+@@ -0,0 +1,72 @@
 +#pragma once
 +// Lockstep determinism harness. Every entry is a no-op unless a flag or env var turns it on,
 +// so a normal launch keeps the clocks, the pads, the mixer and the frame pacing it has now.
@@ -1012,6 +1113,24 @@ index 0000000..ff78c11
 +void WaitTicks(uint64_t ticks);
 +uint64_t WholeTicks(uint64_t hundred_ns);
 +
++// One guest thread runs at a time while fixed-step is on. Enter/Leave wrap a guest call.
++// Block/Unblock drop the turn across a kernel wait. Yield runs every thread that is
++// already waiting until each of them is blocked again, so a Sleep(0) poll of the
++// background loader observes the same APC on every run.
++void EnterGuest();
++void LeaveGuest();
++void BlockGuest();
++void UnblockGuest();
++void YieldGuest();
++// PsTerminateSystemThread ends in pthread_exit, which does not run the CallGuest
++// destructor. Drop the turn first. Leaving it set blocks every other thread in UnblockGuest.
++void AbandonGuest();
++// Alertable waits with a queued APC still have work. QueueApc / the wait flip this.
++void NoteDeliverable(int delta);
++// Presenter's KeDelay: consume whole ticks, then yield. A sub-frame delay that woke
++// nobody still advances one tick, so a timed poll cannot spin on the wall clock.
++void PacerDelay(uint64_t hundred_ns);
++
 +}  // namespace det
 diff --git a/runtime/core/input.cpp b/runtime/core/input.cpp
 index 8a0f1d0..ad19511 100644
@@ -1048,7 +1167,7 @@ index 8a0f1d0..ad19511 100644
  }
  
 diff --git a/runtime/cpu/dispatch.cpp b/runtime/cpu/dispatch.cpp
-index 1169944..bab0b65 100644
+index 1169944..4587ddd 100644
 --- a/runtime/cpu/dispatch.cpp
 +++ b/runtime/cpu/dispatch.cpp
 @@ -8,12 +8,13 @@
@@ -1066,7 +1185,19 @@ index 1169944..bab0b65 100644
  #include <x86intrin.h>
  #endif
  
-@@ -238,6 +239,10 @@ void x86_debug_service(X86Context& ctx, uint8_t* base, uint32_t va) {
+@@ -141,6 +142,11 @@ const char* ExportName(uint32_t ordinal) { return ordinal < 400 && g_exports[ord
+ bool HasExport(uint32_t ordinal) { return ordinal < 400 && (g_exports[ordinal].fn || g_exports[ordinal].data); }
+ 
+ uint32_t CallGuest(X86Context& ctx, uint32_t fn, const uint32_t* args, size_t count) {
++    struct Turn {
++        Turn() { det::EnterGuest(); }
++        ~Turn() { det::LeaveGuest(); }
++    } turn;
++    (void)turn;
+     // the D3D and DirectSound hooks call this several times a draw: no heap, only the registers put back are kept
+     struct {
+         uint32_t eax, ecx, edx, ebx, esi, edi, ebp;
+@@ -238,6 +244,10 @@ void x86_debug_service(X86Context& ctx, uint8_t* base, uint32_t va) {
  
  // the guest measured time against a 733.33 MHz time stamp counter
  uint64_t x86_rdtsc() {
@@ -2550,7 +2681,7 @@ index 9fc79d1..97642d1 100644
                      if (errno == EINTR || errno == EAGAIN) continue;
                      LOGW("relaunch: handover accept failed (%s)", std::strerror(errno));
 diff --git a/runtime/kernel/kernel.h b/runtime/kernel/kernel.h
-index b00079f..fe0d3d1 100644
+index b00079f..b16c355 100644
 --- a/runtime/kernel/kernel.h
 +++ b/runtime/kernel/kernel.h
 @@ -139,6 +139,9 @@ int32_t ReleaseSemaphore(Object& o, int32_t count, uint32_t& status);
@@ -2563,6 +2694,24 @@ index b00079f..fe0d3d1 100644
  void QueueDpc(uint32_t dpc, uint32_t arg1, uint32_t arg2);
  struct Thread;
  // apc_routine runs on apc_thread with (apc_context, due low, due high) each time the timer fires
+@@ -153,6 +156,8 @@ struct Thread : Object {
+     uint32_t exit_code = 0;
+     int priority = 0;
+     std::atomic<int> suspend{0};
++    std::atomic<bool> alertable{false};
++    std::atomic<int> owed{0};  // APCs queued while alertable and not yet popped
+     std::mutex apc_lock;
+     std::deque<std::array<uint32_t, 4>> apcs;  // routine, arg1, arg2, arg3
+     std::condition_variable resume_cv;
+@@ -177,6 +182,8 @@ uint32_t Suspend(Thread& t);  // previous count; another thread stops at its nex
+ void SuspendPoint();           // blocks the current thread while it is suspended
+ bool RunApcs(Thread& t);
+ void QueueApc(Thread& t, uint32_t routine, uint32_t a1, uint32_t a2, uint32_t a3);
++// Fixed-step: an alertable wait is the point a queued user APC becomes runnable.
++void SetAlertable(bool on);
+ std::vector<ThreadRef> Threads();
+ 
+ // files
 diff --git a/runtime/kernel/memory.cpp b/runtime/kernel/memory.cpp
 index e36cacd..cf36874 100644
 --- a/runtime/kernel/memory.cpp
@@ -2723,7 +2872,7 @@ index e36cacd..cf36874 100644
  
  bool IsCommitted(uint32_t va) { return InPhysical(va) || g_committed[va >> 12] != 0; }
 diff --git a/runtime/kernel/objects.cpp b/runtime/kernel/objects.cpp
-index 9630759..2c81056 100644
+index 9630759..f20e36e 100644
 --- a/runtime/kernel/objects.cpp
 +++ b/runtime/kernel/objects.cpp
 @@ -4,6 +4,7 @@
@@ -2742,7 +2891,33 @@ index 9630759..2c81056 100644
      using namespace std::chrono;
      // 1601 to 1970 in 100 ns units
      auto t = duration_cast<nanoseconds>(system_clock::now().time_since_epoch()).count();
-@@ -384,6 +386,11 @@ static void TimerLoop() {
+@@ -250,11 +252,23 @@ static uint32_t WaitFor(const std::vector<ObjectRef>& objs, bool wait_all, int64
+         if (!infinite) {
+             int64_t now = duration_cast<nanoseconds>(steady_clock::now().time_since_epoch()).count();
+             if (now >= deadline) return kTimeout;
+-            // bounded so alertable waits notice new APCs
+-            g_cv.wait_for(lock, nanoseconds(std::min<int64_t>(deadline - now, 50000000)));
++        }
++        // Drop the guest turn before sleeping so the presenter can run. The dispatcher lock
++        // stays held until the sleep, which is what makes a QueueApc notify land on this wait.
++        if (alertable && self) SetAlertable(true);
++        det::BlockGuest();
++        if (!infinite) {
++            int64_t now = duration_cast<nanoseconds>(steady_clock::now().time_since_epoch()).count();
++            int64_t left = deadline - now;
++            if (left < 0) left = 0;
++            g_cv.wait_for(lock, nanoseconds(std::min<int64_t>(left, 50000000)));
+         } else {
+             g_cv.wait_for(lock, milliseconds(50));
+         }
++        if (alertable && self) SetAlertable(false);
++        lock.unlock();
++        det::UnblockGuest();
++        lock.lock();
+     }
+ }
+ 
+@@ -384,6 +398,11 @@ static void TimerLoop() {
              g_timer_cv.wait(lock);
              continue;
          }
@@ -2754,7 +2929,7 @@ index 9630759..2c81056 100644
          int64_t now = duration_cast<nanoseconds>(steady_clock::now().time_since_epoch()).count();
          TimerEntry e = g_timers.top();
          if (e.deadline > now) {
-@@ -424,10 +431,58 @@ void SetTimer(ObjectRef timer, int64_t due, int32_t period_ms, uint32_t dpc, std
+@@ -424,10 +443,58 @@ void SetTimer(ObjectRef timer, int64_t due, int32_t period_ms, uint32_t dpc, std
      }
      uint64_t seq = g_seq++;
      g_timer_seq[timer.get()] = seq;
@@ -2815,10 +2990,18 @@ index 9630759..2c81056 100644
      std::lock_guard<std::mutex> lock(g_timer_lock);
      return g_timer_seq.erase(&timer) != 0;
 diff --git a/runtime/kernel/threads.cpp b/runtime/kernel/threads.cpp
-index 56fadb8..5e60004 100644
+index 56fadb8..a3bba59 100644
 --- a/runtime/kernel/threads.cpp
 +++ b/runtime/kernel/threads.cpp
-@@ -90,6 +90,9 @@ void NameHostThread(const char* name) {
+@@ -4,6 +4,7 @@
+ #include <cstdlib>
+ #include <memory>
+ 
++#include "core/determinism.h"
+ #include "kernel/kernel.h"
+ 
+ #ifdef _WIN32
+@@ -90,6 +91,9 @@ void NameHostThread(const char* name) {
      using Fn = HRESULT(WINAPI*)(HANDLE, PCWSTR);
      static Fn set = reinterpret_cast<Fn>(reinterpret_cast<void*>(GetProcAddress(GetModuleHandleW(L"kernel32.dll"), "SetThreadDescription")));
      if (set) set(GetCurrentThread(), w);
@@ -2828,8 +3011,78 @@ index 56fadb8..5e60004 100644
  #else
      pthread_setname_np(pthread_self(), name);
  #endif
+@@ -171,6 +175,10 @@ void StartThread(ThreadRef t) {
+         }
+         LOGI("thread %X starts at %08X (%08X, %08X)", t->id, si.system_routine ? si.system_routine : si.start_routine,
+              si.start_routine, si.start_context);
++        // The title thread is the one that presents. Mark it before the first Sleep, which
++        // happens before the first present on the way into a level.
++        static std::atomic<int> pace_once{0};
++        if (det::FixedStep() && pace_once.exchange(1) == 0) det::NotePacer();
+         uint32_t code;
+         if (si.system_routine)
+             code = CallGuest(ctx, si.system_routine, {si.start_routine, si.start_context});
+@@ -200,6 +208,8 @@ void StartHostThread(const char* name, std::function<void(X86Context&)> fn) {
+ }
+ 
+ void ExitThread(uint32_t code) {
++    // pthread_exit does not unwind CallGuest, so the turn would stay taken.
++    det::AbandonGuest();
+     Thread* t = Current();
+     if (t) {
+         LOGI("thread %X exits with %08X", t->id, code);
+@@ -233,9 +243,27 @@ void SuspendPoint() {
+     t->resume_cv.wait(lock, [&] { return t->suspend.load() <= 0; });
+ }
+ 
++void SetAlertable(bool on) {
++    Thread* t = Current();
++    if (!t || !det::FixedStep()) return;
++    std::lock_guard<std::mutex> lock(t->apc_lock);
++    t->alertable.store(on, std::memory_order_relaxed);
++}
++
+ void QueueApc(Thread& t, uint32_t routine, uint32_t a1, uint32_t a2, uint32_t a3) {
+-    std::lock_guard<std::mutex> lock(t.apc_lock);
+-    t.apcs.push_back({routine, a1, a2, a3});
++    // Dispatcher lock first, then the APC lock. An alertable waiter holds the dispatcher
++    // lock across its check and its sleep, so the notify cannot land before the sleep.
++    std::lock_guard<std::mutex> dispatch(DispatchLock());
++    bool counted = false;
++    {
++        std::lock_guard<std::mutex> lock(t.apc_lock);
++        t.apcs.push_back({routine, a1, a2, a3});
++        if (t.alertable.load(std::memory_order_relaxed)) {
++            t.owed.fetch_add(1, std::memory_order_relaxed);
++            counted = true;
++        }
++    }
++    if (counted) det::NoteDeliverable(1);
+     SignalChanged();
+ }
+ 
+@@ -243,12 +271,19 @@ bool RunApcs(Thread& t) {
+     bool ran = false;
+     for (;;) {
+         std::array<uint32_t, 4> a;
++        bool counted = false;
+         {
+             std::lock_guard<std::mutex> lock(t.apc_lock);
+             if (t.apcs.empty()) break;
+             a = t.apcs.front();
+             t.apcs.pop_front();
++            int owed = t.owed.load(std::memory_order_relaxed);
++            if (owed > 0) {
++                t.owed.store(owed - 1, std::memory_order_relaxed);
++                counted = true;
++            }
+         }
++        if (counted) det::NoteDeliverable(-1);
+         CallGuest(*t.ctx, a[0], {a[1], a[2], a[3]});
+         ran = true;
+     }
 diff --git a/runtime/kernel/xboxkrnl.cpp b/runtime/kernel/xboxkrnl.cpp
-index 86cf14a..09d4992 100644
+index 86cf14a..79ba34c 100644
 --- a/runtime/kernel/xboxkrnl.cpp
 +++ b/runtime/kernel/xboxkrnl.cpp
 @@ -5,6 +5,7 @@
@@ -2896,13 +3149,17 @@ index 86cf14a..09d4992 100644
      using namespace std::chrono;
      static const auto start = steady_clock::now();
      uint64_t ns = uint64_t(duration_cast<nanoseconds>(steady_clock::now() - start).count());
-@@ -250,12 +270,43 @@ KERNEL_EXPORT(127, KeQueryPerformanceFrequency, 0) {
+@@ -250,12 +270,44 @@ KERNEL_EXPORT(127, KeQueryPerformanceFrequency, 0) {
  }
  
  KERNEL_EXPORT(151, KeStallExecutionProcessor, 1) {
 +    if (det::FixedStep()) {
 +        if (det::OnPacer()) det::Consume100ns(uint64_t(a[0]) * 10ull);
-+        else if (a[0]) det::WaitTicks(1);
++        else if (a[0]) {
++            det::BlockGuest();
++            det::WaitTicks(1);
++            det::UnblockGuest();
++        }
 +        return 0;
 +    }
 +#if defined(__APPLE__)
@@ -2923,23 +3180,35 @@ index 86cf14a..09d4992 100644
 +        uint64_t hundred = 0;
 +        if (interval < 0 && interval != INT64_MIN) hundred = uint64_t(-interval);
 +        if (det::OnPacer()) {
-+            if (hundred) det::Consume100ns(hundred);
++            // Sleep(0) is the prep loop: queue an APC, then poll until the loader has run it.
++            // PacerDelay yields the turn so that APC runs once, on every launch.
++            det::PacerDelay(hundred);
 +        } else {
-+            static bool logged = false;
-+            if (!logged) {
-+                logged = true;
-+                LOGR("det: a guest thread other than the presenter is in KeDelay, return %08X interval %lld", R32(ctx.esp),
-+                     (long long)interval);
-+            }
-+            // At least one sim tick, so a 1 ms loop cannot outrun the presenter.
++            det::BlockGuest();
 +            uint64_t ticks = det::WholeTicks(hundred);
 +            det::WaitTicks(ticks ? ticks : 1);
++            det::UnblockGuest();
 +        }
 +        return kSuccess;
 +    }
      int64_t interval = int64_t(R64(a[2]));
      bool alertable = a[1] & 0xFF;
      Thread* t = Current();
+@@ -840,6 +892,14 @@ KERNEL_EXPORT(140, KeResumeThread, 1) {
+ KERNEL_EXPORT(92, KeAlertResumeThread, 1) { return kimpl_KeResumeThread(ctx, a); }
+ 
+ KERNEL_EXPORT(238, NtYieldExecution, 0) {
++    if (det::FixedStep()) {
++        if (det::OnPacer()) det::YieldGuest();
++        else {
++            det::BlockGuest();
++            det::UnblockGuest();
++        }
++        return kSuccess;
++    }
+     SuspendPoint();
+     std::this_thread::yield();
+     return kSuccess;
 diff --git a/runtime/xdk/d3d8.cpp b/runtime/xdk/d3d8.cpp
 index 8c6c913..cfee2a2 100644
 --- a/runtime/xdk/d3d8.cpp
