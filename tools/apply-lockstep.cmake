@@ -100,6 +100,22 @@ if(EXISTS "${SDK}/runtime/kernel/objects.cpp" AND EXISTS "${_input}")
     endif()
 endif()
 
+# Env-gated hardware watch (FUZION_WATCH_VA). Off unless that variable is set.
+# The host patch's determinism.cpp does not have the marker, and neither does
+# the Mac tree until this patch lands, so both chains apply it.
+set(_watch "${REPO}/patches/sdk-lockstep-watch.patch")
+if(EXISTS "${SDK}/runtime/core/determinism.cpp" AND EXISTS "${_watch}")
+    file(READ "${SDK}/runtime/core/determinism.cpp" _watch_src)
+    if(NOT _watch_src MATCHES "XBE_WATCH_VA")
+        execute_process(COMMAND "${GIT_EXE}" -C "${SDK}" apply --whitespace=nowarn "${_watch}"
+                        RESULT_VARIABLE _rc)
+        if(NOT _rc EQUAL 0)
+            message(FATAL_ERROR "patches/sdk-lockstep-watch.patch failed (${_rc})")
+        endif()
+        message(STATUS "applied patches/sdk-lockstep-watch.patch")
+    endif()
+endif()
+
 file(READ "${SDK}/runtime/kernel/memory.cpp" _mem)
 if(NOT _mem MATCHES "XBE_LOCKSTEP_COMMIT")
     if(_mem MATCHES "HostProtect")
