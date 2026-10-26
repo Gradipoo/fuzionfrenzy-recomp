@@ -361,7 +361,7 @@ index 5b8aa22..b62ce91 100644
          for (;;) {
              Batch* b;
 diff --git a/runtime/gpu/shaders.cpp b/runtime/gpu/shaders.cpp
-index 274ab60..9bb1d75 100644
+index 274ab60..a08a09a 100644
 --- a/runtime/gpu/shaders.cpp
 +++ b/runtime/gpu/shaders.cpp
 @@ -205,6 +205,7 @@ std::string VsInputs(uint16_t regs, uint64_t decode) {
@@ -394,21 +394,23 @@ index 274ab60..9bb1d75 100644
  void alphatest(float a) {
      int f = (int)misc.y;
      int v = (int)round(a * 255), r = (int)misc.x;
-@@ -858,8 +863,12 @@ std::string PixelHlsl(const PixelKey& k) {
+@@ -858,8 +863,14 @@ std::string PixelHlsl(const PixelKey& k) {
              const uint32_t* f = k.ff[i];
              if (f[0] <= 1) break;
              const TexInfo& t = k.tex[i];
-+            // No texture on this stage is sampled as opaque white. BLENDTEXTUREALPHA then
-+            // replaces the color with that white. The Twisted System characters do this on
-+            // stage 1 (no texture bound) after a colored stage-0 texel, so skip it.
-+            if (!t.kind && f[0] == 14 && f[4] <= 1) continue;
++            // No texture on this stage is sampled as opaque white. BLENDTEXTUREALPHA
++            // lerps with that alpha of 1, so the result is Arg1. The in-round Twisted
++            // System characters set Arg1 to this texture and the alpha op to SELECTARG1
++            // (the alpha-op-disabled guard never matched), so a colored stage-0 texel
++            // was replaced with flat white. Skip the stage when Arg1 is that sample.
++            if (!t.kind && f[0] == 14 && (f[1] & 0x1F) == 2) continue;
              std::string norm = (t.rect ? F(" / texsize[%d].xy", i) : "") + F(" + texsize[%d].zw", i);
 -            std::string uv = (k.proj >> i) & 1 ? F("(tc%d.xy / tc%d.w)%s", i, i, norm.c_str()) : F("tc%d.xy%s", i, norm.c_str());
 +            std::string uv = (k.proj >> i) & 1 ? F("projuv(tc%d)%s", i, norm.c_str()) : F("tc%d.xy%s", i, norm.c_str());
              std::string cube;
              if (t.shadow)
                  body += F("float4 t%d = shadow(tex%d, smp%d, (tc%d.xy / tc%d.w)%s, tc%d.z / tc%d.w, %d, i.pos.xy, texsize[%d].xy);\n", i, i,
-@@ -873,8 +882,23 @@ std::string PixelHlsl(const PixelKey& k) {
+@@ -873,8 +884,23 @@ std::string PixelHlsl(const PixelKey& k) {
              body += Hooks().Fetched(t, i);
              if ((k.alphakill >> i) & 1) body += F("if (t%d.a == 0) discard;\n", i);
              const char* dst = f[8] == 5 ? "tmp" : "cur";
