@@ -91,3 +91,45 @@ run reports 0 skipped draws at a mean of 59.7 fps. **What is not proven:** that 
 cause of the white floor. That scene was only ever reproduced once, before the fix; across
 roughly 25 minutes of driven play afterwards it has not recurred, but absence over eleven
 sampled frames and two 450 s capture runs is not the same as a demonstrated repair.
+
+## Twisted System characters drew flat white — solved
+
+Recorded 2026-10-25 on the macOS arm64 build, Twisted System, manual play.
+
+In the round the characters are small vertex-program draws (`B01CA761`) with stage 0
+`MODULATE2X` on a colored 512×512 A1R5G5B5 texture. Diffuse peaks near 0.74, so the
+stage-0 product is the texel. Stage 1 is color op 14, args texture / current, alpha op
+`SELECTARG1`, and no texture is bound. This shader reads op 14 as `BLENDTEXTUREALPHA`.
+A missing texture is `float4(1,1,1,1)`, the blend weight is that alpha, and the result
+is arg1: flat white. Blend and fog are off on these draws, so nothing after the stage
+hides it. Character select uses a different program whose stage 1 is disabled, which is
+why those figures were already textured.
+
+The stage is skipped when it has no texture, the color op is 14, and color arg1 is the
+texture (complement not set). A narrower skip, only when the alpha op was disabled, did
+not match: these draws set `SELECTARG1`.
+
+Checked the same night, and not applied: Cxbx-Reloaded `NormalizeValue()` in
+`src/core/hle/D3D8/Direct3D9/TextureStates.cpp` remaps D3DTOP 13–16 when
+`g_LibVersion_D3D8 <= 3948` (old order verified on 3948, later order on 4039). Fuzion
+Frenzy's D3D8 is 3925. Their later-XDK constants, which match this shader's cases, are
+13 `BLENDCURRENTALPHA`, 14 `BLENDTEXTUREALPHA`, 15 `BLENDFACTORALPHA`,
+16 `BLENDTEXTUREALPHAPM`, 17 `PREMODULATE`. The remap is:
+
+| Raw | XDK 3925 | Later value |
+| --- | --- | --- |
+| 13 | `BLENDTEXTUREALPHA` | 14 |
+| 14 | `BLENDFACTORALPHA` | 15 |
+| 15 | `BLENDTEXTUREALPHAPM` | 16 |
+| 16 | `BLENDCURRENTALPHA` | 13 |
+
+`PREMODULATE` (17) is the same in both and is not remapped. Raw 14 on these character
+draws would become `BLENDFACTORALPHA`. The texture factor on them is `0x60000000`
+(alpha 96/255) and arg1 would still be the missing texture, sampled white, so the stage
+would mix white back into the texel. That is a different picture from the skip, which
+was played through the countdown and the round with the characters textured and with no
+other scene in that session looking wrong. The decoder is unchanged so the skip still
+sees op 14.
+
+The floor mesh in that round is separate: fixed-function, 8192 vertices, stage 0
+`MODULATE2X` on a 64×64 P8 texture, stage 1 disabled. This skip does not run on it.
