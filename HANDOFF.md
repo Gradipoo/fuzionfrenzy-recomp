@@ -1,11 +1,19 @@
-# Cold start (26 Oct 2026, Pacific)
+# Maintainer-local handoff (26 Oct 2026, Pacific)
 
-A new agent can start from this file. The procedure is
-`docs/agent-workflow.md` (one task per agent, what to update here, how to
-verify, how to report). Settled choices are `docs/decisions.md`. The section
-below the rule is the macOS GPU and launcher state. Battery numbers and the
-MoltenVK flush notes there are still the open GPU work. Determinism, replays,
-and the branch map are here.
+This file is one maintainer's machine. Absolute paths, the worker, the HDD
+snapshot, Lima guest names, and the recordings under `det-logs/` belong
+here and only here. Another contributor, or their agent, starts at
+`AGENTS.md` and `docs/agent-workflow.md`, supplies their own legally
+obtained disc, and does not copy the paths below into those files.
+
+`docs/agent-workflow.md` is the shared procedure (one task per agent, what
+to update in this file at the end of a task on this machine, how to verify,
+how to report). Settled choices are `docs/decisions.md`. `CLAUDE.md` points
+at `AGENTS.md`.
+
+The section below the determinism notes is the macOS GPU and launcher state
+on this same machine. Battery numbers and the MoltenVK flush notes there
+are still the open GPU work.
 
 USA Xbox Fuzion Frenzy, XDK 3925, title `0x4D530002`. Static recomp. SDK submodule
 `sdk/` is `abilliontokens/XboxXBERecomp` @ `58757ab` (`fuzion-frenzy-port`). The XBE
@@ -18,10 +26,11 @@ never leaves this Mac. SHA-1 of `default.xbe` is `c6fb6082900532cde5fa8dbb7de8df
 @ `36d66fb`.
 
 The gameplay2 write-up is `fc4730d` ("Record the x86_64 gameplay2 match and
-the boot-thread exit."). The cold-start handoff is `09b7843`. The agent
-workflow (`docs/agent-workflow.md`), the decisions log (`docs/decisions.md`),
-and `AGENTS.md` are the commit on top of that. `git log -1` on this branch
-is the hash to report.
+the boot-thread exit."). The first cold-start handoff is `09b7843`. The
+shared agent docs landed in `b114caa`. The commit on top of that makes
+`AGENTS.md`, `docs/agent-workflow.md`, and `docs/decisions.md`
+contributor-neutral and leaves this file as the maintainer-local note.
+`git log -1` on this branch is the hash to report.
 
 No pull request was opened. `ManagePullRequest` `create_pr` returned unauthenticated.
 Compare:

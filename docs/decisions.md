@@ -1,12 +1,16 @@
 # Decisions
 
-Append-only log of choices a later agent should keep. Dates are
-America/Los_Angeles. The procedure is `docs/agent-workflow.md`. The harness
-manual is `docs/netplay-determinism.md`. Current commands and hashes are in
-`HANDOFF.md`.
+Append-only log of choices a later agent should keep. Paths in this file are
+repository-relative. Machine paths, worker names, and HDD snapshots stay in
+`HANDOFF.md`, which is maintainer-local.
 
-Add an entry at the bottom when a task chooses an approach. Include the date,
-the commit, the choice, and what evidence would reopen it.
+The procedure is `docs/agent-workflow.md`. The harness manual is
+`docs/netplay-determinism.md`. Each contributor records replays from their
+own legally obtained disc; those files are not in the clone.
+
+Add an entry at the bottom when a task chooses an approach. Include the date
+with a timezone, the commit, the choice, and what evidence would reopen it.
+Dates below are America/Los_Angeles.
 
 ## 2026-10-25 — Lockstep over streaming
 
@@ -44,8 +48,8 @@ C sources in `sources.txt` only. Entry points are renamed `olm_*`. x87
 `FSIN` / `FCOS` / `FSINCOS` / `FPTAN` use openlibm plus the 66-bit pi
 reduction. The previous Taylor series is retired.
 
-`scripts/fp-cross.sh` on this Mac (clang arm64, clang x86_64 under Rosetta,
-Homebrew GCC 16.2.0 arm64) printed `06a5a5d542b715f9 PASS`. That hash is
+`scripts/fp-cross.sh` (clang arm64, clang x86_64 under Rosetta, GCC 16.2.0
+arm64) printed `06a5a5d542b715f9 PASS`. That hash is
 `tools/fp-digest.expected`. CI checks the native digest. The idle replay
 moved with the transcendental change: frame 0 total stayed
 `574c0f97185e0166`, frame 239 became `41a20ce3c40f8974`. Two runs of that
@@ -93,9 +97,11 @@ value 2). Mac's padding was stable, so the stored packet stayed 1.
 
 The packet now advances when a report field changes: `connected`,
 `buttons`, the eight analog bytes, and `lx` / `ly` / `rx` / `ry`. Normal
-play uses the same compare. `gameplay2.pads` stays the recording to replay.
-After this change, Mac and arm64 Linux both printed `PASS 7766 frames match`
-against `det-logs/gameplay2.detlog`. Frame 7765 total `6a609a6637cce6ba`.
+play uses the same compare. The recording already made on the stable host
+stayed valid, so that pad file did not need to be recorded again. After
+this change, macOS arm64 and Linux arm64 both printed `PASS 7766 frames
+match` against that recording's expect log. Frame 7765 total
+`6a609a6637cce6ba`. The log itself stays on the machine that recorded it.
 
 Reopen this when a replay shows two hosts advancing the packet on a field
 the game reads and this compare ignores.
