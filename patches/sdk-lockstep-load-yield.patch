@@ -53,7 +53,62 @@ diff --git a/runtime/core/determinism.cpp b/runtime/core/determinism.cpp
          LOGE("det: cannot write %s", C().state_log);
          return;
      }
-@@ -818,28 +829,333 @@ void Consume100ns(uint64_t hundred_ns) {
+@@ -784,6 +795,36 @@ uint64_t Hold(uint64_t& last, bool& have, uint64_t now) {
+     return now;
+ }
+ 
++// RDTSC and interrupt time stay on the present's tick. A frame samples them
++// a handful of times; advancing on each repeat made the in-game timer run
++// several steps per present while the picture was still one frame. A tight
++// spin (many reads, no present) still advances, or a load that waits on the
++// counter would not finish. QPC is unchanged: the boot wait is thirty reads.
++constexpr int kSpinReads = 40;
++bool g_logged_spin_burst = false;
++thread_local int t_rdtsc_burst = 0;
++thread_local int t_interrupt_burst = 0;
++
++uint64_t PresentTick(uint64_t& last, bool& have, int& burst) {
++    uint64_t now = g_time.load(std::memory_order_relaxed);
++    if (!have || now != last) {
++        have = true;
++        last = now;
++        burst = 0;
++        return now;
++    }
++    if (++burst < kSpinReads) return now;
++    if (!g_logged_spin_burst) {
++        g_logged_spin_burst = true;
++        LOGR("det: a clock spin advanced the sim tick; ordinary repeats stay on the present");
++    }
++    AdvanceTicksLocked(1);
++    now = g_time.load(std::memory_order_relaxed);
++    last = now;
++    burst = 0;
++    return now;
++}
++
+ uint64_t ClockQpc() {
+     std::lock_guard<std::mutex> lock(g_time_mu);
+     uint64_t ticks = Hold(g_last_qpc, g_have_qpc, g_time.load(std::memory_order_relaxed));
+@@ -793,15 +834,13 @@ uint64_t ClockQpc() {
+ 
+ uint64_t ClockRdtsc() {
+     std::lock_guard<std::mutex> lock(g_time_mu);
+-    uint64_t ticks = Hold(g_last_rdtsc, g_have_rdtsc, g_time.load(std::memory_order_relaxed));
+-    g_last_rdtsc = ticks;
++    uint64_t ticks = PresentTick(g_last_rdtsc, g_have_rdtsc, t_rdtsc_burst);
+     return ticks * (kRdtscHz / 60ull);
+ }
+ 
+ uint64_t ClockInterrupt() {
+     std::lock_guard<std::mutex> lock(g_time_mu);
+-    uint64_t ticks = Hold(g_last_interrupt, g_have_interrupt, g_time.load(std::memory_order_relaxed));
+-    g_last_interrupt = ticks;
++    uint64_t ticks = PresentTick(g_last_interrupt, g_have_interrupt, t_interrupt_burst);
+     return ticks * kInterruptPerFrame;
+ }
+ 
+@@ -818,28 +857,333 @@ void Consume100ns(uint64_t hundred_ns) {
  void NotePacer() { t_pacer = true; }
  bool OnPacer() { return t_pacer; }
  
@@ -393,7 +448,7 @@ diff --git a/runtime/core/determinism.cpp b/runtime/core/determinism.cpp
  
  void NoteDeliverable(int delta) {
      if (!delta || !FixedStep()) return;
-@@ -849,13 +1165,21 @@ void NoteDeliverable(int delta) {
+@@ -849,13 +1193,21 @@ void NoteDeliverable(int delta) {
  
  void AcquireTurn() {
      std::unique_lock<std::mutex> lock(g_sched_mu);
@@ -417,7 +472,7 @@ diff --git a/runtime/core/determinism.cpp b/runtime/core/determinism.cpp
  }
  
  void ReleaseTurn() {
-@@ -867,6 +1191,20 @@ void ReleaseTurn() {
+@@ -867,6 +1219,20 @@ void ReleaseTurn() {
      g_sched_cv.notify_all();
  }
  
@@ -438,7 +493,7 @@ diff --git a/runtime/core/determinism.cpp b/runtime/core/determinism.cpp
  void EnterGuest() {
      if (!FixedStep()) return;
      if (t_guest_depth++ > 0) return;
-@@ -882,17 +1220,62 @@ void LeaveGuest() {
+@@ -882,40 +1248,126 @@ void LeaveGuest() {
  
  void BlockGuest() {
      if (!FixedStep() || !t_guest_hold) return;
@@ -501,7 +556,18 @@ diff --git a/runtime/core/determinism.cpp b/runtime/core/determinism.cpp
      if (!t_guest_hold) return;
      LOGR("det: a guest thread exited while it held the turn; the turn is released");
      ReleaseTurn();
-@@ -908,12 +1291,46 @@ void YieldGuest() {
+ }
+ 
++std::atomic<uint64_t> g_yield_ns{0};
++
+ void YieldGuest() {
+     if (!FixedStep() || !t_guest_hold) return;
+     if (!g_logged_yield) {
+         g_logged_yield = true;
+         LOGR("det: presenter yield runs other guest threads until they block");
+     }
++    const auto yield_t0 = std::chrono::steady_clock::now();
+     std::unique_lock<std::mutex> lock(g_sched_mu);
      t_guest_hold = false;
      g_busy = 0;
      g_sched_cv.notify_all();
@@ -551,8 +617,14 @@ diff --git a/runtime/core/determinism.cpp b/runtime/core/determinism.cpp
 +    }
      g_busy = 1;
      t_guest_hold = true;
++    g_yield_ns.fetch_add(uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(
++                                      std::chrono::steady_clock::now() - yield_t0)
++                                      .count()),
++                         std::memory_order_relaxed);
  }
-@@ -1045,7 +1462,20 @@ void OnPresented(X86Context& ctx) {
+ 
+ void PacerDelay(uint64_t hundred_ns) {
+@@ -1045,12 +1497,30 @@ void OnPresented(X86Context& ctx) {
      if (c.fixed) {
          std::lock_guard<std::mutex> lock(g_time_mu);
          AdvanceTicksLocked(1);
@@ -560,6 +632,9 @@ diff --git a/runtime/core/determinism.cpp b/runtime/core/determinism.cpp
 +    }
 +    // BumpVblank signals the vblank event. That kick takes g_time_mu, so it
 +    // stays outside the lock above.
++    if (c.fixed && (next % 600ull) == 0)
++        LOGR("det: present %llu sim tick %llu", (unsigned long long)next,
++             (unsigned long long)g_time.load(std::memory_order_relaxed));
 +    if (c.fixed) d3d::BumpVblank();
 +    // XBE_LOAD_YIELD: the title thread holds the guest turn from boot. A frame
 +    // that never calls KeDelay never lets the loader run, so the picture keeps
@@ -574,6 +649,14 @@ diff --git a/runtime/core/determinism.cpp b/runtime/core/determinism.cpp
      }
      g_in_present = false;
      if (c.frames && next >= c.frames) {
+         if (g_state) std::fflush(g_state);
+-        LOGR("det: reached %llu frames", (unsigned long long)c.frames);
++        LOGR("det: reached %llu frames, sim tick %llu, yield %.2f ms/present", (unsigned long long)c.frames,
++             (unsigned long long)g_time.load(std::memory_order_relaxed),
++             next ? double(g_yield_ns.load(std::memory_order_relaxed)) / double(next) / 1e6 : 0);
+         kernel::Shutdown(0);
+     }
+ }
 diff --git a/runtime/core/determinism.h b/runtime/core/determinism.h
 --- a/runtime/core/determinism.h
 +++ b/runtime/core/determinism.h
@@ -853,42 +936,22 @@ diff --git a/runtime/gpu/render_thread.cpp b/runtime/gpu/render_thread.cpp
  #include "core/diag.h"
  #include "core/log.h"
  #include "gpu/backend.h"
-@@ -187,6 +188,7 @@ public:
-         Use(s.zs.header);
-         Written(s.rt);
-         if (cur_->cmds.size() >= kBatchCommands) Submit();
-+        DrainFixed();
-         perf.Add(g_perf_capture_ns);
-     }
- 
-@@ -208,6 +210,7 @@ public:
-         Use(s.rt.header);
-         Use(s.zs.header);
-         if (flags & kClearTarget) Written(s.rt);
-+        DrainFixed();
-         perf.Add(g_perf_capture_ns);
-     }
- 
-@@ -226,6 +229,7 @@ public:
-         Use(src.header);
-         Use(dst.header);
-         Written(dst);
-+        DrainFixed();
-         perf.Add(g_perf_capture_ns);
-     }
- 
-@@ -238,14 +242,18 @@ public:
+@@ -236,9 +237,12 @@ public:
+         c.s1.header = Header(front.header);
+         cur_->cmds.push_back(c);
          Use(front.header);
-         uint64_t id = Submit();
+-        uint64_t id = Submit();
          perf.Add(g_perf_capture_ns);
 -        // the title records one frame while the one before it draws
--        Wait(last_present_, WaitFor::Frame, nullptr);
-+        // Fixed step already waited for this frame inside Submit. The overlap with the
-+        // previous frame is wall-clock GPU progress, and a lock would sample it.
-+        if (!det::FixedStep()) Wait(last_present_, WaitFor::Frame, nullptr);
++        // One frame of overlap, fixed step included. Waiting here for this
++        // frame's swapchain present put the guest behind vsync and dropped
++        // Sumo and Jetstream under 60 Hz. The previous present is already
++        // queued. A fence, IsBusy, or a read-back still drains first.
++        uint64_t id = Submit();
+         Wait(last_present_, WaitFor::Frame, nullptr);
          last_present_ = id;
      }
- 
+@@ -246,6 +250,9 @@ public:
      void Sync(uint32_t data, uint32_t size) override { ReadBack(data, false, size); }
  
      void SyncLate(uint32_t data, uint32_t size) override {
@@ -898,7 +961,7 @@ diff --git a/runtime/gpu/render_thread.cpp b/runtime/gpu/render_thread.cpp
          if (!inner_->DeliverLate(data, size)) {
              if (diag::Perf()) LOG_FIRST(16, "render thread: no finished copy of %08X for a NOOVERWRITE lock, reading it back now", data);
              written_.insert(data);
-@@ -254,6 +262,7 @@ public:
+@@ -254,6 +261,7 @@ public:
          Cmd c{Op::RecordLate};
          c.a = data;
          cur_->cmds.push_back(c);
@@ -906,11 +969,8 @@ diff --git a/runtime/gpu/render_thread.cpp b/runtime/gpu/render_thread.cpp
      }
  
      void Flush() override {
-@@ -265,12 +274,20 @@ public:
-         Cmd c{Op::Gamma};
-         c.data = Put(ramp, 768);
+@@ -267,10 +275,17 @@ public:
          cur_->cmds.push_back(c);
-+        DrainFixed();
      }
  
 -    uint32_t Fence() override { return uint32_t(cur_->id); }
@@ -928,32 +988,57 @@ diff --git a/runtime/gpu/render_thread.cpp b/runtime/gpu/render_thread.cpp
          auto it = last_use_.find(resource);
          return it != last_use_.end() && it->second > done_.load();
      }
-@@ -442,6 +459,13 @@ private:
+@@ -442,6 +457,20 @@ private:
          if (s.header) written_.insert(mem::VirtualFromPhysical(s.data));
      }
  
-+    // Fixed step must not return to the guest while a batch is still drawing.
-+    // A lock, IsBusy, or a fence would otherwise follow the GPU's wall clock.
++    // A lock, IsBusy, or a fence has to see the draws already recorded, or it
++    // would follow the render thread's progress. Draws themselves stay batched.
 +    void DrainFixed() {
-+        if (!det::FixedStep() || cur_->cmds.empty()) return;
-+        Submit();
++        if (!det::FixedStep()) return;
++        uint64_t id = cur_->cmds.empty() ? last_queued_ : Submit();
++        if (!id || done_.load() >= id) return;
++        static bool logged = false;
++        if (!logged) {
++            logged = true;
++            LOGR("det: fixed step finishes recorded GPU work before the guest reads it");
++        }
++        Wait(id, WaitFor::Flush, nullptr);
 +    }
 +
      uint64_t Submit() {
          uint64_t id = cur_->id;
          {
-@@ -450,6 +474,14 @@ private:
+@@ -449,6 +478,7 @@ private:
+             queue_.push_back(cur_);
          }
          cv_.notify_one();
++        last_queued_ = id;
          cur_ = NewBatch();
-+        if (det::FixedStep()) {
-+            static bool logged = false;
-+            if (!logged) {
-+                logged = true;
-+                LOGR("det: fixed step finishes GPU work before the guest continues");
-+            }
-+            Wait(id, WaitFor::Flush, nullptr);
-+        }
          return id;
      }
+@@ -568,7 +598,7 @@ private:
+     std::unordered_map<uint32_t, uint64_t> last_use_;
+     std::unordered_set<uint32_t> written_;  // surfaces drawn since their last read-back, by data address
+     std::unordered_set<uint64_t> logged_;   // perf diagnostic: read-backs named once, by address and kind
+-    uint64_t next_id_ = 0, last_present_ = 0;
++    uint64_t next_id_ = 0, last_present_ = 0, last_queued_ = 0;
  
+     // the render thread
+     State state_;
+diff --git a/runtime/xdk/d3d8.cpp b/runtime/xdk/d3d8.cpp
+--- a/runtime/xdk/d3d8.cpp
++++ b/runtime/xdk/d3d8.cpp
+@@ -975,7 +975,11 @@ uint32_t PresentFrame(const char* name) {
+         }
+     }
+     if (g_backend) g_backend->Present(SurfaceOf(g_buffers[1]));
+-    if (!det::FixedStep()) app::Pace();
++    // Guest clocks stay virtual under fixed step. The picture still waits out
++    // the fps cap, so a full-speed run is 60 Hz and the in-game timer matches
++    // the wall. Vsync, when it is on, waits as well; Pace is what holds 60
++    // when the window is minimized and the driver does not.
++    app::Pace();
+     // like the XDK, the surfaces stay put and their memory rotates: titles keep back buffer pointers and copy its data
+     uint32_t last = g_buffers[g_buffer_count - 1], data = R32(last + 4), lk = R32(last + 8);
+     for (uint32_t i = g_buffer_count - 1; i > 0; i--) {

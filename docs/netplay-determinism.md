@@ -32,9 +32,9 @@ The command line wins over the environment variable. `--name value` and `--name=
 
 A frame is one `D3DDevice_Present` (this XDK has no `Swap` that the title calls). The guest body of `Present` is replaced, and the only caller of `BlockUntilVerticalBlank` sat inside that body, so the title does not wait on vblank itself.
 
-Present advances the sim tick by one, after the checksum. A guest read of QPC, RDTSC, or interrupt/system time that would return the same value as the previous read of that clock advances one tick first and then returns the new value. `KeDelayExecutionThread` and `KeStallExecutionProcessor` consume their guest duration in whole ticks and return, without sleeping.
+Present advances the sim tick by one, after the checksum. A repeated `KeQueryPerformanceCounter` read advances one tick first and then returns the new value. That is the boot wait: thirty reads and no present. RDTSC and interrupt/system time stay on the present's tick when a frame samples them, so the in-game timer moves one step per present. A tight spin, forty reads of the same clock with the tick unmoved, still advances, or a load that waits on the counter would not finish. `KeDelayExecutionThread` and `KeStallExecutionProcessor` consume their guest duration in whole ticks and return, without sleeping. The picture waits out the fps cap (60) on every present, fixed step included, so a full-speed run matches the wall clock. Guest time stays the sim tick.
 
-That repeat rule is what gets past boot. `sub_0004C510` samples RDTSC, then spins on `KeQueryPerformanceCounter` until the delta reaches the performance frequency divided by two (half a second, 1,687,500 counts). A counter that only moved on present never left that spin: the first run hashed frame 0 and then sat in the wait at 100% CPU. Thirty repeated reads are exactly half a second (`30 * 56250`), so the wait exits and the TSC delta beside it stays in step with the QPC delta. Two reads that are not a wait also see one tick between them. The qpc column in the state log is how you see whether a frame is polling the counter far more than once.
+That repeat rule is what gets past boot. `sub_0004C510` samples RDTSC, then spins on `KeQueryPerformanceCounter` until the delta reaches the performance frequency divided by two (half a second, 1,687,500 counts). A counter that only moved on present never left that spin: the first run hashed frame 0 and then sat in the wait at 100% CPU. Thirty repeated QPC reads are exactly half a second (`30 * 56250`), so the wait exits and the TSC delta beside it stays in step with the QPC delta, because those QPC reads move the shared tick. Two QPC reads that are not a wait also see one tick between them. An RDTSC read does not. The qpc column in the state log is how you see whether a frame is polling the counter far more than once.
 
 | Source | Fixed-step value |
 | --- | --- |
@@ -46,7 +46,7 @@ That repeat rule is what gets past boot. `sub_0004C510` samples RDTSC, then spin
 | `KeDelayExecutionThread`, `KeStallExecutionProcessor` | On the thread that presents: consume whole ticks of the guest duration, then yield. A delay shorter than one tick does not move time by itself. The yield runs every other guest thread that is already waiting until each of them is blocked again, so a `Sleep(0)` poll observes the same APC every run. If that delay was non-zero and no other thread ran, one sim tick is added so a timed poll cannot spin. On any other thread: arm the deadline while that thread still holds the turn, drop the turn, block until sim time has covered the delay (at least one tick), then wait for the turn again. No wall-clock sleep. The present yield does not resume the title while that deadline is already due or the thread is between the delay and its next block. A delay that still has ticks left stays blocked, and the yield returns. If the presenter is blocked in a kernel wait, that delay advances virtual time itself so the loader can finish and signal. A present yield does not grant that time. |
 | Timer DPCs | Deadline is guest 100 ns. The timer thread does not pop. Present fires due timers inline, in deadline order, on the present thread, then rearms a period by `period_ms * 10000` (100 ns). |
 | Vblank | The free-running thread does not increment. Present bumps the count once. `BlockUntilVerticalBlank` returns at once. |
-| `app::Pace` | Skipped, so the harness is not fps-capped. A Vulkan present can still wait on vsync. |
+| `app::Pace` | Still applied, fixed step included. The harness is capped at `fps_cap` (60). A Vulkan present can also wait on vsync. |
 
 Under fixed step, `Wait` timeouts are sim ticks. A waiting thread stays off the turn until the object is signaled, an alertable APC is queued, or that sim deadline arrives. It does not wake on the wall clock. The stall row is the check for that.
 
@@ -97,7 +97,7 @@ Excluded, and zeroed before the hash:
 - Color and depth surface payloads (the size comes from the surface size dword). The GPU writes pixels when it retires work. A matching guest command stream can still disagree if those bytes were hashed. Surface headers stay in the hash.
 - Stacks at `0xD0000000`. They hold spills and return addresses, and the host schedules the threads.
 
-Under fixed step a submit waits until the render thread finishes that batch, and a readback is copied into guest RAM only after that wait. The previous frame is not left overlapping the next one.
+Under fixed step, draws stay batched. The render thread is caught up when the guest reads a result back or inserts a fence. Present keeps one frame of overlap with the swapchain, the same shape as a normal frame, so a heavy scene is not stuck behind vsync. A wait after every draw dropped that scene under 60 Hz.
 
 Included on purpose: audio sample bytes in physical RAM, and the packet status words the mixer writes. A mixer divergence shows up as a physical slice. The fixed-step SDL callback writes silence and does not move a voice cursor. Present mixes exactly 800 frames (48000/60) on the present thread, then runs the completion callbacks there, before the hash.
 
@@ -151,7 +151,11 @@ Nothing in these idle rows diverged. They do not cover menus, character select, 
 
 The openlibm rebuild, 25 Oct 2026 10:20 PM PT, was two more instance-2 idle replays, not a full a/b/c matrix. They match each other. Frame 0 total `574c0f97185e0166`. Frame 239 total `41a20ce3c40f8974`, delay count 3, seed `00000001`. The 9:34 PM totals above are the previous math.
 
-On 26 Oct 2026, after the present yield and fixed-step GPU completion, `FUZION_DET_FRAMES=240 ./scripts/det-matrix.sh` on this Mac printed `MATRIX PASS`. Rows a, b, and c match, including the 30 ms stall and instances 2 and 3 at once. Frame 0 is still `574c0f97185e0166`. Frame 60 is `baaf36e0af926229`. Frame 120 is `5d0383df0cdc90d9`. Frame 180 is `fe93328f826a54bb` on a1, a2, both parallel instances, and the stall run. Row d is still unrecorded.
+On 26 Oct 2026, after the present yield and fixed-step GPU completion, `FUZION_DET_FRAMES=240 ./scripts/det-matrix.sh` on this Mac printed `MATRIX PASS`. Rows a, b, and c match, including the 30 ms stall and instances 2 and 3 at once. Frame 0 is still `574c0f97185e0166`. Frame 60 is `baaf36e0af926229`. Frame 120 is `5d0383df0cdc90d9`. Frame 180 is `fe93328f826a54bb` on a1, a2, both parallel instances, and the stall run.
+
+Later that morning the same recording was replayed with the present paced to 60 Hz and with RDTSC left on the present's tick. Idle frame 0 is still `574c0f97185e0166`. Two idle replays match each other. Frame 60 is `c54a1b7dd2ac5949`. Frame 120 is `b136e69e7660e89f`. Frame 180 is `9ceb396f12b8bcb3`. From present 600 on, the sim tick advances once per present (present 600 is tick 4199, present 4200 is tick 7806, present 5999 is tick 9637). A 4200-frame replay of `gameplay.pads` finished in 70 s, 10.0 s per 600 presents from present 600 through the Sumo stretch. The present yield was 0.02 ms. The last stretch of Jetstream is still the heavy one: about 40 presents per second with the window minimized. The sim tick still advances once per present there, so the timer stays with the picture. The pre-pace binary averaged about 22 fps over the whole file, because every draw waited for the render thread. The yield is not that cost. A normal (fixed-step off) 120-frame replay of the same pads still finishes in about 4.7 s.
+
+Two replays of all 5999 frames of `gameplay.pads` on this paced build match (`PASS 5999 frames match`). Two replays on the pre-pace binary match as well. Against the live log from the recording session, `.data`, physical RAM, and the system region match on every frame. Only user slice 0 differs. That session was `./RingHost` with no `--instance`. The pre-pace replays used `--instance 2` and a fresh `hdd2`. The slice does not move the simulation.
 
 ## Manual check
 
@@ -171,7 +175,9 @@ env -u FUZION_AUTOSTART XBE_MUTE=1 FUZION_FIXED_STEP=1 FUZION_SEED=1 \
   ./RingHost
 ```
 
-Go through the board menus and character select, then play Twisted System, Sumo Balls, and Jetstream. A few seconds of each is enough; finishing a round is better. Quit with Cmd-Q. Do not commit `det-logs/`. Say when `gameplay.pads` is there and the matrix can replay it.
+Go through the board menus and character select, then play Twisted System, Sumo Balls, and Jetstream. A few seconds of each is enough; finishing a round is better. Quit with Cmd-Q. Do not commit `det-logs/`.
+
+`tools/shots/scenes.txt` on the screenshot branch names these presents in the 26 Oct 2026 recording, replayed with fixed step, seed 1, and the 60 Hz pace: title 200, board 1200, character select 1400, Twisted System countdown 1800, Twisted System round 2200, Sumo Balls 3400, Jetstream 5000.
 
 Two humans, still with one pad. Variant A puts the keyboard on port 2 (same map as port 1: WASD, arrows, space = A, enter = Start, and the rest of the table in the README). The pad stays on port 1. Both are in the pads file. Variant B replays a port-1 recording and writes port 2 from the mash. Leave the flag you are not using unset. If both are set, the mash wins.
 
@@ -213,7 +219,7 @@ The menus and the minigames should follow the recording with the controllers ign
 ## Still wall-clock, even when the idle rows match
 
 - A `srand` after image load replaces `--seed`. The seed column shows it. Fixed time keeps a clock-seeded `srand` stable across runs.
-- A host thread that writes guest RAM without taking the turn (an IO status block). Fixed step finishes a GPU batch before the guest continues, so a fence readback is not sampled on the host clock. The 240-frame stall row matched. An earlier 8-frame stall differed once at frame 0 in `user_0` only, and the raw dumps were identical; it did not repeat.
+- A host thread that writes guest RAM without taking the turn (an IO status block). A fixed-step read-back or fence waits until that batch is recorded, so it is not sampled on the host clock. Present itself overlaps one frame. An earlier 8-frame stall differed once at frame 0 in `user_0` only, and the raw dumps were identical; it did not repeat.
 - Stacks are not hashed, so a value that only ever lived in a spill is invisible.
 - GPU pixels are not hashed, so a render-only divergence does not fail a row. That is deliberate.
 
