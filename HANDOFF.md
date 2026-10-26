@@ -1,7 +1,240 @@
-# macOS arm64 handoff
+# Cold start (26 Oct 2026, Pacific)
+
+A new agent can start from this file. The section below the rule is the macOS GPU and
+launcher state. Battery numbers and the MoltenVK flush notes there are still the open
+GPU work. Determinism, replays, and the branch map are here.
+
+USA Xbox Fuzion Frenzy, XDK 3925, title `0x4D530002`. Static recomp. SDK submodule
+`sdk/` is `abilliontokens/XboxXBERecomp` @ `58757ab` (`fuzion-frenzy-port`). The XBE
+never leaves this Mac. SHA-1 of `default.xbe` is `c6fb6082900532cde5fa8dbb7de8dfa202f0fdad`.
+
+## Latest branch
+
+`cursor/linux-det-c2dc` is the latest line. Tip before this handoff was `fc4730d`
+("Record the x86_64 gameplay2 match and the boot-thread exit."). Review base is
+`cursor/fixed-step-pace-c2dc` @ `92002fe`. Parent of that is `cursor/xbox-one-usb-c2dc`
+@ `36d66fb`.
+
+No pull request was opened. `ManagePullRequest` `create_pr` returned unauthenticated.
+Compare:
+
+https://github.com/Gradipoo/fuzionfrenzy-recomp/compare/cursor/fixed-step-pace-c2dc...cursor/linux-det-c2dc
+
+Do not open that PR with `gh`. `gh` is logged in as Gradipoo and is for viewing CI
+only (`gh run list`, `gh run view`).
+
+Commits on this line are authored `port <port@local>` by setting `GIT_AUTHOR_NAME`,
+`GIT_AUTHOR_EMAIL`, `GIT_COMMITTER_NAME`, and `GIT_COMMITTER_EMAIL` for that one
+command. Leave git config alone. New branches are `cursor/<descriptive-name>-c2dc`,
+lowercase. Push with `git push -u origin <branch>`.
+
+Code CI on `8641ec8` ("Keep the turn only for the boot thread's exit signal.") was
+green: GitHub Actions run `40403236620`, ubuntu and macos-arm64, about 5m21s, started
+2026-10-26 14:18 PT. `fc4730d` is docs on top of that and was not rechecked. The
+workflow is `.github/workflows/ci.yml` (ubuntu-latest with valgrind math digest, and
+macos-14). It runs `tools/hooks/forbid-game-paths.sh`, `scripts/fp-digest-host.sh`,
+`scripts/det-diff.py --self-check`, the SDK host tools, the SDK runtime
+(`XBE_CI_RUNTIME`), and on macOS a `swiftc` of the launcher. There is no Windows job
+and no ctest job.
+
+Other local branches, left where they are. Do not merge the screenshot, Tracy,
+Ghidra, ASan, or netplay lines into `linux-det`:
+
+| Branch | Tip | What it is |
+| --- | --- | --- |
+| `cursor/macos-arm64-c2dc` | `9f3a1b5` | Preferred base for new unrelated cloud work. Its PR base is `main`. |
+| `cursor/unbound-blendtexturealpha-c2dc` | `4ccef40` | Twisted System white floor marked resolved. |
+| `cursor/netplay-determinism-c2dc` | `fcb9d0b` | Port-2 keyboard and seeded mash. Networking still off. |
+| `cursor/xbox-one-usb-c2dc` | `36d66fb` | Present yield so fixed-step loads run. |
+| `cursor/fixed-step-pace-c2dc` | `92002fe` | 60 Hz pace. Review base for this line. |
+| `cursor/linux-det-c2dc` | this branch | Cross-host gameplay2 match. Latest. |
+| `cursor/re-ghidra-unicorn-c2dc` | `8391a81` | Ghidra and Unicorn clock/RNG checks. |
+| `cursor/macos-asan-c2dc` | `145a6c5` | openlibm UBSan. |
+| `cursor/linux-ci-c2dc` | `825c8b4` | CI without a disc image. |
+| `cursor/screenshot-regression-c2dc` | `af1a573` | Local screenshot harness. |
+| `cursor/screenshot-scenes-c2dc` | `ffa5453` | Scene present indices. Sumo Balls is present 3400 there. |
+| `cursor/tracy-profiling-c2dc` | `9a08dba` | Tracy, default off. |
+| `main` | `071dbd9` | Scripted pad exercised. |
+
+`git status` showing `m sdk` is the patched worktree. The submodule pointer stays
+`58757ab`. Do not commit a new gitlink.
+
+## Determinism status
+
+`gameplay2` is 7766 presents, frames 0 through 7765. Seed 1. Exit sim tick 25350 on
+Mac, arm64 Linux, and x86_64 Linux. Frame 0 total `eefbcee7c7938e05`. Frame 7765
+total `6a609a6637cce6ba` (data `718a3318967bbdb6`, phys `c1847c5d98bd1b3d`, system
+`3b3a3264539f44a3`, user `d975f073f2e01c53`, seed `75d308b5`, qpc 18174, rdtsc
+108099, delay 32). `gameplay2.pads` stays the recording to replay.
+
+| Host | Result |
+| --- | --- |
+| Mac arm64 `RingHost` | Two replays after the boot-thread fix, `/tmp/mac-g2-d.detlog` and `/tmp/mac-g2-e.detlog`, each `PASS 7766 frames match` against `det-logs/gameplay2.detlog` and against each other. Earlier `/tmp/mac-g2-a.detlog` matches the same expect log. Exit 0, sim tick 25350. |
+| Lima `ff-det` (vz, aarch64) | `/tmp/linux-g2.detlog` (guest `~/linux-g2.detlog`) `PASS 7766` against the expect log and against the Mac replay. Idle pads, 240 frames, also match: frame 0 `574c0f97185e0166`, frame 239 `784ca3be84e7aa6c`. |
+| Lima `ff-det-x86` (qemu, x86_64) | `/tmp/linux-x86-g2.detlog` (guest `~/linux-x86-g2.detlog`) `PASS 7766` against the expect log, the Mac replay, and the arm64 replay. Exit 0, sim tick 25350. Wall time under TCG was on the order of 40 minutes. |
+| Windows | No comparison. The `windows-cross` preset builds on Linux with an xwin sysroot. The exe has to run on Windows. This Mac cannot produce that run. |
+
+Two host bugs were fixed on this branch. Details live in `docs/netplay-determinism.md`.
+
+- Frame 5 (arm64, before `84c3a10`). Guest `0x002CC1FC` is the XInput packet dword written by HLE `XInputGetState` (`sub_0024D2AE`, strong symbol from `SYM_XInputGetState`). `memcmp` of the whole `input::Pad` also compared the padding byte after `connected`. `XBE_XINPUT_PACKET` advances the packet when a report field changes (`connected`, `buttons`, eight analog bytes, `lx`/`ly`/`rx`/`ry`).
+- Frame 0 (x86_64, before `8641ec8`). System dword `0xB0000404` is the boot thread's ETHREAD signal (`SetSignal` / `MarkExited`). `CallGuest` dropped the turn before that store, and QEMU hashed the clear signal. `XBE_THREAD_EXIT` keeps the turn only for that boot return. Holding every return dropped one QPC read and moved Mac frame 524. Leave later threads on the old path.
+
+Fixed-step clocks that already match, and that a later change has to keep: one sim tick per present; QPC still advances on a repeated read; RDTSC and the interrupt use the present tick; `Pace()` runs under fixed step; draws are batched and `DrainFixed` runs on fence, busy, and readback; present overlaps one frame. Lock order: never take `g_time_mu` while holding `g_sched_mu`. `dsound::AdvanceFixed` is the only mixer-cursor advance under fixed step. The SDL callback does not move voice cursors in fixed step. Under fixed step, `QueueDpc` enqueues and `DrainFixedDpcs` runs at the start of `FireDueTimers` and inside `WaitForFixed`. Normal play still starts the host DPC thread.
+
+A non-fixed-step Mac launch (`FUZION_FRAMES=30`, fixed step and replay unset) exited 0 at sim tick 0 before the thread-exit change. The hold is fixed-step only, so that path is the same code. It was not re-run after `8641ec8`.
+
+## Where the files live
+
+All of these are local. None of them belong in git.
+
+- HDD snapshot: `/tmp/ff-hdd-sean` (dirs `C E X Y Z`, mtime 25 Oct 2026 19:12 PT). `Z/debugLog.txt` sha256 `f0311dc1984fa6fcddd3c52578acf8c8f8091af358e2b1d53e809532438c4490`. Host `/tmp` is not mounted in Lima. Each guest has its own copy at `/tmp/ff-hdd-sean`. Restore that into the build's `hdd/` before every replay. Copying the live Mac `hdd/` while a replay is writing it mixes two runs.
+- Recordings: `/Users/gsrvm3/Documents/projects/fuzionfrenzy-recomp/det-logs/gameplay2.pads` and `gameplay2.detlog` (the 7766-frame expect). Also `idle.pads`, `gameplay.pads`, and older matrix logs. Gitignored.
+- Mac binary and settings: `out/build/macos-release/RingHost`, `settings.toml` beside it (`display_mode = "windowed"`, 1280×720, `ultrawide = true`, `vsync = true`, `fps_cap = 60`).
+- Lima guests (both Running when this was written; `limactl list` for the SSH port): `ff-det` vz aarch64, 6 CPU, 8 GiB, `~/.lima/ff-det`. `ff-det-x86` qemu x86_64, 4 CPU, 8 GiB, 100 GiB disk, `~/.lima/ff-det-x86`. Guest user `gsrvm3`, sudo -n works. Home is mounted read-only at the Mac path `/Users/gsrvm3/...`, so the pads and the expect log are readable there. Guest source tree is `/home/gsrvm3.guest/ff-src` (excludes `out/`, `.git/`, `det-logs/`). Binary `~/ff-src/out/build/linux-release/FuzionFrenzy`. `settings.toml` is already beside that binary on both guests. x86 also has `~/ff-replay/settings.toml`.
+- Finished logs, for diffing, all 11293173 bytes: `/tmp/mac-g2-d.detlog`, `/tmp/mac-g2-e.detlog`, `/tmp/linux-g2.detlog`, `/tmp/linux-x86-g2.detlog`.
+- `lima-additional-guestagents` 2.2.1 is installed (that brew also pulled qemu and pointed Homebrew's generic `openssl` symlink at 4.1.0). `openssl@3` remains at `/opt/homebrew/opt/openssl@3`. tmux is not installed; background long commands in the shell tool.
+
+## Mac replay
+
+Working directory `out/build/macos-release`. No `--instance`. Leave `FUZION_AUTOSTART`, `FUZION_MINIMIZED`, and `FUZION_WATCH_VA` unset. Expect exit 0, sim tick 25350, and `PASS 7766 frames match`.
+
+```
+cd /Users/gsrvm3/Documents/projects/fuzionfrenzy-recomp/out/build/macos-release
+rsync -a --delete /tmp/ff-hdd-sean/ hdd/
+find hdd \( -name '._*' -o -name '.DS_Store' \) -delete
+unset FUZION_AUTOSTART FUZION_MINIMIZED FUZION_WATCH_VA
+XBE_MUTE=1 FUZION_FIXED_STEP=1 FUZION_SEED=1 FUZION_FRAMES=7766 \
+  FUZION_REPLAY_INPUT=/Users/gsrvm3/Documents/projects/fuzionfrenzy-recomp/det-logs/gameplay2.pads \
+  FUZION_STATE_EXPECT=/Users/gsrvm3/Documents/projects/fuzionfrenzy-recomp/det-logs/gameplay2.detlog \
+  FUZION_STATE_LOG=/tmp/mac-g2-next.detlog \
+  ./RingHost
+python3 /Users/gsrvm3/Documents/projects/fuzionfrenzy-recomp/scripts/det-diff.py \
+  /Users/gsrvm3/Documents/projects/fuzionfrenzy-recomp/det-logs/gameplay2.detlog \
+  /tmp/mac-g2-next.detlog
+```
+
+Rebuild from the repo root with `./build.sh macos-release` (or ninja in that build dir) before replaying a tree that changed. `ld` warns about a duplicate `-lpthread`; that warning was already there.
+
+## Lima replays
+
+`limactl shell ff-det` for arm64, `limactl shell ff-det-x86` for x86_64. Inside the guest, from `~/ff-src/out/build/linux-release`. Restore the guest's `/tmp/ff-hdd-sean`, then delete AppleDouble files. `set +e` before `xvfb-run`, then `echo EXIT:$?`. `set -e` together with `xvfb-run` swallows the game log. In zsh on the Mac, `=cmd` is equals-expansion, so a banner like `echo ===COPY===` breaks; use a different banner.
+
+```
+cd ~/ff-src/out/build/linux-release
+rsync -a --delete /tmp/ff-hdd-sean/ hdd/
+find hdd \( -name '._*' -o -name '.DS_Store' \) -delete
+set +e
+VK_DRIVER_FILES=/usr/share/vulkan/icd.d/lvp_icd.json LP_NO_RAST=1 \
+xvfb-run -a env -u FUZION_AUTOSTART -u FUZION_MINIMIZED -u FUZION_WATCH_VA \
+  XBE_MUTE=1 FUZION_FIXED_STEP=1 FUZION_SEED=1 FUZION_FRAMES=7766 \
+  FUZION_REPLAY_INPUT=/Users/gsrvm3/Documents/projects/fuzionfrenzy-recomp/det-logs/gameplay2.pads \
+  FUZION_STATE_EXPECT=/Users/gsrvm3/Documents/projects/fuzionfrenzy-recomp/det-logs/gameplay2.detlog \
+  FUZION_STATE_LOG=$HOME/linux-g2-next.detlog \
+  ./FuzionFrenzy
+echo EXIT:$?
+```
+
+Same command in `ff-det-x86`. Pixels are not in the hash. ALSA/pipewire failing to open is noise and did not desync. x86 is a checksum run, not a frame-rate test.
+
+To refresh the guest tree, copy changed sources into `~/ff-src`, then `find ~/ff-src -name '._*' -delete`. `limactl copy` keeps mtime and can drop `._*` AppleDouble files that ninja then tries to compile (UTF-8 error). `touch` a copied `.cpp` when the preserved mtime is older than the build. The x86 binary on disk was rebuilt after `8641ec8` (26 Oct 2026 14:21 PT).
+
+Start line, if the x86 guest is gone:
+
+```
+limactl start --yes --name ff-det-x86 --arch=x86_64 --cpus 4 --memory 8 --disk 100 --timeout 45m template:ubuntu
+```
+
+`brew install lima-additional-guestagents` is what provides the non-native guest agent. This host has 24 GB of RAM. Both 8 GiB guests fit. `kernel.perf_event_paranoid` was set to 1 inside a guest for the watch (`sudo -n sysctl`). The game must keep working when that sysctl is left alone.
+
+Idle check is the same binary with `det-logs/idle.pads`, `FUZION_FRAMES=240`, `FUZION_MINIMIZED=1`, and a fresh `hdd2` (`--instance 2`). `scripts/det-matrix.sh` from the repo root is the Mac matrix (muted, minimized, fixed-step, seed 1, `FUZION_AUTOSTART` unset, default 240 frames / 180 s). Overrides: `FUZION_DET_FRAMES`, `FUZION_DET_TIMEOUT`, `FUZION_DET_BUILD`.
+
+## Env vars
+
+CLI names are in `docs/netplay-determinism.md`. The harness also reads the variables directly.
+
+| Variable | Role |
+| --- | --- |
+| `FUZION_FIXED_STEP` | One sim tick per present. `0` or unset leaves it off. |
+| `FUZION_RECORD_INPUT` | Append each port's latched pad per present. |
+| `FUZION_REPLAY_INPUT` | Feed that file. Real pads, the keyboard, and `FUZION_AUTOSTART` are ignored. Past the last frame the last sample is held. |
+| `FUZION_SEED` | Written into the rand global once, at image load (`strtoul` base 0). |
+| `FUZION_STATE_LOG` | Per-present checksum log. |
+| `FUZION_STATE_EXPECT` | In-process compare. On mismatch, writes `det-desync/desync_N.txt` and `frame_N_region.bin`, then `Shutdown(1)`. |
+| `FUZION_FRAMES` | Exit 0 after N presents. |
+| `FUZION_STALL_MS` | Sleep at the start of each present, before the hash. |
+| `FUZION_MINIMIZED` | Show the window, then minimize it. Leave unset for the gameplay2 match. |
+| `FUZION_STATE_DUMP` | Directory for `frame_N_region.bin`. `DumpRegion` does not create the directory. |
+| `FUZION_STATE_DUMP_FRAME` | Which present to dump. |
+| `FUZION_STATE_DUMP_REGION` | `phys_03`, `.data`, `system`, `user_0`, or a section name. Empty dumps the writable sections and the 64 physical slices. |
+| `FUZION_PORT2_KEYS` | Move the keyboard map from port 1 onto port 2. Off when unset, empty, or `0`. |
+| `FUZION_PORT2_MASH` | Seeded port-2 pattern. Off when unset, empty, or `0`. |
+| `FUZION_AUTOSTART` | Scripted pad. Leave unset for recordings and for gameplay2 replays. `FUZION_AUTOSTART_PLAY_MS` stays 75000. |
+| `FUZION_WATCH_VA` | Guest VA in hex. The watch is off unless this is set. Leave it unset for a matching replay. |
+| `FUZION_WATCH_LOG` | Optional watch log path. |
+| `FUZION_WATCH_SCAN` | Set `0` to skip the scan. |
+| `XBE_MUTE` | Silence. |
+| `LP_NO_RAST` | Lavapipe skips raster. Set `1` on Linux replay. Pair with `VK_DRIVER_FILES=/usr/share/vulkan/icd.d/lvp_icd.json`. |
+| `XBE_CAPTURE_DIR`, `XBE_VK_CAPTURE_EVERY` | Darwin present copy-out. Off unless both say to capture. |
+
+`scripts/det-diff.py` compares two logs and names the first mismatched region. `--self-check` is what CI runs.
+
+## Gotchas
+
+`LP_NO_RAST=1` plus the lavapipe ICD is the Linux replay setup that matched. The hash covers guest RAM. Pixels stay out of it.
+
+`FUZION_WATCH_VA` is a one-dword hardware watch, off unless the variable is set. One relaxed atomic in `EnterGuest`, and only when fixed step is on. Do not wrap `X86_MEM32`. Linux uses `perf_event_open` (`PERF_TYPE_BREAKPOINT`, `HW_BREAKPOINT_W`, length 4) with `sigtrap=1` and `remove_on_exec=1` (without `remove_on_exec`, errno 22). The trap is before the store: disable the data watch, plant an exec breakpoint at `pc+4`, log the new value on that trap, re-enable. `WatchRearm` runs after 8 ms in phase 1. Ubuntu 24.04 glibc (CI, `-std=gnu++20`) has no `TRAP_PERF`; the watch patch defines it as 6 when the header omits it. Ubuntu 26.04 has the macro. The Mac single-step path sticks (`watch stuck pc=...`) and disarms that thread. Use the Linux perf watch. A pre-log line is tagged `tag=pre` and includes `sia=`. Watch `0x002CC1FC` for the packet. Watch `0xB01018E8` and the hits are libc `memset` zeros, not the packet writer.
+
+`pipe2` is absent from the macOS 14 SDK. `patches/sdk-macos-pipe.patch` (marker `XBE_MACOS_PIPE` in `boot.cpp`) supplies the call. `tools/apply-macos-sdk.sh` applies, in order, `patches/sdk-macos-arm64.patch` (marker `XBE_DARWIN_GUEST`), `patches/sdk-macos-gamepad-events.patch` (`XBE_GAMEPAD_WATCH`), then the pipe patch. CI commit `9602de9` is the one that made the macOS 14 runtime compile. Darwin-only. Linux never runs that script.
+
+`tools/apply-lockstep.cmake` runs on every host, after the Apple script on Darwin. Idempotent, by marker. Order:
+
+1. `patches/sdk-lockstep.patch` (`XBE_LOCKSTEP_FP`)
+2. `patches/sdk-lockstep-host.patch` on Linux/Windows only, when `determinism.cpp` is missing. It already contains `XBE_LOCKSTEP_HARNESS` and `XBE_LOAD_YIELD`.
+3. `patches/sdk-lockstep-harness.patch` when the host patch did not supply the marker
+4. `patches/sdk-lockstep-load-yield.patch` (`XBE_LOAD_YIELD`)
+5. `patches/sdk-lockstep-input-dpc.patch` (`XBE_INPUT_DPC`)
+6. `patches/sdk-lockstep-watch.patch` (`XBE_WATCH_VA`)
+7. `patches/sdk-lockstep-thread-exit.patch` (`XBE_THREAD_EXIT`)
+8. `patches/sdk-lockstep-xinput-packet.patch` (`XBE_XINPUT_PACKET`)
+9. Memory: `patches/sdk-lockstep-memory-apple.patch` when `memory.cpp` contains `HostProtect`, otherwise `patches/sdk-lockstep-memory.patch` (`XBE_LOCKSTEP_COMMIT`)
+
+The dirty Mac `sdk/runtime/core/determinism.cpp` also has `#include "core/trace.h"` and `xbe_trace::BeginGameTick(); // XBE_TRACY_ZONES`. Those lines are the Tracy worktree from `cursor/tracy-profiling-c2dc`. The Linux tree has no `trace.h`. A patch generated from the Linux-shaped file applies on both bases when the hunk context stays off those two lines. Do not put Tracy into `patches/`.
+
+`CheckExpect` reports the first of data, phys, system, user. The hash mixes with `(h ^ CanonWord(v)) * 0x100000001B3`. NaN payloads are canonicalized in the hash only. Guest system RAM starts at `mem::kSystemBase = 0xB0000000`. The first thread's KPCR is `0xB0000000` and its ETHREAD is `0xB0000400`. A store logged with `frame=N` happened while `g_frame` was already N, which includes `YieldGuest` of the present that hashed frame N-1.
+
+`HLE_STDCALL` / `GUEST(name)` emits a strong `sub_<SYM_name>` and overrides the weak recompiled body. `GUEST_ORIG` is the `__imp__sub_` import. A future "the USB function did not run" chase should check `generated/game/image_symbols.h` for a matching `SYM_` before blaming the recompiler. That generated tree is local and stays uncommitted. On the x86 guest it matched the Mac tree for the shared header, `image_symbols.h`, the func mapping, and recomp units 0 and 62.
+
+## No game content
+
+`tools/hooks/forbid-game-paths.sh` (pre-commit, and the ubuntu CI job on the diff) refuses:
+
+- `sdk` and `sdk/*` (no submodule content, no gitlink change)
+- `assets`, `generated`, `out`, `build`, `logs`, `hdd`, `CrashDumps`, `shadercache`, `tools/bin`, `.toolchain`, `macos/launcher/dist`
+- `*.xbe`, `*.iso`, `*.xiso`, `*.dmp`, `*.d3dcap`, `*.pdb`, `*.exe`, `*.dmg`
+- `det-logs`, `det-desync`, `*.pads`, `*.detlog`, `desync_*.txt`, `frame_*_*.bin`
+- `re/`, `*.gpr`, `*.rep`, `*.gzf`, `time-rng-map.txt`
+- any path containing `x86_recomp`, `x86_func_mapping`, or `image_symbols.h`
+
+Also leave untracked `.DS_Store` unstaged. `--self-test` checks the rules. The XBE, the HDD snapshot, pad files, state logs, and region dumps stay on this machine. Nothing game-derived is committed, pushed, or uploaded.
+
+## Open items
+
+- Save-state replays. Not started. Today a replay boots from the HDD snapshot and feeds `gameplay2.pads`. `FUZION_STATE_DUMP` writes one region's bin for one frame and does not resume from it.
+- A ctest suite. Not started. CI is the workflow above plus `scripts/det-diff.py --self-check`. `scripts/det-matrix.sh` is the local Mac matrix.
+- ccache. Not wired into the presets or the workflow.
+- Windows CI. No Windows job. `cmake --preset windows-cross` is documented at the bottom of `docs/netplay-determinism.md` and still has to run on Windows before an x86_64 Windows hash exists.
+- Networking later. There is still no socket. Leave it off. The gameplay2 hash now matches across Mac arm64, Linux arm64, and Linux x86_64, which was the prerequisite. `docs/netplay-determinism.md` is the design note.
+- Sumo glitches. No root-cause writeup on this branch. Sumo Balls is a recorded scene: present 3400 in `tools/shots/scenes.txt` on `cursor/screenshot-scenes-c2dc` (title 200, board 1200, character select 1400, Twisted System countdown 1800, Twisted System round 2200, Jetstream 5000). White characters and the white Twisted System floor are resolved in `docs/render-defect.md`. Scene indices stay on the screenshot branch.
+- Battery. Measured on battery during the 60 fps heavy scene: 11.168 V, −1231 mA, 13.7 W (`BatteryPower` −13747 mW), process CPU about 76% of one core, RSS about 195 MB. `powermetrics` needs root and `sudo -n` is unavailable, so there is no package or GPU watt split. The 4096-draw flush still waits inside a heavy frame. Do not retry a non-blocking slot rotation or a timeline submit on MoltenVK 1.4.2. The rest of that note is the next section.
+
+# macOS GPU and launcher
 
 Native Apple Silicon build of this static recompilation. No game files belong in git.
 `assets/`, `generated/`, and `out/` stay on the machine that owns the disc.
+
+The cold start above is the current branch, the replays, and the open determinism work.
+This section is the GPU and launcher state. Battery numbers and the MoltenVK flush
+notes below are still the open GPU work.
 
 ## Approach
 
