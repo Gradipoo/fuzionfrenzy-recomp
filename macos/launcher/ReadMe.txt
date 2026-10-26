@@ -19,7 +19,7 @@ ninja, python3, MoltenVK, and glslang. Homebrew is the straightforward way
 to get the libraries:
 
   xcode-select --install
-  brew install cmake ninja glslang molten-vk vulkan-loader vulkan-headers
+  brew install cmake ninja glslang libusb molten-vk vulkan-loader vulkan-headers
 
 The first compile also downloads SDL and needs a network connection. Later
 launches reuse the build until this app's version changes.

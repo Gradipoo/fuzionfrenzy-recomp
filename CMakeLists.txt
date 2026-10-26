@@ -46,6 +46,23 @@ if(XBE_HOST_TOOLS_ONLY)
     include(${SDK}/cmake/XbeTools.cmake)
     return()
 endif()
+# Wired Xbox One pads have no macOS kernel driver, and GameController only
+# opens them over Bluetooth. SDL's HIDAPI Xbox One driver opens the USB
+# device through libusb in userspace. Linking the Homebrew dylib records
+# its absolute install name. SDL_HIDAPI_LIBUSB_SHARED would dlopen the leaf
+# name "libusb-1.0.dylib", which dyld does not search for under Homebrew.
+# Linux keeps SDL's own choice (hidraw, and libusb only when it is present).
+if(APPLE)
+    list(PREPEND CMAKE_PREFIX_PATH "/opt/homebrew" "/usr/local")
+    find_path(XBE_LIBUSB_INCLUDE libusb.h PATH_SUFFIXES libusb-1.0)
+    find_library(XBE_LIBUSB_LIBRARY NAMES usb-1.0)
+    if(NOT XBE_LIBUSB_INCLUDE OR NOT XBE_LIBUSB_LIBRARY)
+        message(FATAL_ERROR "Wired Xbox controllers on macOS need libusb (userspace, no kernel extension). Install it with: brew install libusb")
+    endif()
+    set(SDL_HIDAPI ON CACHE BOOL "HIDAPI inside the vendored SDL3" FORCE)
+    set(SDL_HIDAPI_LIBUSB ON CACHE BOOL "HIDAPI opens Xbox pads through libusb" FORCE)
+    set(SDL_HIDAPI_LIBUSB_SHARED OFF CACHE BOOL "Link libusb instead of dlopen(libusb-1.0.dylib)" FORCE)
+endif()
 include(${SDK}/cmake/XbeRecomp.cmake)
 
 file(GLOB XBE_HOST_SOURCES CONFIGURE_DEPENDS src/*/*.cpp)

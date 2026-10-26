@@ -210,7 +210,7 @@ git submodule update --init sdk
 git config core.hooksPath tools/hooks
 ln -sfn ../../tools/hooks/pre-commit .git/hooks/pre-commit
 
-brew install cmake ninja openssl@3 glslang molten-vk vulkan-loader vulkan-headers
+brew install cmake ninja openssl@3 glslang libusb molten-vk vulkan-loader vulkan-headers
 # optional: LunarG Vulkan SDK, then `source` its setup script so VULKAN_SDK is set
 # xdvdfs, only if you want that extractor (there is no brew formula):
 #   cargo install xdvdfs-cli
@@ -329,7 +329,7 @@ then checked the same way. No disc image was on this machine, so that extract wa
 run against a real iso. Prerequisites are detected and not bundled: arm64, clang, git,
 cmake >= 3.25, ninja, python3, the MoltenVK ICD, and the glslang header plus its three
 libraries. openssl is not required. Capstone is unused. The install line is
-`brew install cmake ninja glslang molten-vk vulkan-loader vulkan-headers`.
+`brew install cmake ninja glslang libusb molten-vk vulkan-loader vulkan-headers`. libusb is linked into the game so a wired Xbox One pad opens through SDL's HIDAPI driver. No kernel extension.
 
 Version stamp is `PORT_VERSION` (`1`) plus the short git sha. A dirty worktree appends
 `-dirty`, ignoring the `sdk` submodule line. A mismatch, a missing binary, or Rebuild

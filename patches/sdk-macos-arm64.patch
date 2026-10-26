@@ -1133,10 +1133,17 @@ index 0000000..8b72ff7
 +
 +}  // namespace det
 diff --git a/runtime/core/input.cpp b/runtime/core/input.cpp
-index 8a0f1d0..ad19511 100644
+index 8a0f1d0..d8abfb8 100644
 --- a/runtime/core/input.cpp
 +++ b/runtime/core/input.cpp
-@@ -8,6 +8,7 @@
+@@ -2,12 +2,14 @@
+ #include "core/input.h"
+ 
+ #include <algorithm>
++#include <cstring>
+ #include <iterator>
+ #include <mutex>
+ 
  #include <SDL3/SDL.h>
  
  #include "app/app.h"
@@ -1144,7 +1151,73 @@ index 8a0f1d0..ad19511 100644
  #include "core/log.h"
  
  namespace input {
-@@ -44,7 +45,13 @@ void UpdatePads() {
+@@ -18,6 +20,37 @@ namespace {
+ std::mutex g_lock;
+ bool g_sdl = false;
+ SDL_Gamepad* g_pads[4] = {};
++bool g_live[4] = {};
++
++const char* HintValue(const char* name) {
++    const char* v = SDL_GetHint(name);
++    return (v && v[0]) ? v : "default";
++}
++
++// IOHID paths are "DevSrvsID:<id>". libusb paths are "bus-port:config.interface".
++// GameController leaves the path empty and stamps 'm' into the GUID.
++const char* PadDriver(SDL_JoystickID id) {
++    const char* path = SDL_GetGamepadPathForID(id);
++    if (path && std::strncmp(path, "DevSrvsID", 9) == 0) return "iohid";
++    if (path && path[0] >= '0' && path[0] <= '9') {
++        const char* dash = std::strchr(path, '-');
++        const char* colon = std::strchr(path, ':');
++        if (dash && colon && dash < colon) return "libusb";
++    }
++    SDL_GUID guid = SDL_GetGamepadGUIDForID(id);
++    if (guid.data[14] == 'm' || !path || !path[0]) return "mfi";
++    if (guid.data[14] == 'h') return "hidapi";
++    return "other";
++}
++
++const char* ConnectionName(SDL_JoystickConnectionState state) {
++    switch (state) {
++    case SDL_JOYSTICK_CONNECTION_WIRED: return "wired";
++    case SDL_JOYSTICK_CONNECTION_WIRELESS: return "wireless";
++    case SDL_JOYSTICK_CONNECTION_UNKNOWN: return "unknown";
++    default: return "invalid";
++    }
++}
+ 
+ void AddPad(SDL_JoystickID id) {
+     for (SDL_Gamepad* pad : g_pads)
+@@ -25,8 +58,17 @@ void AddPad(SDL_JoystickID id) {
+     SDL_Gamepad** slot = std::find(std::begin(g_pads), std::end(g_pads), nullptr);
+     if (slot == std::end(g_pads)) return;
+     *slot = SDL_OpenGamepad(id);
+-    const char* name = *slot ? SDL_GetGamepadName(*slot) : SDL_GetError();
+-    LOGI("input: controller %d %s: %s", int(slot - g_pads) + 1, *slot ? "plugged in" : "failed to open", name ? name : "");
++    const int port = int(slot - g_pads) + 1;
++    if (!*slot) {
++        LOGR("input: port %d failed to open: %s", port, SDL_GetError());
++        return;
++    }
++    const char* name = SDL_GetGamepadName(*slot);
++    const char* path = SDL_GetGamepadPath(*slot);
++    const char* type = SDL_GetGamepadStringForType(SDL_GetGamepadType(*slot));
++    LOGR("input: port %d \"%s\" type=%s driver=%s path=%s vid=%04x pid=%04x connection=%s", port, name ? name : "",
++         type ? type : "", PadDriver(id), path ? path : "", unsigned(SDL_GetGamepadVendor(*slot)),
++         unsigned(SDL_GetGamepadProduct(*slot)), ConnectionName(SDL_GetGamepadConnectionState(*slot)));
+ }
+ 
+ void RemovePad(SDL_JoystickID id) {
+@@ -34,6 +76,7 @@ void RemovePad(SDL_JoystickID id) {
+         if (!g_pads[i] || SDL_GetGamepadID(g_pads[i]) != id) continue;
+         SDL_CloseGamepad(g_pads[i]);
+         g_pads[i] = nullptr;
++        g_live[i] = false;
+         LOGI("input: controller %d unplugged", i + 1);
+     }
+ }
+@@ -44,7 +87,13 @@ void UpdatePads() {
      uint64_t now = SDL_GetTicks();
      if (!g_sdl || now == last) return;
      last = now;
@@ -1158,7 +1231,48 @@ index 8a0f1d0..ad19511 100644
      SDL_Event e;
      while (SDL_PeepEvents(&e, 1, SDL_GETEVENT, SDL_EVENT_FIRST, SDL_EVENT_LAST) == 1) {
          if (e.type == SDL_EVENT_GAMEPAD_ADDED) AddPad(e.gdevice.which);
-@@ -108,6 +115,7 @@ Pad Poll(int port) {
+@@ -63,6 +112,14 @@ void Init() {
+     SDL_SetHint(SDL_HINT_JOYSTICK_RAWINPUT, "0");
+     SDL_SetHint(SDL_HINT_XINPUT_ENABLED, "0");
+     SDL_SetHint(SDL_HINT_JOYSTICK_DIRECTINPUT, "0");
++    // Wired Xbox One on macOS is not a GameController device. HIDAPI's Xbox
++    // One driver opens it through libusb. MFI stays at its default so a
++    // Bluetooth pad still comes in through GCController. The libusb whitelist
++    // stays at its default so libusb does not claim every USB HID device.
++    SDL_SetHint(SDL_HINT_JOYSTICK_HIDAPI, "1");
++    SDL_SetHint(SDL_HINT_JOYSTICK_HIDAPI_XBOX, "1");
++    SDL_SetHint(SDL_HINT_JOYSTICK_HIDAPI_XBOX_ONE, "1");
++    SDL_SetHint(SDL_HINT_HIDAPI_LIBUSB, "1");
+     if (!SDL_Init(SDL_INIT_GAMEPAD)) {
+         LOGE("input: SDL failed to start, no controllers: %s", SDL_GetError());
+         return;
+@@ -76,6 +133,10 @@ void Init() {
+         for (int i = 0; i < count; i++) AddPad(ids[i]);
+         SDL_free(ids);
+     }
++    LOGR("input: hints hidapi=%s xbox=%s xbox_one=%s libusb=%s mfi=%s", HintValue(SDL_HINT_JOYSTICK_HIDAPI),
++         HintValue(SDL_HINT_JOYSTICK_HIDAPI_XBOX), HintValue(SDL_HINT_JOYSTICK_HIDAPI_XBOX_ONE),
++         HintValue(SDL_HINT_HIDAPI_LIBUSB), HintValue(SDL_HINT_JOYSTICK_MFI));
++    if (count <= 0) LOGR("input: no gamepads");
+ }
+ 
+ Pad Poll(int port) {
+@@ -105,9 +166,22 @@ Pad Poll(int port) {
+             p.ly = int16_t(-1 - axis(SDL_GAMEPAD_AXIS_LEFTY));
+             p.rx = int16_t(axis(SDL_GAMEPAD_AXIS_RIGHTX));
+             p.ry = int16_t(-1 - axis(SDL_GAMEPAD_AXIS_RIGHTY));
++            if (!g_live[port]) {
++                bool moved = p.buttons != 0;
++                for (int i = 0; i < 8 && !moved; i++) moved = p.analog[i] != 0;
++                auto far = [](int16_t v) { return v > 8000 || v < -8000; };
++                if (!moved) moved = far(p.lx) || far(p.ly) || far(p.rx) || far(p.ry);
++                if (moved) {
++                    g_live[port] = true;
++                    LOGR("input: port %d first report buttons=%04x a=%02x b=%02x x=%02x y=%02x lt=%02x rt=%02x lx=%d ly=%d rx=%d ry=%d",
++                         port + 1, p.buttons, p.analog[0], p.analog[1], p.analog[2], p.analog[3], p.analog[6], p.analog[7],
++                         int(p.lx), int(p.ly), int(p.rx), int(p.ry));
++                }
++            }
          }
      }
      if (app::kGame.pad) app::kGame.pad(port, p);

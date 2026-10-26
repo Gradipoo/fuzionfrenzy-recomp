@@ -11,7 +11,7 @@ enum Arena {
 
     static let installCommands = """
     xcode-select --install
-    brew install cmake ninja glslang molten-vk vulkan-loader vulkan-headers
+    brew install cmake ninja glslang libusb molten-vk vulkan-loader vulkan-headers
     """
 }
 

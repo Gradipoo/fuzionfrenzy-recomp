@@ -141,6 +141,13 @@ enum Pipeline {
         if job.mute { env["XBE_MUTE"] = "1" } else { env.removeValue(forKey: "XBE_MUTE") }
         if job.autostart { env["FUZION_AUTOSTART"] = "1" } else { env.removeValue(forKey: "FUZION_AUTOSTART") }
         if job.perf { env["XBE_PERF"] = "1" }
+        // Same hints input.cpp sets before SDL_Init. A wired Xbox One pad is
+        // opened by HIDAPI through libusb. MFI is left alone so Bluetooth
+        // stays on GameController.
+        env["SDL_JOYSTICK_HIDAPI"] = "1"
+        env["SDL_JOYSTICK_HIDAPI_XBOX"] = "1"
+        env["SDL_JOYSTICK_HIDAPI_XBOX_ONE"] = "1"
+        env["SDL_HIDAPI_LIBUSB"] = "1"
         process.environment = env
         let logURL = support.appendingPathComponent("launch.log")
         FileManager.default.createFile(atPath: logURL.path, contents: nil)

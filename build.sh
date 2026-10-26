@@ -51,6 +51,11 @@ if [ "$(uname -s)" = "Darwin" ]; then
         echo "  macOS build is native arm64. This machine is $(uname -m)." >&2
         exit 1
     fi
+    if [ ! -e /opt/homebrew/lib/libusb-1.0.dylib ] && [ ! -e /usr/local/lib/libusb-1.0.dylib ]; then
+        echo "  libusb is missing. A wired Xbox pad needs it (userspace, no kernel extension)." >&2
+        echo "  brew install libusb" >&2
+        exit 1
+    fi
     ./tools/apply-macos-sdk.sh
 fi
 
