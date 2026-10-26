@@ -39,6 +39,15 @@ for f in $files; do
             ;;
     esac
     case "$f" in
+        det-logs|det-logs/*|*/det-logs|*/det-logs/*|\
+        det-desync|det-desync/*|*/det-desync|*/det-desync/*|\
+        *.pads|*.detlog|desync_*.txt|*/desync_*.txt|frame_*_*.bin|*/frame_*_*.bin)
+            echo "pre-commit: refusing determinism log derived from game RAM: $f" >&2
+            fail=1
+            continue
+            ;;
+    esac
+    case "$f" in
         *x86_recomp*|*x86_func_mapping*|*image_symbols.h)
             echo "pre-commit: refusing recompiled guest code: $f" >&2
             fail=1

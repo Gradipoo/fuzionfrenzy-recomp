@@ -28,9 +28,13 @@
 # locally installed build toolchain
 /.toolchain/
 
-# Determinism harness output. Pad logs and RAM hashes are derived from a run of the game.
-/det-logs/
+# Determinism harness output. Pad logs, RAM hashes, and desync dumps are derived from a run of the game.
+det-logs/
+det-desync/
 *.detlog
+*.pads
+desync_*.txt
+frame_*_*.bin
 
 # runtime files
 settings.toml
