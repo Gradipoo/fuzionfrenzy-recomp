@@ -693,16 +693,16 @@ diff --git a/runtime/core/determinism.cpp b/runtime/core/determinism.cpp
 diff --git a/runtime/core/determinism.h b/runtime/core/determinism.h
 --- a/runtime/core/determinism.h
 +++ b/runtime/core/determinism.h
-@@ -86,5 +86,10 @@
+@@ -86,4 +86,10 @@
  // nobody still advances one tick, so a timed poll cannot spin on the wall clock.
  void PacerDelay(uint64_t hundred_ns);
- 
+
 +// FUZION_WATCH_VA only. One relaxed load on the indirect-call path when the watch is off.
 +bool WatchArmed();
 +void NoteCompletion(uint32_t ret, uint32_t a, uint32_t ca, uint32_t ca2, uint32_t b, uint32_t cb, uint32_t cb2);
 +void NoteDpc(const char* where, uint32_t routine);
 +void NoteTimer(uint32_t dpc, int32_t period_ms, uint32_t due_lo);
- 
++
  }  // namespace det
 diff --git a/runtime/cpu/dispatch.cpp b/runtime/cpu/dispatch.cpp
 --- a/runtime/cpu/dispatch.cpp
