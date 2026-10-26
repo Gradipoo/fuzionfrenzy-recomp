@@ -255,6 +255,11 @@ You supply the game: the USA Xbox release, as either
    Mac process is named Ring Host so the dock and the window are not the game's title.
    The log prefix on Mac is `ringhost`.
 
+   `./build.sh macos-asan` is the ASan+UBSan preset (RelWithDebInfo, `-O1`).
+   `tools/asan/autostart.sh` runs a muted scripted session on `--instance 5`.
+   What that build ignores on purpose, and why MSan is not a macOS preset, is
+   in `docs/sanitizers.md`.
+
    A release run is quiet unless something fails. `XBE_PERF=1` prints a `perf:` line once a
    second (the macOS patch logs those at report level, so they show up in a Release build).
    `XBE_MUTE=1` silences SDL audio. How far a run gets, and what is still open, is in

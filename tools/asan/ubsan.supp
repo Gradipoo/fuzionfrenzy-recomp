@@ -1,0 +1,25 @@
+# UBSan suppressions for the macos-asan preset.
+#
+# Clang format is `check:function` or `check:filename` or `check:source`.
+# Lines starting with # are comments. An empty rule list is valid.
+#
+# Compile-time, not listed here (a suppression would still abort the guest
+# instruction, and these are x86 behavior):
+#
+#   signed-integer-overflow on generated/game/x86_recomp.*.cpp and
+#   x86_func_mapping.cpp — those files are built with -fwrapv, so the
+#   overflow is defined wraparound and UBSan does not report it.
+#   alignment on the same files — -fno-sanitize=alignment. Guest loads go
+#   through x86_u32u (aligned(1), may_alias). X86_PTR casts to a host type
+#   the Xbox did not align. The runtime is still checked.
+#
+# LeakSanitizer is not a macOS ASan feature. tools/asan/autostart.sh sets
+# detect_leaks=0. That is not an uninitialized-read detector.
+#
+# ASan does not report uninitialized reads. MemorySanitizer needs an
+# instrumented libc and is not available for this Apple arm64 game binary.
+# Do not add a macOS MSan preset. The Linux CI job (no game files) is the
+# place for an uninitialized-use check of the math digest.
+#
+# Add a rule below only after a run shows a report that is not a guest-visible
+# bug. Name the function and say why in a comment above the rule.

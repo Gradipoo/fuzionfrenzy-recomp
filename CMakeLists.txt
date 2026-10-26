@@ -52,6 +52,20 @@ endif()
 # its absolute install name. SDL_HIDAPI_LIBUSB_SHARED would dlopen the leaf
 # name "libusb-1.0.dylib", which dyld does not search for under Homebrew.
 # Linux keeps SDL's own choice (hidraw, and libusb only when it is present).
+# ASan + UBSan for the runtime, vendored SDL/imgui/openlibm, and the game.
+# macOS preset: macos-asan. Guest translation units opt out of two checks
+# below; those are x86 semantics, not host bugs. See docs/sanitizers.md.
+option(XBE_SANITIZE "Instrument the runtime and the game with ASan and UBSan" OFF)
+if(XBE_SANITIZE)
+    if(MSVC AND NOT CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+        message(FATAL_ERROR "XBE_SANITIZE needs Clang or GCC (ASan + UBSan).")
+    endif()
+    add_compile_options(
+        -fsanitize=address,undefined
+        -fno-omit-frame-pointer
+        -fno-sanitize-recover=undefined)
+    add_link_options(-fsanitize=address,undefined)
+endif()
 if(APPLE)
     list(PREPEND CMAKE_PREFIX_PATH "/opt/homebrew" "/usr/local")
     find_path(XBE_LIBUSB_INCLUDE libusb.h PATH_SUFFIXES libusb-1.0)
@@ -87,6 +101,23 @@ add_xbe_image(FuzionFrenzy default.xbe game.toml ${GAME_PARTITIONS} game)
 # existing macos-release build relinks instead of recompiling the guest.
 if(APPLE)
     set_target_properties(FuzionFrenzy PROPERTIES OUTPUT_NAME RingHost)
+endif()
+if(XBE_SANITIZE)
+    # Recompiled x86, compiled as C++. Signed overflow wraps on the Xbox.
+    # X86_MEM* uses aligned(1) types; X86_PTR casts to a host type whose
+    # alignment the guest did not require. The file already lists -O2; the
+    # last -O flag wins, and -O1 is what keeps this build able to reach a
+    # minigame under the sanitizers.
+    set(_xbe_guest_src "")
+    math(EXPR _xbe_guest_last "${GAME_PARTITIONS} - 1")
+    foreach(_i RANGE ${_xbe_guest_last})
+        list(APPEND _xbe_guest_src
+            "${CMAKE_CURRENT_SOURCE_DIR}/generated/game/x86_recomp.${_i}.cpp")
+    endforeach()
+    list(APPEND _xbe_guest_src
+        "${CMAKE_CURRENT_SOURCE_DIR}/generated/game/x86_func_mapping.cpp")
+    set_property(SOURCE ${_xbe_guest_src} APPEND PROPERTY COMPILE_OPTIONS
+        -O1 -fwrapv -fno-sanitize=alignment)
 endif()
 # Guest floating point has to match across arm64 and x86-64. No FMA contraction,
 # no fast-math, and no 80-bit x87 evaluation of float or double. clang-cl still

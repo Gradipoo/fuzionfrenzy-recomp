@@ -66,6 +66,13 @@
          "cacheVariables": {"CMAKE_BUILD_TYPE": "Release"}},
         {"name": "macos-relwithdebinfo", "displayName": "macOS arm64 RelWithDebInfo", "inherits": "macos-base",
          "cacheVariables": {"CMAKE_BUILD_TYPE": "RelWithDebInfo"}},
+        {"name": "macos-asan", "displayName": "macOS arm64 ASan+UBSan", "inherits": "macos-base",
+         "cacheVariables": {
+             "CMAKE_BUILD_TYPE": "RelWithDebInfo",
+             "XBE_SANITIZE": "ON",
+             "CMAKE_C_FLAGS_RELWITHDEBINFO": "-O1 -g -fno-omit-frame-pointer",
+             "CMAKE_CXX_FLAGS_RELWITHDEBINFO": "-O1 -g -fno-omit-frame-pointer"
+         }},
         {
             "name": "windows-cross",
             "displayName": "Windows x64 Release, cross-compiled (clang-cl + lld-link + xwin; cmake/windows-cross.cmake)",
@@ -91,6 +98,7 @@
         {"name": "windows-cross", "configurePreset": "windows-cross"},
         {"name": "macos-debug", "configurePreset": "macos-debug"},
         {"name": "macos-release", "configurePreset": "macos-release"},
-        {"name": "macos-relwithdebinfo", "configurePreset": "macos-relwithdebinfo"}
+        {"name": "macos-relwithdebinfo", "configurePreset": "macos-relwithdebinfo"},
+        {"name": "macos-asan", "configurePreset": "macos-asan"}
     ]
 }
