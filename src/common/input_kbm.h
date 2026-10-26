@@ -25,6 +25,7 @@ void NoteMouse(float x, float y, bool right, bool middle);
 
 // app::GameInfo::pad: any guest thread, each poll. ORs the keyboard and mouse into port 0 and
 // reports that port connected, pad or no pad. Never clears what a real controller pressed.
+// FUZION_PORT2_KEYS moves the same map to port 2 and leaves port 0 to the physical pad.
 void Apply(int port, input::Pad& pad);
 
 }  // namespace kbm

@@ -14,7 +14,7 @@ The command line wins over the environment variable. `--name value` and `--name=
 | --- | --- | --- |
 | `--fixed-step` | `FUZION_FIXED_STEP` | Time, vblank, timers, and the mixer advance once per present. `0` leaves the flag off. |
 | `--record-input PATH` | `FUZION_RECORD_INPUT` | Append every port's latched pad for each presented frame. |
-| `--replay-input PATH` | `FUZION_REPLAY_INPUT` | Feed that file. Real pads, the keyboard, and `FUZION_AUTOSTART` are ignored. Past the last frame the last sample is held. |
+| `--replay-input PATH` | `FUZION_REPLAY_INPUT` | Feed that file. Real pads, the keyboard, and `FUZION_AUTOSTART` are ignored. Past the last frame the last sample is held. Port 2 follows `FUZION_PORT2_MASH` instead of the file when that flag is on. |
 | `--seed N` | `FUZION_SEED` | Write `N` (`strtoul` base 0) into the rand global once, at image load. |
 | `--state-log PATH` | `FUZION_STATE_LOG` | Per-present checksum log. |
 | `--frames N` | `FUZION_FRAMES` | Exit 0 after N presents. |
@@ -23,6 +23,8 @@ The command line wins over the environment variable. `--name value` and `--name=
 | `--state-dump DIR` | `FUZION_STATE_DUMP` | With the frame below, write `frame_N_region.bin`. |
 | `--state-dump-frame N` | `FUZION_STATE_DUMP_FRAME` | Which present to dump. |
 | `--state-dump-region NAME` | `FUZION_STATE_DUMP_REGION` | `phys_03`, `.data`, `system`, `user_0`, or a section name. Empty dumps the writable sections and the 64 physical slices. |
+| | `FUZION_PORT2_KEYS` | Move the keyboard map from port 1 onto port 2. Unset, empty, or `0` leaves it off. There is no command-line switch: the keyboard file does not see argv. |
+| `--port2-mash N` | `FUZION_PORT2_MASH` | Drive port 2 from a seeded pattern. Unset, empty, or `0` leaves it off. `1` uses `FUZION_SEED` when that is set, otherwise seed 1. Any other number is the seed. |
 
 `--instance N` is the existing launcher flag. Instance 0 and 1 share `hdd/` next to the executable. Instance 2 and up use `hddN`. The matrix uses 2, 3, and 4 and deletes only those directories.
 
@@ -64,9 +66,11 @@ Ports in the file are 1–4. The runtime's ports are 0–3. The file is text:
 0|1,0000,0,0,0,0,00,00,00,00,00,00,00,00|0,0000,0,0,0,0,00,00,00,00,00,00,00,00|0,0000,0,0,0,0,00,00,00,00,00,00,00,00|0,0000,0,0,0,0,00,00,00,00,00,00,00,00
 ```
 
-One line per frame, four ports, pipe-separated. That is the BizHawk movie shape (`Input Log.txt`: a `LogKey` header, then one line of every player). Buttons and the eight analog bytes are hex. Sticks are signed. A version 1 file (one line per port) still loads. Disconnected ports are how this game fills seats with AI. The usual case is humans in ports 1–2 and ports 3–4 empty.
+One line per frame, four ports, pipe-separated. That is the BizHawk movie shape (`Input Log.txt`: a `LogKey` header, then one line of every player). Buttons and the eight analog bytes are hex. Sticks are signed. A version 1 file (one line per port) still loads. Disconnected ports are how this game fills seats with AI. One human in port 1 and ports 2–4 empty is a normal match: the roster count at `0x2BAE94` is initialized to 4, and `sub_001C8B70` switches a seat to AI when the controller record at `0x2BAED8 + seat*0x28` is zero (the log line is `player.c is swiching a player to AI`). Nothing in that walk requires a second connected port. `GetAttachedDevices` opens only the ports whose bit is set.
 
-The first poll of a port in a frame becomes the latch. Later polls update a pending sample and still return the latch, so a recording and a replay see one sample per present. At the end of the present the latch becomes the pending sample. Record and replay together: replay wins.
+The first poll of a port in a frame becomes the latch. Later polls update a pending sample and still return the latch, so a recording and a replay see one sample per present. At the end of the present the latch becomes the pending sample. Record and replay together: replay wins, except port 2 while `FUZION_PORT2_MASH` is on. That port is the mash. If recording is also on, the written file is the replay for ports 1, 3, and 4 and the mash for port 2.
+
+`FUZION_PORT2_KEYS` and `FUZION_PORT2_MASH` are off unless set. Off, port 2 is whatever the pad file or a plugged controller says, and the keyboard stays on port 1. On, port 2 is reported connected even with no buttons held, which is what makes the title treat it as a second human instead of AI. A mash overrides the keyboard on port 2 when both are set. The mash is a pure function of the present index and the seed (8-present holds; for the first 4500 presents, a 600-present cycle of Start, D-pad Up, and A, then a mash that rarely presses Start). The sample that reaches the game is the sample the pads file stores. A later replay of that file does not roll the mash again, and it does not read the keyboard.
 
 The 250 ms XInput port thread does not write while fixed-step, record, or replay is on. Present samples the four ports once, on the game thread.
 
@@ -149,7 +153,7 @@ The openlibm rebuild, 25 Oct 2026 10:20 PM PT, was two more instance-2 idle repl
 
 A normal launch, with none of the variables above set, should look and pace the way it does today. Sound stays on unless `XBE_MUTE` is set.
 
-To record the gameplay row, quit any Ring Host already open, plug controllers into ports 1 and 2, leave ports 3 and 4 empty, and run:
+To record the gameplay row with one controller, quit any Ring Host already open. Plug that pad in and leave the other ports empty. Do not set `FUZION_PORT2_KEYS` or `FUZION_PORT2_MASH`. The pad takes port 1. Ports 2–4 record as disconnected, and the title fills those seats with AI. The keyboard map still merges into port 1 while the new flag is unset, so leave the keyboard alone during this recording or those keys are part of port 1. One Start/A on the pad is enough to join; the match does not wait for a second connected port.
 
 ```
 cd out/build/macos-release
@@ -159,7 +163,34 @@ env -u FUZION_AUTOSTART XBE_MUTE=1 FUZION_FIXED_STEP=1 FUZION_SEED=1 \
   ./RingHost
 ```
 
-Start a two-human game. Go through the board menus and character select, then play Twisted System, Sumo Balls, and Jetstream. A few seconds of each is enough; finishing a round is better. Quit with Cmd-Q. Do not commit `det-logs/`. Say when `gameplay.pads` is there and the matrix can replay it.
+Go through the board menus and character select, then play Twisted System, Sumo Balls, and Jetstream. A few seconds of each is enough; finishing a round is better. Quit with Cmd-Q. Do not commit `det-logs/`. Say when `gameplay.pads` is there and the matrix can replay it.
+
+Two humans, still with one pad. Variant A puts the keyboard on port 2 (same map as port 1: WASD, arrows, space = A, enter = Start, and the rest of the table in the README). The pad stays on port 1. Both are in the pads file. Variant B replays a port-1 recording and writes port 2 from the mash. Leave the flag you are not using unset. If both are set, the mash wins.
+
+Keyboard, live:
+
+```
+cd out/build/macos-release
+env -u FUZION_AUTOSTART XBE_MUTE=1 FUZION_FIXED_STEP=1 FUZION_SEED=1 \
+  FUZION_PORT2_KEYS=1 \
+  FUZION_RECORD_INPUT=../../../det-logs/gameplay-keys.pads \
+  FUZION_STATE_LOG=../../../det-logs/gameplay-keys.detlog \
+  ./RingHost
+```
+
+Mash layered on a recorded port-1 session (`gameplay.pads` from the one-controller command). `FUZION_PORT2_MASH=1` uses seed 1 because `FUZION_SEED=1`. The window can stay up; nothing has to be pressed. Port 2 taps Start, D-pad Up, and A on a 10 second cycle for the first 75 seconds, then mashes. Quit with Cmd-Q, or set `FUZION_FRAMES` to stop on its own.
+
+```
+cd out/build/macos-release
+env -u FUZION_AUTOSTART XBE_MUTE=1 FUZION_FIXED_STEP=1 FUZION_SEED=1 \
+  FUZION_REPLAY_INPUT=../../../det-logs/gameplay.pads \
+  FUZION_PORT2_MASH=1 \
+  FUZION_RECORD_INPUT=../../../det-logs/gameplay-mash.pads \
+  FUZION_STATE_LOG=../../../det-logs/gameplay-mash.detlog \
+  ./RingHost
+```
+
+The matrix replays `det-logs/gameplay.pads` only. A two-human file is replayed by pointing `FUZION_REPLAY_INPUT` at it with both port-2 flags unset.
 
 Replay check, pads unplugged, same directory:
 
