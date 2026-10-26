@@ -116,6 +116,21 @@ if(EXISTS "${SDK}/runtime/core/determinism.cpp" AND EXISTS "${_watch}")
     endif()
 endif()
 
+# XInputGetState's packet number compares report fields. A memcmp of the whole
+# Pad also saw the padding after connected, which is not stable across hosts.
+set(_xinput "${REPO}/patches/sdk-lockstep-xinput-packet.patch")
+if(EXISTS "${SDK}/runtime/xdk/xapi.cpp" AND EXISTS "${_xinput}")
+    file(READ "${SDK}/runtime/xdk/xapi.cpp" _xin_src)
+    if(NOT _xin_src MATCHES "XBE_XINPUT_PACKET")
+        execute_process(COMMAND "${GIT_EXE}" -C "${SDK}" apply --whitespace=nowarn "${_xinput}"
+                        RESULT_VARIABLE _rc)
+        if(NOT _rc EQUAL 0)
+            message(FATAL_ERROR "patches/sdk-lockstep-xinput-packet.patch failed (${_rc})")
+        endif()
+        message(STATUS "applied patches/sdk-lockstep-xinput-packet.patch")
+    endif()
+endif()
+
 file(READ "${SDK}/runtime/kernel/memory.cpp" _mem)
 if(NOT _mem MATCHES "XBE_LOCKSTEP_COMMIT")
     if(_mem MATCHES "HostProtect")

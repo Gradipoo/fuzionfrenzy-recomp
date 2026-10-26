@@ -1,0 +1,18 @@
+diff --git a/runtime/xdk/xapi.cpp b/runtime/xdk/xapi.cpp
+--- a/runtime/xdk/xapi.cpp
++++ b/runtime/xdk/xapi.cpp
+@@ -109,7 +109,13 @@
+     std::lock_guard<std::mutex> lock(g_ports_lock);
+     Handle& h = g_handles[a[0]];
+     const bool buttons_changed = p.buttons != h.last.buttons || std::memcmp(p.analog, h.last.analog, 8) != 0;
+-    if (std::memcmp(&p, &h.last, sizeof(p))) h.packet++;
++    // XBE_XINPUT_PACKET: the packet number advances when the report changes.
++    // memcmp of the whole Pad also compared the padding byte after connected.
++    // That byte is not a report field, and a returned Pad does not clear it,
++    // so one host counted a new packet where the other did not.
++    const bool changed = p.connected != h.last.connected || buttons_changed || p.lx != h.last.lx || p.ly != h.last.ly ||
++                         p.rx != h.last.rx || p.ry != h.last.ry;
++    if (changed) h.packet++;
+     h.last = p;
+     if (buttons_changed)
+         LOGI("xapi: XInputGetState port=%u packet=%u wButtons=0x%04X analog=%02X %02X %02X %02X %02X %02X %02X %02X", port,
