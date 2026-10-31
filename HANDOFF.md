@@ -32,6 +32,8 @@ shared agent docs landed in `b114caa`. The commit on top of that makes
 contributor-neutral and leaves this file as the maintainer-local note.
 `git log -1` on this branch is the hash to report.
 
+The live worktree is `cursor/fast-tests-cf19` at that same commit, plus uncommitted snapshot resume, fast tests, ccache, and a Windows CI draft. Nothing from that worktree is committed.
+
 No pull request was opened. `ManagePullRequest` `create_pr` returned unauthenticated.
 Compare:
 
@@ -104,7 +106,7 @@ A non-fixed-step Mac launch (`FUZION_FRAMES=30`, fixed step and replay unset) ex
 
 All of these are local. None of them belong in git.
 
-- HDD snapshot: `/tmp/ff-hdd-sean` (dirs `C E X Y Z`, mtime 25 Oct 2026 19:12 PT). `Z/debugLog.txt` sha256 `f0311dc1984fa6fcddd3c52578acf8c8f8091af358e2b1d53e809532438c4490`. Host `/tmp` is not mounted in Lima. Each guest has its own copy at `/tmp/ff-hdd-sean`. Restore that into the build's `hdd/` before every replay. Copying the live Mac `hdd/` while a replay is writing it mixes two runs.
+- HDD snapshot: `/tmp/ff-hdd-sean` (dirs `C E X Y Z`, mtime 25 Oct 2026 19:12 PT). `Z/debugLog.txt` sha256 `f0311dc1984fa6fcddd3c52578acf8c8f8091af358e2b1d53e809532438c4490`. Host `/tmp` is not mounted in Lima. Each guest has its own copy at `/tmp/ff-hdd-sean`. Restore that into the build's `hdd/` before every replay. Copying the live Mac `hdd/` while a replay is writing it mixes two runs. On 31 Oct 2026 the `/tmp/ff-hdd-sean` tree no longer has `Z/debugLog.txt` or `C`/`X`/`Y`. The copy whose `Z/debugLog.txt` still has that sha256 is the repo-root `hdd/` directory. Restore that one. It is gitignored.
 - Recordings: `/Users/gsrvm3/Documents/projects/fuzionfrenzy-recomp/det-logs/gameplay2.pads` and `gameplay2.detlog` (the 7766-frame expect). Also `idle.pads`, `gameplay.pads`, and older matrix logs. Gitignored.
 - Mac binary and settings: `out/build/macos-release/RingHost`, `settings.toml` beside it (`display_mode = "windowed"`, 1280×720, `ultrawide = true`, `vsync = true`, `fps_cap = 60`).
 - Lima guests (both Running when this was written; `limactl list` for the SSH port): `ff-det` vz aarch64, 6 CPU, 8 GiB, `~/.lima/ff-det`. `ff-det-x86` qemu x86_64, 4 CPU, 8 GiB, 100 GiB disk, `~/.lima/ff-det-x86`. Guest user `gsrvm3`, sudo -n works. Home is mounted read-only at the Mac path `/Users/gsrvm3/...`, so the pads and the expect log are readable there. Guest source tree is `/home/gsrvm3.guest/ff-src` (excludes `out/`, `.git/`, `det-logs/`). Binary `~/ff-src/out/build/linux-release/FuzionFrenzy`. `settings.toml` is already beside that binary on both guests. x86 also has `~/ff-replay/settings.toml`.
@@ -236,10 +238,10 @@ Also leave untracked `.DS_Store` unstaged. `--self-test` checks the rules. The X
 
 ## Open items
 
-- Save-state replays. Not started. Today a replay boots from the HDD snapshot and feeds `gameplay2.pads`. `FUZION_STATE_DUMP` writes one region's bin for one frame and does not resume from it.
-- A ctest suite. Not started. CI is the workflow above plus `scripts/det-diff.py --self-check`. `scripts/det-matrix.sh` is the local Mac matrix.
-- ccache. Not wired into the presets or the workflow.
-- Windows CI. No Windows job. `cmake --preset windows-cross` is documented at the bottom of `docs/netplay-determinism.md` and still has to run on Windows before an x86_64 Windows hash exists.
+- Save-state replays. `src/det/snapshot.cpp` copies each blocked stack at the sigsetjmp and resumes with `FUZION_LOAD_SNAPSHOT`. The SDK side is `patches/sdk-lockstep-snapshot.patch` (memory init is the apple or non-apple companion). The submodule pointer stays `58757ab`. On 31 Oct 2026 (Pacific) the Mac `RingHost` saved frames 20, 200, 1200, 2200, 3400, and 5000 while `FUZION_STATE_EXPECT` matched `det-logs/gameplay2.detlog` through frame 5000 (exit 0, sim tick 22585). Resume of frame 20 through frame 140 exited 0 at sim tick 1789. `sh scripts/scene-replay.sh` printed `test_scenes: PASS`: title 200+120 (sim tick 6791), board 1200+120 (18865), Twisted System 2200+120 (19869), Sumo 3400+120 (21071), Jetstream 5000+120 (22704). Files stay in `det-snaps/` and are not committed. A relink changes the slide, so those snaps have to be saved again after the next link.
+- A ctest suite. `ctest -L fast` is in the workflow. Locally it passed: `det_clock`, `xinput_packet`, `arena`, `fp_digest`, `det_diff`. Scene resumes are label `scenes` and stay off CI.
+- ccache. The compiler launcher when `ccache` is installed. The workflow fails the configure step if the cache file does not name ccache.
+- Windows CI. The workflow has a Windows job (runtime, math digest, det-diff, fast tests). It does not boot the game. `cmake --preset windows-cross` is documented at the bottom of `docs/netplay-determinism.md` and still has to run on Windows before an x86_64 Windows hash exists.
 - Networking later. There is still no socket. Leave it off. The gameplay2 hash now matches across Mac arm64, Linux arm64, and Linux x86_64, which was the prerequisite. `docs/netplay-determinism.md` is the design note.
 - Sumo glitches. No root-cause writeup on this branch. Sumo Balls is a recorded scene: present 3400 in `tools/shots/scenes.txt` on `cursor/screenshot-scenes-c2dc` (title 200, board 1200, character select 1400, Twisted System countdown 1800, Twisted System round 2200, Jetstream 5000). White characters and the white Twisted System floor are resolved in `docs/render-defect.md`. Scene indices stay on the screenshot branch.
 - Battery. Measured on battery during the 60 fps heavy scene: 11.168 V, −1231 mA, 13.7 W (`BatteryPower` −13747 mW), process CPU about 76% of one core, RSS about 195 MB. `powermetrics` needs root and `sudo -n` is unavailable, so there is no package or GPU watt split. The 4096-draw flush still waits inside a heavy frame. Do not retry a non-blocking slot rotation or a timeline submit on MoltenVK 1.4.2. The rest of that note is the next section.

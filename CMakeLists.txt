@@ -2,6 +2,18 @@
 
 cmake_minimum_required(VERSION 3.25)
 
+# ccache when it is installed. A launcher passed on the command line wins, so an
+# incremental ninja build keeps working without ccache.
+find_program(CCACHE_PROGRAM ccache)
+if(CCACHE_PROGRAM)
+    if(NOT CMAKE_C_COMPILER_LAUNCHER)
+        set(CMAKE_C_COMPILER_LAUNCHER "${CCACHE_PROGRAM}" CACHE STRING "C compiler launcher")
+    endif()
+    if(NOT CMAKE_CXX_COMPILER_LAUNCHER)
+        set(CMAKE_CXX_COMPILER_LAUNCHER "${CCACHE_PROGRAM}" CACHE STRING "C++ compiler launcher")
+    endif()
+endif()
+
 # macOS arm64 support lives in patches/sdk-macos-arm64.patch, applied onto the
 # pinned SDK submodule. Idempotent. Linux and Windows do not apply it.
 if(APPLE)
@@ -102,15 +114,27 @@ if(XBE_CI_RUNTIME)
         "${SDK}/runtime")
     target_include_directories(xbe_runtime SYSTEM PRIVATE ${imgui_SOURCE_DIR} ${XBE_SHADER_INCLUDES})
     target_compile_definitions(xbe_runtime PRIVATE UNICODE _UNICODE _CRT_SECURE_NO_WARNINGS ${XBE_SHADER_DEFINES})
-    target_link_libraries(xbe_runtime PRIVATE tomlplusplus::tomlplusplus SDL3::SDL3-static Vulkan::Vulkan ${XBE_SHADER_LIBS} ZLIB::ZLIB)
+    if(WIN32)
+        target_link_libraries(xbe_runtime PRIVATE tomlplusplus::tomlplusplus d3d12 dxgi dxguid d3dcompiler xaudio2 ole32 windowscodecs dbghelp winmm dwmapi)
+    else()
+        target_link_libraries(xbe_runtime PRIVATE tomlplusplus::tomlplusplus SDL3::SDL3-static Vulkan::Vulkan ${XBE_SHADER_LIBS} ZLIB::ZLIB)
+    endif()
     if(MSVC)
         target_compile_options(xbe_runtime PRIVATE /fp:precise)
+        if(CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+            target_compile_options(xbe_runtime PRIVATE /clang:-ffp-contract=off /clang:-fno-fast-math /clang:-fno-stack-protector)
+        else()
+            target_compile_options(xbe_runtime PRIVATE /GS-)
+        endif()
     else()
-        target_compile_options(xbe_runtime PRIVATE -ffp-contract=off -fno-fast-math -fno-strict-aliasing)
+        # Resumed threads longjmp onto stacks saved in another process. A stack
+        # canary is a per-process cookie, so the first return would abort.
+        target_compile_options(xbe_runtime PRIVATE -ffp-contract=off -fno-fast-math -fno-strict-aliasing -fno-stack-protector)
         if(CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|AMD64|amd64")
             target_compile_options(xbe_runtime PRIVATE -mfpmath=sse -msse2)
         endif()
     endif()
+    include("${CMAKE_CURRENT_SOURCE_DIR}/tests/CMakeLists.txt")
     return()
 endif()
 
@@ -144,10 +168,14 @@ endif()
 if(MSVC)
     target_compile_options(FuzionFrenzy PRIVATE /fp:precise)
     if(CMAKE_CXX_COMPILER_ID MATCHES "Clang")
-        target_compile_options(FuzionFrenzy PRIVATE /clang:-ffp-contract=off /clang:-fno-fast-math)
+        target_compile_options(FuzionFrenzy PRIVATE /clang:-ffp-contract=off /clang:-fno-fast-math /clang:-fno-stack-protector)
+    else()
+        target_compile_options(FuzionFrenzy PRIVATE /GS-)
     endif()
 else()
-    target_compile_options(FuzionFrenzy PRIVATE -ffp-contract=off -fno-fast-math)
+    # No stack canary: a resumed frame was entered in the process that wrote
+    # the snapshot, and that process's guard cookie does not match this one.
+    target_compile_options(FuzionFrenzy PRIVATE -ffp-contract=off -fno-fast-math -fno-stack-protector)
     if(CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|AMD64|amd64")
         target_compile_options(FuzionFrenzy PRIVATE -mfpmath=sse -msse2)
     endif()
@@ -188,3 +216,5 @@ else()
     endif()
 endif()
 target_link_libraries(FuzionFrenzy PRIVATE openlibm)
+
+include("${CMAKE_CURRENT_SOURCE_DIR}/tests/CMakeLists.txt")
