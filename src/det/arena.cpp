@@ -5,7 +5,9 @@
 #include <cstdio>
 #include <cstring>
 #include <cstdlib>
+#if !defined(_WIN32)
 #include <execinfo.h>
+#endif
 #include <new>
 
 #if defined(_WIN32)
@@ -329,16 +331,20 @@ void* operator new(std::size_t n) {
     if (det::ArenaActive()) {
         if (void* p = det::ArenaAlloc(n, 16)) return p;
         std::fprintf(stderr, "det: arena miss %zu used %zu\n", n, det::ArenaUsed());
+#if !defined(_WIN32)
         void* frames[8];
         int nf = backtrace(frames, 8);
         backtrace_symbols_fd(frames, nf, 2);
+#endif
     }
     if (void* p = std::malloc(n ? n : 1)) return p;
     std::fprintf(stderr, "det: bad_alloc %zu arena %d used %zu cap %zu\n", n, int(det::ArenaActive()), det::ArenaUsed(),
                  det::ArenaCapacity());
+#if !defined(_WIN32)
     void* frames[12];
     int nf = backtrace(frames, 12);
     backtrace_symbols_fd(frames, nf, 2);
+#endif
     std::fflush(stderr);
     throw std::bad_alloc();
 }
