@@ -22,11 +22,24 @@ jobs:
             valgrind: "0"
             launcher: "1"
             paths: "0"
+    env:
+      CCACHE_DIR: ${{ runner.temp }}/ccache
+      CCACHE_BASEDIR: ${{ github.workspace }}
+      CCACHE_COMPRESS: "1"
+      CCACHE_MAXSIZE: 200M
     steps:
       - uses: actions/checkout@v4
         with:
           submodules: true
           fetch-depth: 0
+
+      - name: ccache cache
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/ccache
+          key: ccache-${{ runner.os }}-${{ github.sha }}
+          restore-keys: |
+            ccache-${{ runner.os }}-
 
       - name: Reject game-derived paths
         if: matrix.paths == '1'
@@ -46,12 +59,12 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            clang cmake ninja-build python3 valgrind \
+            clang cmake ninja-build python3 valgrind ccache \
             libvulkan-dev glslang-dev zlib1g-dev pkg-config
 
       - name: macOS packages
         if: runner.os == 'macOS'
-        run: brew install cmake ninja glslang molten-vk vulkan-loader vulkan-headers libusb
+        run: brew install cmake ninja glslang molten-vk vulkan-loader vulkan-headers libusb ccache
 
       - name: Math digest
         run: |
@@ -78,6 +91,12 @@ jobs:
             -DXBE_CI_RUNTIME=ON
           cmake --build "$RUNNER_TEMP/sdk-runtime" --target xbe_runtime --parallel
 
+      - name: Fast tests
+        run: |
+          grep 'CMAKE_CXX_COMPILER_LAUNCHER:.*ccache' "$RUNNER_TEMP/sdk-runtime/CMakeCache.txt"
+          cmake --build "$RUNNER_TEMP/sdk-runtime" --parallel
+          ctest --test-dir "$RUNNER_TEMP/sdk-runtime" --output-on-failure -L fast
+
       - name: Launcher
         if: matrix.launcher == '1'
         run: |
@@ -88,3 +107,86 @@ jobs:
             -framework SwiftUI -framework AppKit -framework CryptoKit \
             -o "$RUNNER_TEMP/RingHostLauncher" \
             macos/launcher/Sources/*.swift
+
+  windows:
+    name: windows
+    runs-on: windows-latest
+    env:
+      CCACHE_DIR: ${{ runner.temp }}/ccache
+      CCACHE_BASEDIR: ${{ github.workspace }}
+      CCACHE_COMPRESS: "1"
+      CCACHE_MAXSIZE: 200M
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+          fetch-depth: 0
+
+      - name: MSVC environment
+        uses: ilammy/msvc-dev-cmd@v1
+
+      - name: ccache cache
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/ccache
+          key: ccache-windows-${{ github.sha }}
+          restore-keys: |
+            ccache-windows-
+
+      - name: ccache
+        run: |
+          choco install ccache -y
+          if (Test-Path "C:\ProgramData\chocolatey\bin\ccache.exe") {
+            Add-Content -Path $env:GITHUB_PATH -Value "C:\ProgramData\chocolatey\bin"
+          }
+
+      - name: Clang for the math digest
+        shell: pwsh
+        run: |
+          $candidates = @(
+            "${env:ProgramFiles}\LLVM\bin",
+            "${env:ProgramFiles}\Microsoft Visual Studio\18\Enterprise\VC\Tools\Llvm\x64\bin",
+            "${env:ProgramFiles}\Microsoft Visual Studio\2022\Enterprise\VC\Tools\Llvm\x64\bin"
+          )
+          $found = $false
+          foreach ($c in $candidates) {
+            if (Test-Path "$c\clang.exe") {
+              Add-Content -Path $env:GITHUB_PATH -Value $c
+              $found = $true
+              break
+            }
+          }
+          if (-not $found) {
+            choco install llvm -y --no-progress
+            Add-Content -Path $env:GITHUB_PATH -Value "${env:ProgramFiles}\LLVM\bin"
+          }
+
+      - name: SDK runtime
+        shell: pwsh
+        run: |
+          ccache -V
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cmake -S . -B "$env:RUNNER_TEMP/sdk-runtime" -G Ninja `
+            -DCMAKE_BUILD_TYPE=Release `
+            -DXBE_CI_RUNTIME=ON
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          Select-String -Path "$env:RUNNER_TEMP/sdk-runtime/CMakeCache.txt" -Pattern 'CMAKE_CXX_COMPILER_LAUNCHER:.*ccache' | Out-Host
+          if (-not (Select-String -Path "$env:RUNNER_TEMP/sdk-runtime/CMakeCache.txt" -Pattern 'CMAKE_CXX_COMPILER_LAUNCHER:.*ccache' -Quiet)) { exit 1 }
+          cmake --build "$env:RUNNER_TEMP/sdk-runtime" --target xbe_runtime --parallel
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Math digest
+        shell: bash
+        run: sh scripts/fp-digest-host.sh
+
+      - name: det-diff
+        shell: bash
+        run: python3 scripts/det-diff.py --self-check
+
+      - name: Fast tests
+        shell: pwsh
+        run: |
+          cmake --build "$env:RUNNER_TEMP/sdk-runtime" --parallel
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          ctest --test-dir "$env:RUNNER_TEMP/sdk-runtime" --output-on-failure -L fast
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
