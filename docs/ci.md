@@ -1,6 +1,6 @@
 # CI
 
-`.github/workflows/ci.yml` runs on Ubuntu x86_64, macOS 14 arm64, and
+`.github/workflows/ci.yml` runs on Ubuntu x86_64, macOS 26 arm64, and
 Windows. It does not download, build, or upload a disc image, recompiled
 guest code, or captures. Nothing in that workflow names those paths.
 `tools/hooks/forbid-game-paths.sh` is what `tools/hooks/pre-commit` uses,

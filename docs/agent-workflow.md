@@ -237,7 +237,7 @@ is the local cross-compiler check (arm64, x86_64, gcc when it is installed).
 CI does not run it.
 
 View CI with `gh run list --branch <branch>`. The workflow is
-`.github/workflows/ci.yml`: Ubuntu (valgrind math digest), macOS 14, and
+`.github/workflows/ci.yml`: Ubuntu (valgrind math digest), macOS 26, and
 Windows. It does not boot the game. See [docs/ci.md](ci.md).
 
 ## No game content
