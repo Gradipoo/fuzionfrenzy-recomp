@@ -9,7 +9,7 @@ the default branch, on a push).
 
 ccache is the C and C++ compiler launcher when `ccache` is on `PATH`.
 `CMakeLists.txt` sets that before `project()`. Each job sets `CCACHE_DIR`
-under the runner temp directory and restores it with `actions/cache`. The
+to `.ccache` in the workspace and restores it with `actions/cache`. The
 configure step fails if the C++ launcher in `CMakeCache.txt` is not ccache.
 
 What each runner builds:

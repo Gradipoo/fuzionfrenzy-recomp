@@ -23,7 +23,7 @@ jobs:
             launcher: "1"
             paths: "0"
     env:
-      CCACHE_DIR: ${{ runner.temp }}/ccache
+      CCACHE_DIR: ${{ github.workspace }}/.ccache
       CCACHE_BASEDIR: ${{ github.workspace }}
       CCACHE_COMPRESS: "1"
       CCACHE_MAXSIZE: 200M
@@ -36,7 +36,7 @@ jobs:
       - name: ccache cache
         uses: actions/cache@v4
         with:
-          path: ${{ runner.temp }}/ccache
+          path: ${{ github.workspace }}/.ccache
           key: ccache-${{ runner.os }}-${{ github.sha }}
           restore-keys: |
             ccache-${{ runner.os }}-
@@ -112,7 +112,7 @@ jobs:
     name: windows
     runs-on: windows-latest
     env:
-      CCACHE_DIR: ${{ runner.temp }}/ccache
+      CCACHE_DIR: ${{ github.workspace }}/.ccache
       CCACHE_BASEDIR: ${{ github.workspace }}
       CCACHE_COMPRESS: "1"
       CCACHE_MAXSIZE: 200M
@@ -128,7 +128,7 @@ jobs:
       - name: ccache cache
         uses: actions/cache@v4
         with:
-          path: ${{ runner.temp }}/ccache
+          path: ${{ github.workspace }}/.ccache
           key: ccache-windows-${{ github.sha }}
           restore-keys: |
             ccache-windows-

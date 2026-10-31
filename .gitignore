@@ -59,6 +59,9 @@ shadercache/
 # Local agent notes. Machine state stays out of the clone.
 /NOTES.md
 
+# ccache data. CI caches this directory. It is not source.
+/.ccache/
+
 # Local temporary folder
 .local
 __pycache__/
