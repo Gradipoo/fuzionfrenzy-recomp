@@ -35,7 +35,8 @@ check_one() {
     case "$f" in
         det-logs|det-logs/*|*/det-logs|*/det-logs/*|\
         det-desync|det-desync/*|*/det-desync|*/det-desync/*|\
-        *.pads|*.detlog|desync_*.txt|*/desync_*.txt|frame_*_*.bin|*/frame_*_*.bin)
+        det-snaps|det-snaps/*|*/det-snaps|*/det-snaps/*|\
+        *.pads|*.detlog|*.ffsnap|desync_*.txt|*/desync_*.txt|frame_*_*.bin|*/frame_*_*.bin)
             refuse "refusing determinism log derived from game RAM: $f"
             return 1
             ;;
@@ -64,6 +65,7 @@ self_test() {
         re/ghidra/project.gpr \
         notes.pads \
         det-logs/a.txt \
+        det-snaps/frame_1.ffsnap \
         frame_1_D.bin \
         disc.iso \
         sdk/runtime/cpu/softmath.cpp
