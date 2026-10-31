@@ -31,8 +31,10 @@
 # Determinism harness output. Pad logs, RAM hashes, and desync dumps are derived from a run of the game.
 det-logs/
 det-desync/
+det-snaps/
 *.detlog
 *.pads
+*.ffsnap
 desync_*.txt
 frame_*_*.bin
 
@@ -52,6 +54,10 @@ shadercache/
 .vs/
 .vscode/
 .idea/
+.DS_Store
+
+# Local agent notes. Machine state stays out of the clone.
+/NOTES.md
 
 # Local temporary folder
 .local
