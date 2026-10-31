@@ -1,0 +1,1444 @@
+diff --git a/runtime/app/main.cpp b/runtime/app/main.cpp
+--- a/runtime/app/main.cpp
++++ b/runtime/app/main.cpp
+@@ -14,6 +14,8 @@
+ #include <algorithm>
+ #include <chrono>
+ #include <csignal>
++#include <cstdlib>
++#include <cstring>
+ #include <cwchar>
+ #include <thread>
+ 
+@@ -21,6 +23,7 @@
+ #include <backends/imgui_impl_win32.h>
+ 
+ #include "app/app.h"
++#include "det/clock.h"
+ #include "core/input.h"
+ #include "core/log.h"
+ #include "gpu/backend.h"
+@@ -208,7 +211,11 @@
+         next = now;
+         return;
+     }
+-    auto period = std::chrono::nanoseconds(1000000000ull / cap);
++    if (const char* np = std::getenv("FUZION_NO_PACE"); np && np[0] && std::strcmp(np, "0") != 0) {
++        next = now;
++        return;
++    }
++    auto period = std::chrono::nanoseconds(det::PacePeriodNs(cap));
+     next += period;
+     if (next < now - period) next = now;
+     while (clock::now() + std::chrono::milliseconds(2) < next) Sleep(1);
+diff --git a/runtime/app/main_sdl.cpp b/runtime/app/main_sdl.cpp
+--- a/runtime/app/main_sdl.cpp
++++ b/runtime/app/main_sdl.cpp
+@@ -16,10 +16,14 @@
+ #include <atomic>
+ #include <chrono>
+ #include <csignal>
++#include <cstdio>
++#include <cstdlib>
+ #include <cstring>
+ #include <string>
+ #include <thread>
+ 
++#include <dlfcn.h>
++#include <execinfo.h>
+ #include <unistd.h>
+ #if defined(__APPLE__)
+ // ucontext.h on Darwin errors unless this is set. It only has to be visible
+@@ -37,6 +41,7 @@
+ #include "app/app.h"
+ #include "app/platform.h"
+ #include "core/determinism.h"
++#include "det/clock.h"
+ #include "common/input_kbm.h"  // kbm::NoteMouse (D11 mouse cache)
+ #include "core/input.h"
+ #include "core/log.h"
+@@ -133,6 +138,9 @@
+ // Requires SA_SIGINFO, so it is installed with sigaction below rather than
+ // std::signal.
+ void CrashHandler(int sig, siginfo_t* info, void* uc) {
++    char line[64];
++    int nw = std::snprintf(line, sizeof line, "det: signal %d\n", sig);
++    if (nw > 0) ::write(STDERR_FILENO, line, size_t(nw));
+     const void* at = info ? info->si_addr : nullptr;
+     const uint8_t* base = mem::Base();
+     if (at && base) {
+@@ -149,7 +157,23 @@
+ #elif defined(REG_RIP)
+         pc = reinterpret_cast<void*>(uintptr_t(reinterpret_cast<ucontext_t*>(uc)->uc_mcontext.gregs[REG_RIP]));
+ #endif
+-        if (pc) LOGE("host faulting instruction %p", pc);
++        if (pc) {
++            LOGE("host faulting instruction %p", pc);
++            Dl_info sym{};
++            if (dladdr(pc, &sym) && sym.dli_sname)
++                std::fprintf(stderr, "det: fault %s + %llu (%s)\n", sym.dli_sname,
++                             (unsigned long long)(uintptr_t(pc) - uintptr_t(sym.dli_saddr)),
++                             sym.dli_fname ? sym.dli_fname : "");
++        }
++#if defined(__APPLE__) && defined(__aarch64__)
++        auto* ss = &reinterpret_cast<ucontext_t*>(uc)->uc_mcontext->__ss;
++        std::fprintf(stderr, "det: host x9 %llx x22 %llx sp %llx lr %llx far %p\n",
++                     (unsigned long long)ss->__x[9], (unsigned long long)ss->__x[22],
++                     (unsigned long long)ss->__sp, (unsigned long long)ss->__lr, at);
++#endif
++        void* frames[32];
++        int nf = backtrace(frames, 32);
++        backtrace_symbols_fd(frames, nf, STDERR_FILENO);
+     }
+     if (kernel::Thread* t = kernel::Current(); t && t->ctx) {
+         LOGE("signal %d on guest thread %X", sig, t->id);
+@@ -388,7 +412,11 @@
+         next = now;
+         return;
+     }
+-    auto period = std::chrono::nanoseconds(1000000000ull / cap);
++    if (const char* np = std::getenv("FUZION_NO_PACE"); np && np[0] && std::strcmp(np, "0") != 0) {
++        next = now;
++        return;
++    }
++    auto period = std::chrono::nanoseconds(det::PacePeriodNs(cap));
+     next += period;
+     if (next < now - period) next = now;
+ #if defined(__APPLE__)
+@@ -451,7 +479,17 @@
+ 
+ }  // namespace app
+ 
++// XBE_SNAPSHOT
++extern "C" void xbe_reexec(int, char**);
++extern "C" void xbe_reserve_early();
++extern "C" void xbe_note_hdd(const char*);
++extern "C" void xbe_prepare_load();
++extern "C" void xbe_arena_on();
++extern "C" void xbe_after_boot();
++
+ int main(int argc, char** argv) {
++    xbe_reexec(argc, argv);  // XBE_SNAPSHOT
++    xbe_reserve_early();
+ #if defined(__APPLE__)
+     // Homebrew's MoltenVK ICD is not on the loader's default search path.
+     // A LunarG SDK install, or an explicit VK_DRIVER_FILES, wins.
+@@ -474,7 +512,13 @@
+     // std::signal, because only the former can ask for it.
+     struct sigaction crash{};
+     crash.sa_sigaction = &app::CrashHandler;
+-    crash.sa_flags = SA_SIGINFO;
++    crash.sa_flags = SA_SIGINFO | SA_ONSTACK;
++    // A guest stack overflow cannot run this handler on the faulting stack.
++    static char alt[64 * 1024];
++    stack_t ss{};
++    ss.ss_sp = alt;
++    ss.ss_size = sizeof alt;
++    sigaltstack(&ss, nullptr);
+     for (int sig : {SIGABRT, SIGSEGV, SIGBUS, SIGILL, SIGFPE}) sigaction(sig, &crash, nullptr);
+     // One log a session: a relaunch into another image carries on its predecessor's.
+     bool relaunched = app::Relaunched();
+@@ -558,11 +602,15 @@
+         SDL_ShowWindow(app::g_window);
+         if (det::Minimized()) SDL_MinimizeWindow(app::g_window);
+     }
++    xbe_note_hdd((app::ExeDir() / hdd).string().c_str());  // XBE_SNAPSHOT
++    xbe_prepare_load();  // XBE_SNAPSHOT
++    xbe_arena_on();
+     if (!kernel::Boot(std::move(game.xbe), IMAGE_XBE, game.dir.string(), (app::ExeDir() / hdd).string())) {
+         SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, app::Narrow(app::kGame.short_title).c_str(),
+                                  "The game failed to start, see the log in the logs folder.", app::g_window);
+         return 1;
+     }
++    xbe_after_boot();  // XBE_SNAPSHOT
+ 
+     bool quit = false;
+     while (!quit) {
+diff --git a/runtime/core/determinism.cpp b/runtime/core/determinism.cpp
+--- a/runtime/core/determinism.cpp
++++ b/runtime/core/determinism.cpp
+@@ -3,2 +3,6 @@
+ // XBE_LOCKSTEP_HARNESS
++#include "det/clock.h"
++// XBE_SNAPSHOT. Defined in src/det/snapshot.cpp, linked into the game.
++extern "C" void xbe_present_snap();
++extern "C" void xbe_block_snap();
+ #include "core/determinism.h"
+@@ -180,14 +187,9 @@
+     return cfg;
+ }
+ 
+-// 2026-01-01 00:00:00 UTC as 100 ns ticks since 1601-01-01.
+-constexpr uint64_t kEpoch100ns = 134116992000000000ull;
+-constexpr uint64_t kPerfPerFrame = 3375000ull / 60ull;       // 56250, exactly 1/60 s
+-constexpr uint64_t kInterruptPerFrame = 10000000ull / 60ull;  // 166666, 100 ns units
+-constexpr uint64_t kRdtscHz = 733333333ull;
++// Clock constants live in det/clock.h so the unit test and the harness match.
+ constexpr uint64_t kHashPrime = 0x100000001B3ull;
+ constexpr uint64_t kHashBasis = 14695981039346656037ull;
+-constexpr uint32_t kAudioFrames = 48000 / 60;  // one sim frame of the mixer
+ constexpr int kPorts = 4;
+ 
+ std::atomic<uint64_t> g_frame{0};  // presents, pad index, hash frame
+@@ -895,8 +897,15 @@
+     AdvanceTicksLocked(ticks);
+ }
+ 
+-void NotePacer() { t_pacer = true; }
++std::atomic<int> g_have_pacer{0};
++
++void NotePacer() {
++    t_pacer = true;
++    g_have_pacer.store(1, std::memory_order_release);
++}
+ bool OnPacer() { return t_pacer; }
++bool HavePacer() { return g_have_pacer.load(std::memory_order_acquire) != 0; }
++void KeepPacer() { g_have_pacer.store(1, std::memory_order_release); }
+ 
+ bool g_logged_grant = false;
+ bool g_logged_due = false;
+@@ -1044,6 +1053,7 @@
+ }
+ 
+ void Park() {
++    xbe_block_snap();  // XBE_SNAPSHOT
+     std::unique_lock<std::mutex> lock(g_time_mu);
+     EnsureSleeperLocked();
+     bool finite = t_deadline_token != 0;
+@@ -1096,6 +1106,7 @@
+ }
+ 
+ void WaitTicks(uint64_t ticks) {
++    xbe_block_snap();  // XBE_SNAPSHOT
+     if (!ticks) ticks = 1;
+     std::unique_lock<std::mutex> lock(g_time_mu);
+     EnsureSleeperLocked();
+@@ -1185,6 +1196,12 @@
+ thread_local SchedWait t_sw;
+ std::vector<SchedWait*> g_sw;
+ uint64_t g_next_ticket = 1;
++// StartThread reserves a ticket before the new host thread is scheduled.
++// The present yield must not return until that thread reaches AcquireTurn,
++// or a resume (fewer host threads) lets the presenter time out a wait the
++// continuous run still sees signalled.
++int g_reserved = 0;
++thread_local int t_owed = 0;
+ 
+ void EnsureSchedLocked() {
+     if (t_sw.registered) return;
+@@ -1233,8 +1250,14 @@
+ }
+ 
+ void AcquireTurn() {
++    xbe_block_snap();  // XBE_SNAPSHOT
+     std::unique_lock<std::mutex> lock(g_sched_mu);
+     EnsureSchedLocked();
++    if (t_owed) {
++        t_owed = 0;
++        if (g_reserved > 0) g_reserved--;
++        g_sched_cv.notify_all();
++    }
+     if (!t_sw.has_ticket) {
+         t_sw.ticket = g_next_ticket++;
+         t_sw.has_ticket = true;
+@@ -1263,6 +1286,7 @@
+ uint64_t ReserveTicket() {
+     if (!FixedStep()) return 0;
+     std::lock_guard<std::mutex> lock(g_sched_mu);
++    g_reserved++;
+     return g_next_ticket++;
+ }
+ 
+@@ -1272,6 +1296,24 @@
+     EnsureSchedLocked();
+     t_sw.ticket = ticket;
+     t_sw.has_ticket = true;
++    t_owed = 1;
++}
++
++void YieldReservation() {
++    if (!FixedStep()) return;
++    std::lock_guard<std::mutex> lock(g_sched_mu);
++    if (!t_owed) return;
++    t_owed = 0;
++    if (g_reserved > 0) g_reserved--;
++    g_sched_cv.notify_all();
++}
++
++void ReclaimReservation() {
++    if (!FixedStep()) return;
++    std::lock_guard<std::mutex> lock(g_sched_mu);
++    if (t_owed) return;
++    t_owed = 1;
++    g_reserved++;
+ }
+ 
+ // XBE_WATCH_VA: hardware write watch for one guest dword. Off unless FUZION_WATCH_VA
+@@ -1898,7 +1940,11 @@
+     buf.lit(" due="); buf.hex(due_lo, 8);
+     buf.emit();
+ }
++
++}  // namespace det
+ 
++namespace det {
++
+ void EnterGuest() {
+     if (!FixedStep()) return;
+     if (g_watch_state.load(std::memory_order_relaxed) == 2) WatchArmCurrent();
+@@ -2002,7 +2048,8 @@
+     // this loop does not hold g_sched_mu across that lock.
+     while (true) {
+         g_sched_cv.wait(lock, [] {
+-            return g_busy == 0 && g_waiting == 0 && g_deliverable.load(std::memory_order_acquire) == 0;
++            return g_busy == 0 && g_waiting == 0 && g_reserved == 0 &&
++                   g_deliverable.load(std::memory_order_acquire) == 0;
+         });
+         uint64_t epoch = g_sched_epoch;
+         lock.unlock();
+@@ -2021,7 +2068,8 @@
+             LOGR("det: a guest delay that is already due runs before the present continues");
+         }
+         lock.lock();
+-        bool idle = g_busy == 0 && g_waiting == 0 && g_deliverable.load(std::memory_order_acquire) == 0;
++        bool idle = g_busy == 0 && g_waiting == 0 && g_reserved == 0 &&
++                    g_deliverable.load(std::memory_order_acquire) == 0;
+         if (!due && waking == 0 && unacked == 0 && idle && g_sched_epoch == epoch) break;
+         // The sample said a due delay was still outstanding, or a kicked waiter
+         // has not acknowledged yet. Sleep until that thread publishes, instead
+@@ -2146,6 +2194,7 @@
+     if (!c.fixed && !c.record && !c.replay && !c.state_log && !c.frames && !c.stall_ms && !c.expect) return;
+     if (g_in_present) return;
+     g_in_present = true;
++    xbe_present_snap();  // XBE_SNAPSHOT
+     NotePacer();
+     LogMode();
+     if (c.stall_ms) std::this_thread::sleep_for(std::chrono::milliseconds(c.stall_ms));
+@@ -2190,7 +2240,151 @@
+              (unsigned long long)g_time.load(std::memory_order_relaxed),
+              next ? double(g_yield_ns.load(std::memory_order_relaxed)) / double(next) / 1e6 : 0);
+         kernel::Shutdown(0);
++    }
++}
++
++uint64_t FrameIndex() { return g_frame.load(std::memory_order_relaxed); }
++
++void ExportTls(TlsImage& out) {
++    out = TlsImage{};
++    if (kernel::Thread* t = kernel::Current()) out.thread_id = t->id;
++    out.guest_depth = uint32_t(t_guest_depth);
++    out.rdtsc_burst = t_rdtsc_burst;
++    out.interrupt_burst = t_interrupt_burst;
++    out.pacer = t_pacer ? 1 : 0;
++    out.waking = t_waking ? 1 : 0;
++    out.guest_hold = t_guest_hold ? 1 : 0;
++    out.asleep = t_sl.asleep ? 1 : 0;
++    out.sw_waiting = t_sw.waiting ? 1 : 0;
++    out.sw_has_ticket = t_sw.has_ticket ? 1 : 0;
++    out.deadline_token = t_deadline_token;
++    out.deadline_ticks = t_deadline_ticks;
++    out.sl_seen = t_sl.seen;
++    out.ticket = t_sw.ticket;
++}
++
++void ImportTls(const TlsImage& in) {
++    t_guest_depth = int(in.guest_depth);
++    t_rdtsc_burst = in.rdtsc_burst;
++    t_interrupt_burst = in.interrupt_burst;
++    t_pacer = in.pacer != 0;
++    t_waking = in.waking != 0;
++    t_guest_hold = in.guest_hold != 0;
++    t_deadline_token = in.deadline_token;
++    t_deadline_ticks = in.deadline_ticks;
++    t_sl.seen = in.sl_seen;
++    t_sl.asleep = in.asleep != 0;
++    t_sl.registered = false;
++    t_sw.ticket = in.ticket;
++    t_sw.waiting = in.sw_waiting != 0;
++    t_sw.has_ticket = in.sw_has_ticket != 0;
++    t_sw.registered = false;
++}
++
++void ReregisterTls() {
++    {
++        std::lock_guard<std::mutex> lock(g_sched_mu);
++        t_sw.registered = false;
++        EnsureSchedLocked();
+     }
++    {
++        std::lock_guard<std::mutex> lock(g_time_mu);
++        t_sl.registered = false;
++        EnsureSleeperLocked();
++    }
+ }
+ 
++void ExportHarness(HarnessImage& out) {
++    out = HarnessImage{};
++    out.frame = g_frame.load(std::memory_order_relaxed);
++    out.sim = g_time.load(std::memory_order_relaxed);
++    out.qpc_reads = g_qpc.load(std::memory_order_relaxed);
++    out.rdtsc_reads = g_rdtsc.load(std::memory_order_relaxed);
++    out.delay_reads = g_delay.load(std::memory_order_relaxed);
++    out.last_qpc = g_last_qpc;
++    out.last_rdtsc = g_last_rdtsc;
++    out.last_interrupt = g_last_interrupt;
++    out.have_qpc = g_have_qpc ? 1 : 0;
++    out.have_rdtsc = g_have_rdtsc ? 1 : 0;
++    out.have_interrupt = g_have_interrupt ? 1 : 0;
++    out.in_present = g_in_present ? 1 : 0;
++    out.kick = g_kick.load(std::memory_order_relaxed);
++    out.deliverable = uint64_t(g_deliverable.load(std::memory_order_relaxed));
++    out.handoffs = g_handoffs.load(std::memory_order_relaxed);
++    out.next_ticket = g_next_ticket;
++    out.sched_epoch = g_sched_epoch;
++    out.deadline_seq = g_deadline_seq;
++    out.waking = g_waking;
++    out.reserved = g_reserved;
++    out.pacer_waiting = g_pacer_waiting;
++    out.busy = g_busy;
++    out.sched_waiting = g_waiting;
++    out.rng_va = g_rng_va;
++    for (int i = 0; i < kPorts; i++) out.seen[i] = g_seen[i] ? 1 : 0;
++    static_assert(sizeof(Sample) <= 32, "pad sample must fit the snapshot image");
++    for (int i = 0; i < kPorts; i++) {
++        std::memcpy(out.latched[i], &g_latched[i], sizeof(Sample));
++        std::memcpy(out.pending[i], &g_pending[i], sizeof(Sample));
++    }
++    out.n_dead = 0;
++    for (const DeadlineEnt& d : g_deadlines) {
++        if (out.n_dead >= 64) break;
++        out.dead_token[out.n_dead] = d.token;
++        out.dead_tick[out.n_dead] = d.deadline;
++        out.n_dead++;
++    }
++}
++
++void ImportHarness(const HarnessImage& in) {
++    g_frame.store(in.frame, std::memory_order_relaxed);
++    g_time.store(in.sim, std::memory_order_relaxed);
++    g_qpc.store(in.qpc_reads, std::memory_order_relaxed);
++    g_rdtsc.store(in.rdtsc_reads, std::memory_order_relaxed);
++    g_delay.store(in.delay_reads, std::memory_order_relaxed);
++    g_last_qpc = in.last_qpc;
++    g_last_rdtsc = in.last_rdtsc;
++    g_last_interrupt = in.last_interrupt;
++    g_have_qpc = in.have_qpc != 0;
++    g_have_rdtsc = in.have_rdtsc != 0;
++    g_have_interrupt = in.have_interrupt != 0;
++    g_in_present = true;
++    g_kick.store(in.kick, std::memory_order_relaxed);
++    g_deliverable.store(int(in.deliverable), std::memory_order_relaxed);
++    g_handoffs.store(in.handoffs, std::memory_order_relaxed);
++    g_next_ticket = in.next_ticket;
++    g_sched_epoch = in.sched_epoch;
++    g_deadline_seq = in.deadline_seq;
++    g_waking = in.waking;
++    g_reserved = in.reserved;
++    g_pacer_waiting = in.pacer_waiting;
++    g_busy = 1;
++    g_waiting = 0;
++    g_rng_va = in.rng_va;
++    for (int i = 0; i < kPorts; i++) g_seen[i] = in.seen[i] != 0;
++    for (int i = 0; i < kPorts; i++) {
++        std::memcpy(&g_latched[i], in.latched[i], sizeof(Sample));
++        std::memcpy(&g_pending[i], in.pending[i], sizeof(Sample));
++    }
++    g_deadlines.clear();
++    for (uint32_t i = 0; i < in.n_dead && i < 64; i++) g_deadlines.push_back({in.dead_token[i], in.dead_tick[i]});
++    g_sleepers.clear();
++    g_sw.clear();
++    g_replay_loaded = false;
++}
++
++int BlockersWaiting() {
++    int n = 0;
++    {
++        std::lock_guard<std::mutex> lock(g_time_mu);
++        for (TimeSleeper* s : g_sleepers)
++            if (s && s->asleep) n++;
++    }
++    {
++        std::lock_guard<std::mutex> lock(g_sched_mu);
++        for (SchedWait* s : g_sw)
++            if (s && s->waiting) n++;
++    }
++    return n;
++}
++
+ }  // namespace det
+diff --git a/runtime/core/determinism.h b/runtime/core/determinism.h
+--- a/runtime/core/determinism.h
++++ b/runtime/core/determinism.h
+@@ -48,6 +48,14 @@
+ // instead of returning at once and spinning.
+ void NotePacer();
+ bool OnPacer();
++// A new guest thread holds this from ReserveTicket until AcquireTurn. A thread
++// created suspended drops it while it waits to be resumed.
++void YieldReservation();
++void ReclaimReservation();
++// The boot thread is the pacer. A resume already has that thread, so a thread
++// created after the restore must not take the role.
++bool HavePacer();
++void KeepPacer();
+ void WaitTicks(uint64_t ticks);
+ // Call while this thread still holds the turn, before BlockGuest. Registers the
+ // deadline and marks the thread in transit so a present yield cannot return
+@@ -92,4 +100,39 @@
+ void NoteDpc(const char* where, uint32_t routine);
+ void NoteTimer(uint32_t dpc, int32_t period_ms, uint32_t due_lo);
+ 
++// XBE_SNAPSHOT: thread-local and process-local harness image. The snapshot
++// writer lives outside this file. Fields are plain values, not mutexes.
++struct TlsImage {
++    uint32_t thread_id = 0;
++    uint32_t guest_depth = 0;
++    int32_t rdtsc_burst = 0;
++    int32_t interrupt_burst = 0;
++    uint8_t pacer = 0, waking = 0, guest_hold = 0, asleep = 0;
++    uint8_t sw_waiting = 0, sw_has_ticket = 0, pad0 = 0, pad1 = 0;
++    uint64_t deadline_token = 0, deadline_ticks = 0, sl_seen = 0, ticket = 0;
++};
++
++struct HarnessImage {
++    uint64_t frame = 0, sim = 0, qpc_reads = 0, rdtsc_reads = 0, delay_reads = 0;
++    uint64_t last_qpc = 0, last_rdtsc = 0, last_interrupt = 0;
++    uint64_t kick = 0, deliverable = 0, handoffs = 0, next_ticket = 0, sched_epoch = 0, deadline_seq = 0;
++    int32_t waking = 0, pacer_waiting = 0, busy = 0, sched_waiting = 0, reserved = 0;
++    uint8_t have_qpc = 0, have_rdtsc = 0, have_interrupt = 0, in_present = 0;
++    uint8_t seen[4] = {};
++    uint32_t rng_va = 0;
++    uint32_t n_dead = 0;
++    uint64_t dead_token[64] = {};
++    uint64_t dead_tick[64] = {};
++    uint8_t latched[4][32] = {};
++    uint8_t pending[4][32] = {};
++};
++
++uint64_t FrameIndex();
++void ExportTls(TlsImage& out);
++void ImportTls(const TlsImage& in);
++void ReregisterTls();
++void ExportHarness(HarnessImage& out);
++void ImportHarness(const HarnessImage& in);
++int BlockersWaiting();
++
+ }  // namespace det
+diff --git a/runtime/gpu/backend.h b/runtime/gpu/backend.h
+--- a/runtime/gpu/backend.h
++++ b/runtime/gpu/backend.h
+@@ -2,6 +2,7 @@
+ #include <atomic>
+ #include <cstdint>
+ #include <memory>
++#include <vector>
+ 
+ #include "gpu/state.h"
+ 
+@@ -49,12 +50,18 @@
+     virtual void WaitFence(uint32_t) {}
+     virtual bool Busy(uint32_t /*resource*/) { return false; }
+     virtual void WaitResource(uint32_t /*resource*/) {}
++    // Snapshot resume has no live shader objects. These copy the guest header
++    // ring the checksum covers, and skip the draw that would touch those shaders.
++    virtual void CaptureReplay(std::vector<uint8_t>&) const {}
++    virtual bool InstallReplay(const uint8_t*, size_t) { return true; }
+ 
+ private:
+     uint32_t fence_ = 0;
+ };
+ 
+ std::unique_ptr<Backend> CreateBackend();
++// The next threaded backend keeps this guest header ring instead of allocating one.
++void AdoptHeaderRing(uint32_t ring);
+ // the same backend driven from a thread of its own: calls return once recorded
+ std::unique_ptr<Backend> CreateThreadedBackend(std::unique_ptr<Backend> inner);
+ 
+diff --git a/runtime/gpu/render_thread.cpp b/runtime/gpu/render_thread.cpp
+--- a/runtime/gpu/render_thread.cpp
++++ b/runtime/gpu/render_thread.cpp
+@@ -44,6 +44,7 @@
+ 
+ // commands handed over at once, so the render thread keeps close behind and a wait is short
+ constexpr uint32_t kBatchCommands = 64;
++uint32_t g_adopt_ring = 0;
+ 
+ // resource headers the render thread reads: common, data, lock, format, size
+ constexpr uint32_t kHeaderBytes = 20, kHeaderSlot = 32;
+@@ -151,7 +152,12 @@
+                  pieces_.size());
+         else if (all_)
+             LOGR("render thread: XBE_NO_STATE_DIRTY, all %zu state pieces compared on every command", pieces_.size());
+-        ring_ = mem::AllocSystem(kHeaderRing, 64);
++        if (g_adopt_ring) {
++            ring_ = g_adopt_ring;
++            g_adopt_ring = 0;
++        } else {
++            ring_ = mem::AllocSystem(kHeaderRing, 64);
++        }
+         cur_ = NewBatch();
+         std::thread([this] { Run(); }).detach();
+     }
+@@ -169,6 +175,10 @@
+     bool Init(uint32_t width, uint32_t height) override { return inner_->Init(width, height); }
+ 
+     void Draw(const State& s, uint32_t prim, uint32_t start, uint32_t count, const uint8_t* indices) override {
++        if (quiet_) {
++            TouchState(s);
++            return;
++        }
+         PerfTimer perf;  // the capture leaf and its state part start together
+         SendState(s);
+         perf.Add(g_perf_sendstate_ns);
+@@ -192,6 +202,10 @@
+     }
+ 
+     void Clear(const State& s, uint32_t count, const uint8_t* rects, uint32_t flags, uint32_t color, float z, uint32_t stencil) override {
++        if (quiet_) {
++            TouchState(s);
++            return;
++        }
+         PerfTimer perf;
+         SendState(s);
+         perf.Add(g_perf_sendstate_ns);
+@@ -214,6 +228,11 @@
+ 
+     // rects and points are taken now; the copy itself, CPU or GPU, runs in order like the console's
+     void Copy(const Surface& src, const Surface& dst, uint32_t count, uint32_t src_rects, uint32_t dst_points) override {
++        if (quiet_) {
++            Header(src.header);
++            Header(dst.header);
++            return;
++        }
+         PerfTimer perf;
+         Cmd c{Op::Copy};
+         c.a = count;
+@@ -231,6 +250,10 @@
+     }
+ 
+     void Present(const Surface& front) override {
++        if (quiet_) {
++            Header(front.header);
++            return;
++        }
+         PerfTimer perf;
+         Cmd c{Op::Present};
+         c.s1 = front;
+@@ -330,6 +353,89 @@
+         Wait(Submit(), WaitFor::ReadBack, "read-back");
+     }
+ 
++    void TouchState(const State& s) {
++        for (uint32_t tex : s.textures) Header(tex);
++        for (uint32_t pal : s.palettes) Header(pal);
++        for (const auto& st : s.streams) Header(st.vb);
++        Header(s.rt.header);
++        Header(s.zs.header);
++    }
++
++    void CaptureReplay(std::vector<uint8_t>& out) const override {
++        auto put = [&](const void* p, size_t n) {
++            const auto* b = static_cast<const uint8_t*>(p);
++            out.insert(out.end(), b, b + n);
++        };
++        put(&ring_, 4);
++        uint32_t pad = 0;
++        put(&pad, 4);
++        put(&ring_pos_, 8);
++        uint64_t done = done_.load();
++        put(&done, 8);
++        put(&next_id_, 8);
++        uint32_t n = uint32_t(headers_.size());
++        put(&n, 4);
++        for (const auto& [key, c] : headers_) {
++            put(&key, 4);
++            put(&c.at, 4);
++            put(&c.made, 8);
++            put(c.bytes, kHeaderBytes);
++        }
++    }
++
++    bool InstallReplay(const uint8_t* p, size_t n) override {
++        const uint8_t* q = p;
++        const uint8_t* end = p + n;
++        auto need = [&](size_t k) {
++            if (q + k > end) return false;
++            return true;
++        };
++        if (!need(4 + 4 + 8 + 8 + 8 + 4)) return false;
++        uint32_t ring = 0, pad = 0, count = 0;
++        uint64_t pos = 0, done = 0, next = 0;
++        std::memcpy(&ring, q, 4);
++        q += 4;
++        std::memcpy(&pad, q, 4);
++        q += 4;
++        std::memcpy(&pos, q, 8);
++        q += 8;
++        std::memcpy(&done, q, 8);
++        q += 8;
++        std::memcpy(&next, q, 8);
++        q += 8;
++        std::memcpy(&count, q, 4);
++        q += 4;
++        if (count > 1000000) return false;
++        std::unordered_map<uint32_t, HeaderCopy> headers;
++        headers.reserve(count + 64);
++        for (uint32_t i = 0; i < count; i++) {
++            if (!need(4 + 4 + 8 + kHeaderBytes)) return false;
++            uint32_t key = 0, at = 0;
++            uint64_t made = 0;
++            std::memcpy(&key, q, 4);
++            q += 4;
++            std::memcpy(&at, q, 4);
++            q += 4;
++            std::memcpy(&made, q, 8);
++            q += 8;
++            HeaderCopy c;
++            c.at = at;
++            c.made = made;
++            std::memcpy(c.bytes, q, kHeaderBytes);
++            q += kHeaderBytes;
++            headers.emplace(key, c);
++        }
++        if (q != end || !ring) return false;
++        ring_ = ring;
++        ring_pos_ = pos;
++        headers_.swap(headers);
++        recent_headers_ = {};
++        done_.store(done);
++        next_id_ = next;
++        quiet_ = true;
++        return true;
++    }
++
+     // bytes the render thread reads through a guest address, in the header ring
+     uint32_t Scratch(const void* p, uint32_t n) {
+         uint32_t size = (n + kHeaderSlot - 1) & ~(kHeaderSlot - 1);
+@@ -593,6 +699,7 @@
+     std::array<Recent<uint64_t>, 64> recent_uses_{};
+     uint32_t ring_ = 0;
+     uint64_t ring_pos_ = 0;
++    bool quiet_ = false;
+     Batch* cur_ = nullptr;
+     State sent_;  // the state as the render thread will have it
+     std::unordered_map<uint32_t, uint64_t> last_use_;
+@@ -613,6 +720,8 @@
+ 
+ }  // namespace
+ 
++void AdoptHeaderRing(uint32_t ring) { g_adopt_ring = ring; }
++
+ std::unique_ptr<Backend> CreateThreadedBackend(std::unique_ptr<Backend> inner) { return std::make_unique<Threaded>(std::move(inner)); }
+ 
+ }  // namespace gpu
+diff --git a/runtime/kernel/boot.cpp b/runtime/kernel/boot.cpp
+--- a/runtime/kernel/boot.cpp
++++ b/runtime/kernel/boot.cpp
+@@ -6,6 +6,9 @@
+ #include "app/app.h"
+ #include "core/determinism.h"
+ #include "kernel/kernel.h"
++
++// XBE_SNAPSHOT
++extern "C" int xbe_hold_boot();
+ 
+ #ifdef _WIN32
+ #ifndef NOMINMAX
+@@ -177,6 +180,9 @@
+     }
+     std::remove(PersistFile().c_str());
+ 
++    // XBE_SNAPSHOT: the saved threads replace this boot thread.
++    if (xbe_hold_boot()) return true;
++
+     uint32_t tls = 0;
+     if (img.tls_addr) tls = ((img.tls.data_end - img.tls.data_start + img.tls.zero_fill + 15) & ~15u) + 4;
+     ThreadRef t = CreateThread(std::max<uint32_t>(img.stack_commit, 0x10000), tls, 0, img.entry, 0, false);
+diff --git a/runtime/kernel/files.cpp b/runtime/kernel/files.cpp
+--- a/runtime/kernel/files.cpp
++++ b/runtime/kernel/files.cpp
+@@ -2,6 +2,8 @@
+ #include <cctype>
+ #include <chrono>
+ #include <cstdio>
++#include <cstring>
++#include <new>
+ #include <filesystem>
+ #include <fstream>
+ #include <map>
+@@ -969,6 +971,73 @@
+     }
+     W32(handle_out, NewHandle(f));
+     return kSuccess;
++}
++
++// XBE_SNAPSHOT
++static void RebindOne(Object* o, void*) {
++    auto* f = dynamic_cast<File*>(o);
++    if (!f) return;
++    new (&f->io) std::mutex;
++    if (!f->fp) return;
++    std::string host = f->host.string();
++    bool dir = f->dir;
++    uint64_t pos = f->pos;
++    f->fp = nullptr;
++    if (host.empty() || dir) return;
++    f->fp = std::fopen(host.c_str(), "r+b");
++    if (!f->fp) f->fp = std::fopen(host.c_str(), "rb");
++    if (f->fp && pos) std::fseek(f->fp, static_cast<long>(pos), SEEK_SET);
+ }
+ 
++void RebindSnapshotFiles() { VisitLiveObjects(RebindOne, nullptr); }
++
++// Drive letters the title creates (XMountUtilityDrive maps Z:) live in g_links,
++// which MountDefaults does not rebuild. A resume that skips that call cannot
++// open z:\ and the next NtCreateFile takes the handle the open should have used.
++void SnapshotCaptureLinks(std::vector<uint8_t>& out) {
++    std::lock_guard<std::mutex> lock(g_links_lock);
++    auto put32 = [&](uint32_t v) {
++        const auto* b = reinterpret_cast<const uint8_t*>(&v);
++        out.insert(out.end(), b, b + 4);
++    };
++    auto putstr = [&](const std::string& s) {
++        put32(uint32_t(s.size()));
++        out.insert(out.end(), reinterpret_cast<const uint8_t*>(s.data()), reinterpret_cast<const uint8_t*>(s.data()) + s.size());
++    };
++    put32(uint32_t(g_links.size()));
++    for (const auto& [k, v] : g_links) {
++        putstr(k);
++        putstr(v);
++    }
++}
++
++bool SnapshotInstallLinks(const uint8_t* p, size_t n) {
++    const uint8_t* end = p + n;
++    auto take32 = [&](uint32_t& v) -> bool {
++        if (p + 4 > end) return false;
++        std::memcpy(&v, p, 4);
++        p += 4;
++        return true;
++    };
++    auto take_str = [&](std::string& s) -> bool {
++        uint32_t len = 0;
++        if (!take32(len) || len > 4096 || p + len > end) return false;
++        s.assign(reinterpret_cast<const char*>(p), len);
++        p += len;
++        return true;
++    };
++    uint32_t count = 0;
++    if (!take32(count) || count > 256) return false;
++    std::map<std::string, std::string> next;
++    for (uint32_t i = 0; i < count; i++) {
++        std::string k, v;
++        if (!take_str(k) || !take_str(v) || k.empty()) return false;
++        next.emplace(std::move(k), std::move(v));
++    }
++    if (p != end) return false;
++    std::lock_guard<std::mutex> lock(g_links_lock);
++    g_links.swap(next);
++    return true;
++}
++
+ }  // namespace kernel
+diff --git a/runtime/kernel/kernel.h b/runtime/kernel/kernel.h
+--- a/runtime/kernel/kernel.h
++++ b/runtime/kernel/kernel.h
+@@ -241,4 +241,20 @@
+ extern uint32_t g_tick_count_va;
+ extern uint32_t g_launch_data_page_va;
+ 
++// XBE_SNAPSHOT. Byte images of the host object tables. The mutexes in those
++// objects are placement-new'd after the copy. File handles are reopened.
++void VisitLiveObjects(void (*fn)(Object*, void*), void* user);
++void RebindSnapshotFiles();
++void SnapshotCaptureLinks(std::vector<uint8_t>& out);
++bool SnapshotInstallLinks(const uint8_t* p, size_t n);
++void ReinitThreadSync();
++void BindCurrent(uint32_t id);
++// False after the thread has exited and dropped out of the table. A stack image
++// from an earlier wait is then stale and must not be resumed.
++bool ThreadRegistered(uint32_t id);
++void SnapshotCaptureObjects(std::vector<uint8_t>& out);
++void SnapshotCaptureThreads(std::vector<uint8_t>& out);
++bool InstallSnapshotObjects(const uint8_t* p, size_t n);
++bool SnapshotInstallThreads(const uint8_t*& p, const uint8_t* end);
++
+ }  // namespace kernel
+diff --git a/runtime/kernel/memory.h b/runtime/kernel/memory.h
+--- a/runtime/kernel/memory.h
++++ b/runtime/kernel/memory.h
+@@ -1,5 +1,6 @@
+ #pragma once
+ #include <cstdint>
++#include <vector>
+ 
+ namespace mem {
+ 
+@@ -22,6 +23,10 @@
+ 
+ bool Init();
+ uint8_t* Base();
++// Tried first by Init. Snapshot resume asks for the base the file recorded.
++void SetBaseHint(uintptr_t hint);
++// Committed guest pages outside the physical window, as runs of 4 KB pages.
++void VisitCommitted(void (*fn)(uint32_t va, uint32_t pages, void* user), void* user);
+ bool Commit(uint32_t va, uint32_t size);
+ void Decommit(uint32_t va, uint32_t size);
+ bool IsCommitted(uint32_t va);
+@@ -48,6 +53,11 @@
+ uint32_t PhysicalFromVirtual(uint32_t va);
+ uint32_t VirtualFromPhysical(uint32_t pa);
+ 
++// Guest heap free lists. Resume installs these before the next AllocSystem,
++// or that call lands on top of the restored ring.
++void SnapshotCaptureRanges(std::vector<uint8_t>& out);
++bool SnapshotInstallRanges(const uint8_t* p, size_t n);
++
+ struct Stats {
+     uint32_t total_pages, available_pages, virtual_committed, contiguous_used, system_used;
+ };
+diff --git a/runtime/kernel/objects.cpp b/runtime/kernel/objects.cpp
+--- a/runtime/kernel/objects.cpp
++++ b/runtime/kernel/objects.cpp
+@@ -5,6 +5,7 @@
+ #include <queue>
+ 
+ #include "core/determinism.h"
++#include "det/snap_blob.h"
+ #include "kernel/kernel.h"
+ 
+ namespace kernel {
+@@ -623,6 +624,43 @@
+ bool CancelTimer(Object& timer) {
+     std::lock_guard<std::mutex> lock(g_timer_lock);
+     return g_timer_seq.erase(&timer) != 0;
++}
++
++// XBE_SNAPSHOT
++void VisitLiveObjects(void (*fn)(Object*, void*), void* user) {
++    if (!fn) return;
++    for (auto& kv : g_handles)
++        if (kv.second) fn(kv.second.get(), user);
++    for (auto& kv : g_by_ptr)
++        if (kv.second.obj) fn(kv.second.obj.get(), user);
++}
++
++void SnapshotCaptureObjects(std::vector<uint8_t>& out) {
++    SnapPut(out, &g_handles, sizeof g_handles);
++    SnapPut(out, &g_next_handle, sizeof g_next_handle);
++    SnapPut(out, &g_by_ptr, sizeof g_by_ptr);
++    SnapPut(out, &g_serial, sizeof g_serial);
++    SnapPut(out, &g_names, sizeof g_names);
++    SnapPut(out, &g_timers, sizeof g_timers);
++    SnapPut(out, &g_timer_seq, sizeof g_timer_seq);
++    SnapPut(out, &g_seq, sizeof g_seq);
++    SnapPut(out, &g_timer_thread, sizeof g_timer_thread);
++    SnapPut(out, &g_dpcs, sizeof g_dpcs);
++    SnapPut(out, &g_dpc_thread, sizeof g_dpc_thread);
+ }
+ 
++static bool InstallOne(const uint8_t*& p, const uint8_t* end, void* dst, size_t n) { return SnapGet(p, end, dst, n); }
++
++bool InstallSnapshotObjects(const uint8_t* p, size_t n) {
++    const uint8_t* q = p;
++    const uint8_t* end = p + n;
++    bool ok = InstallOne(q, end, &g_handles, sizeof g_handles) && InstallOne(q, end, &g_next_handle, sizeof g_next_handle) &&
++              InstallOne(q, end, &g_by_ptr, sizeof g_by_ptr) && InstallOne(q, end, &g_serial, sizeof g_serial) &&
++              InstallOne(q, end, &g_names, sizeof g_names) && InstallOne(q, end, &g_timers, sizeof g_timers) &&
++              InstallOne(q, end, &g_timer_seq, sizeof g_timer_seq) && InstallOne(q, end, &g_seq, sizeof g_seq) &&
++              InstallOne(q, end, &g_timer_thread, sizeof g_timer_thread) && InstallOne(q, end, &g_dpcs, sizeof g_dpcs) &&
++              InstallOne(q, end, &g_dpc_thread, sizeof g_dpc_thread);
++    return ok && SnapshotInstallThreads(q, end) && q == end;
++}
++
+ }  // namespace kernel
+diff --git a/runtime/kernel/threads.cpp b/runtime/kernel/threads.cpp
+--- a/runtime/kernel/threads.cpp
++++ b/runtime/kernel/threads.cpp
+@@ -3,9 +3,15 @@
+ #include <cstdio>
+ #include <cstdlib>
+ #include <memory>
++#include <new>
+ 
+ #include "core/determinism.h"
++#include "det/snap_blob.h"
+ #include "kernel/kernel.h"
++
++// XBE_SNAPSHOT
++extern "C" int xbe_snapshot_stacks();
++extern "C" void* xbe_take_stack(size_t* bytes);
+ #include "cpu/softmath.h"
+ 
+ #ifdef _WIN32
+@@ -115,7 +121,15 @@
+ #else
+     pthread_attr_t attr;
+     pthread_attr_init(&attr);
+-    pthread_attr_setstacksize(&attr, 64u << 20);
++    void* fixed = nullptr;
++    size_t fixed_n = 0;
++    if (xbe_snapshot_stacks()) fixed = xbe_take_stack(&fixed_n);
++    if (fixed && fixed_n) {
++        pthread_attr_setguardsize(&attr, 0);
++        pthread_attr_setstack(&attr, fixed, fixed_n);
++    } else {
++        pthread_attr_setstacksize(&attr, 64u << 20);
++    }
+     pthread_t th;
+     pthread_create(&th, &attr, [](void* p) -> void* {
+         xbe_arm_host_fp();
+@@ -169,8 +183,15 @@
+         X86Context ctx;
+         InitContext(*t, ctx);
+         {
++            // A suspended thread has not entered the scheduler. Drop the
++            // reservation while it waits, or the presenter deadlocks on the
++            // ticket it cannot resume. Reclaim it before the first guest call.
+             std::unique_lock<std::mutex> lock(t->apc_lock);
+-            t->resume_cv.wait(lock, [&] { return t->suspend.load() <= 0; });
++            if (t->suspend.load() > 0) {
++                det::YieldReservation();
++                t->resume_cv.wait(lock, [&] { return t->suspend.load() <= 0; });
++                det::ReclaimReservation();
++            }
+         }
+         StartInfo si;
+         {
+@@ -182,8 +203,12 @@
+              si.start_routine, si.start_context);
+         // The title thread is the one that presents. Mark it before the first Sleep, which
+         // happens before the first present on the way into a level.
++        // pace_once is process-local. A resume starts a new process, so the
++        // first thread created after the restore would look like the boot
++        // thread and consume presenter timeouts. KeepPacer is set before
++        // those threads exist.
+         static std::atomic<int> pace_once{0};
+-        const bool boot = det::FixedStep() && pace_once.exchange(1) == 0;
++        const bool boot = det::FixedStep() && !det::HavePacer() && pace_once.exchange(1) == 0;
+         if (boot) det::NotePacer();
+         uint32_t code;
+         // XBE_THREAD_EXIT: the boot thread returns before the first present.
+@@ -207,6 +232,9 @@
+     t->id = g_next_id.fetch_add(4);
+     SetupGuestBlocks(*t, 0x20000, 0x100);
+     Bind(t, t->ethread);
++    // XBE_SNAPSHOT: a host thread blocked in the gate has to be found on resume.
++    // StartThread already registers. These threads (vblank, dsound) did not.
++    Register(t);
+     std::string n = name;
+     Spawn([t, fn, n] {
+         t_current = t;
+@@ -214,6 +242,7 @@
+         X86Context ctx;
+         InitContext(*t, ctx);
+         fn(ctx);
++        Unregister(t.get());
+         t_current.reset();
+     });
+ }
+@@ -301,6 +330,47 @@
+         ran = true;
+     }
+     return ran;
++}
++
++void BindCurrent(uint32_t id) {
++    std::lock_guard<std::mutex> lock(g_threads_lock);
++    for (const ThreadRef& t : g_threads) {
++        if (t && t->id == id) {
++            t_current = t;
++            return;
++        }
++    }
+ }
+ 
++bool ThreadRegistered(uint32_t id) {
++    std::lock_guard<std::mutex> lock(g_threads_lock);
++    for (const ThreadRef& t : g_threads)
++        if (t && t->id == id) return true;
++    return false;
++}
++
++void ReinitThreadSync() {
++    std::lock_guard<std::mutex> lock(g_threads_lock);
++    for (const ThreadRef& t : g_threads) {
++        if (!t) continue;
++        new (&t->apc_lock) std::mutex;
++        new (&t->resume_cv) std::condition_variable;
++    }
++}
++
++void SnapshotCaptureThreads(std::vector<uint8_t>& out) {
++    SnapPut(out, &g_threads, sizeof g_threads);
++    // The next guest thread id. A resume that starts again at 0x10 stores the
++    // boot ids into threads the title creates after the snapshot.
++    uint32_t next = g_next_id.load(std::memory_order_relaxed);
++    SnapPut(out, &next, sizeof next);
++}
++
++bool SnapshotInstallThreads(const uint8_t*& p, const uint8_t* end) {
++    uint32_t next = 0;
++    if (!SnapGet(p, end, &g_threads, sizeof g_threads) || !SnapGet(p, end, &next, sizeof next)) return false;
++    g_next_id.store(next, std::memory_order_relaxed);
++    return true;
++}
++
+ }  // namespace kernel
+diff --git a/runtime/xdk/d3d8.cpp b/runtime/xdk/d3d8.cpp
+--- a/runtime/xdk/d3d8.cpp
++++ b/runtime/xdk/d3d8.cpp
+@@ -20,6 +21,7 @@
+ #include "gpu/texture.h"
+ #include "gpu/vertex.h"
+ #include "xdk/d3d8.h"
++#include "det/snap_blob.h"
+ #include "xdk/hle.h"
+ #include "xdk/layout.h"
+ 
+@@ -1482,7 +1488,7 @@
+     uint32_t room = (bytes + 63) & ~63u;
+     uint32_t pos = g_up_pos + room > kUpRing ? 0 : g_up_pos;
+     uint32_t from = g_up_pos ? (g_up_pos - 1) / kUpHalf : 1, to = (pos + room - 1) / kUpHalf;
+-    if (to != from) {
++    if (to != from && g_backend) {
+         g_up_fence[from] = g_backend->Fence();
+         g_backend->WaitFence(g_up_fence[to]);
+     }
+@@ -1493,12 +1499,14 @@
+ }
+ 
+ void DrawUp(uint32_t prim, uint32_t count, const void* vertices, uint32_t stride) {
+-    if (!g_backend || !count || !stride) return;
++    if (!count || !stride) return;
++    // The copy into the upload ring is guest memory. A resumed process has not
++    // created the renderer yet, and skipping the copy desyncs the physical RAM.
+     Walk(Dev(kDevPush));  // constants/attributes pushed inline since the last drain apply to this draw
+     SyncDeferred();
+     auto stream = g_state.streams[0];
+     Set(g_state.streams[0], {UpVertices(vertices, count * stride), stride});
+-    g_backend->Draw(g_state, prim, 0, count, nullptr);
++    if (g_backend) g_backend->Draw(g_state, prim, 0, count, nullptr);
+     Set(g_state.streams[0], stream);
+ }
+ 
+@@ -1721,4 +1729,70 @@
+     EndPrimitive();
+     SetDev(XDK_CDevice_Flags, Dev(XDK_CDevice_Flags) & ~0x1800u);
+     return 0;
++}
++
++namespace d3d {
++// XBE_SNAPSHOT. The Vulkan backend is created again on resume and is not part
++// of this image. Guest surface addresses and the CPU-side device cache are.
++void SnapshotCaptureRing(std::vector<uint8_t>& out) {
++    if (g_backend) g_backend->CaptureReplay(out);
++}
++
++bool SnapshotInstallRing(const uint8_t* p, size_t n) {
++    if (!p || n < 4) return false;
++    uint32_t ring = 0;
++    std::memcpy(&ring, p, 4);
++    if (!ring) return false;
++    if (!g_backend) {
++        auto inner = gpu::CreateBackend();
++        if (g_frame_w && g_frame_h) inner->Init(g_frame_w, g_frame_h);
++        if (kRenderThread) {
++            gpu::AdoptHeaderRing(ring);
++            g_backend = gpu::CreateThreadedBackend(std::move(inner));
++        } else {
++            g_backend = std::move(inner);
++        }
++    }
++    return g_backend && g_backend->InstallReplay(p, n);
++}
++
++void SnapshotCapture(std::vector<uint8_t>& out) {
++    SnapPut(out, &g_state_data, sizeof g_state_data);
++    SnapPut(out, &g_vs, sizeof g_vs);
++    SnapPut(out, &g_ps, sizeof g_ps);
++    SnapPut(out, g_buffers.data(), sizeof g_buffers);
++    SnapPut(out, &g_buffer_count, sizeof g_buffer_count);
++    SnapPut(out, &g_depth, sizeof g_depth);
++    SnapPut(out, &g_frame_w, sizeof g_frame_w);
++    SnapPut(out, &g_frame_h, sizeof g_frame_h);
++    SnapPut(out, &g_frame_widened, sizeof g_frame_widened);
++    SnapPut(out, &g_scratch_push, sizeof g_scratch_push);
++    SnapPut(out, &g_scratch_size, sizeof g_scratch_size);
++    SnapPut(out, &g_walk, sizeof g_walk);
++    SnapPut(out, &g_vsc_reg, sizeof g_vsc_reg);
++    SnapPut(out, &g_presents, sizeof g_presents);
++    SnapPut(out, &g_up_ring, sizeof g_up_ring);
++    SnapPut(out, &g_up_pos, sizeof g_up_pos);
++    SnapPut(out, &g_up_header, sizeof g_up_header);
++    SnapPut(out, g_up_fence, sizeof g_up_fence);
++    SnapPut(out, &g_push_begin, sizeof g_push_begin);
++    SnapPut(out, &g_im_prim, sizeof g_im_prim);
++    SnapPut(out, &g_im_mask, sizeof g_im_mask);
++    SnapPut(out, g_im_attr, sizeof g_im_attr);
++    SnapPut(out, &g_im_vertices, sizeof g_im_vertices);
+ }
++
++bool SnapshotInstall(const uint8_t* p, size_t n) {
++    const uint8_t* q = p;
++    const uint8_t* end = p + n;
++    auto one = [&](void* dst, size_t bytes) { return SnapGet(q, end, dst, bytes); };
++    return one(&g_state_data, sizeof g_state_data) && one(&g_vs, sizeof g_vs) && one(&g_ps, sizeof g_ps) &&
++           one(g_buffers.data(), sizeof g_buffers) && one(&g_buffer_count, sizeof g_buffer_count) && one(&g_depth, sizeof g_depth) &&
++           one(&g_frame_w, sizeof g_frame_w) && one(&g_frame_h, sizeof g_frame_h) && one(&g_frame_widened, sizeof g_frame_widened) &&
++           one(&g_scratch_push, sizeof g_scratch_push) && one(&g_scratch_size, sizeof g_scratch_size) && one(&g_walk, sizeof g_walk) &&
++           one(&g_vsc_reg, sizeof g_vsc_reg) && one(&g_presents, sizeof g_presents) && one(&g_up_ring, sizeof g_up_ring) &&
++           one(&g_up_pos, sizeof g_up_pos) && one(&g_up_header, sizeof g_up_header) && one(g_up_fence, sizeof g_up_fence) &&
++           one(&g_push_begin, sizeof g_push_begin) && one(&g_im_prim, sizeof g_im_prim) && one(&g_im_mask, sizeof g_im_mask) &&
++           one(g_im_attr, sizeof g_im_attr) && one(&g_im_vertices, sizeof g_im_vertices) && q == end;
++}
++}  // namespace d3d
+diff --git a/runtime/xdk/dsound.cpp b/runtime/xdk/dsound.cpp
+--- a/runtime/xdk/dsound.cpp
++++ b/runtime/xdk/dsound.cpp
+@@ -9,7 +9,8 @@
+ #include <vector>
+ 
+ #include "audio/audio.h"
+ #include "core/determinism.h"
++#include "det/snap_blob.h"
+ #include "xbe/xbe.h"
+ #include "xdk/hle.h"
+ #include "xdk/layout.h"
+@@ -499,7 +502,30 @@
+         g_done.clear();
+     }
+     Run(ctx, done);
++}
++
++// XBE_SNAPSHOT
++void SnapshotCapture(std::vector<uint8_t>& out) {
++    SnapPut(out, &g_voices, sizeof g_voices);
++    SnapPut(out, &g_done, sizeof g_done);
++    SnapPut(out, g_listener, sizeof g_listener);
++    SnapPut(out, g_front, sizeof g_front);
++    SnapPut(out, g_top, sizeof g_top);
++    SnapPut(out, &g_ds, sizeof g_ds);
++    // Start() allocates a guest KPCR for the pump thread. That allocation is
++    // already in the heap image. Running it again on resume shifts later objects.
++    SnapPut(out, &g_started, sizeof g_started);
++}
++
++bool SnapshotInstall(const uint8_t* p, size_t n) {
++    const uint8_t* q = p;
++    const uint8_t* end = p + n;
++    return SnapGet(q, end, &g_voices, sizeof g_voices) && SnapGet(q, end, &g_done, sizeof g_done) &&
++           SnapGet(q, end, g_listener, sizeof g_listener) && SnapGet(q, end, g_front, sizeof g_front) &&
++           SnapGet(q, end, g_top, sizeof g_top) && SnapGet(q, end, &g_ds, sizeof g_ds) &&
++           SnapGet(q, end, &g_started, sizeof g_started) && q == end;
+ }
++
+ }  // namespace dsound
+ 
+ // device
+diff --git a/runtime/xdk/xapi.cpp b/runtime/xdk/xapi.cpp
+--- a/runtime/xdk/xapi.cpp
++++ b/runtime/xdk/xapi.cpp
+@@ -3,6 +3,8 @@
+ 
+ #include "core/determinism.h"
+ #include "core/input.h"
++#include "det/snap_blob.h"
++#include "det/xinput_packet.h"
+ #include "xdk/hle.h"
+ #include "xdk/layout.h"
+ 
+@@ -41,6 +43,15 @@
+ 
+ namespace xapi {
+ void PollPortsOnce() { UpdatePorts(); }
++
++// XBE_SNAPSHOT
++void SnapshotCapture(std::vector<uint8_t>& out) { SnapPut(out, &g_handles, sizeof g_handles); }
++
++bool SnapshotInstall(const uint8_t* p, size_t n) {
++    const uint8_t* q = p;
++    return SnapGet(q, p + n, &g_handles, sizeof g_handles) && q == p + n;
++}
++
+ }  // namespace xapi
+ 
+ HLE_STDCALL(XMountUtilityDrive, 1) {
+@@ -113,8 +124,7 @@
+     // memcmp of the whole Pad also compared the padding byte after connected.
+     // That byte is not a report field, and a returned Pad does not clear it,
+     // so one host counted a new packet where the other did not.
+-    const bool changed = p.connected != h.last.connected || buttons_changed || p.lx != h.last.lx || p.ly != h.last.ly ||
+-                         p.rx != h.last.rx || p.ry != h.last.ry;
++    const bool changed = det::XInputReportChanged(p, h.last);
+     if (changed) h.packet++;
+     h.last = p;
+     if (buttons_changed)
+diff --git a/runtime/kernel/memory.cpp b/runtime/kernel/memory.cpp
+--- a/runtime/kernel/memory.cpp
++++ b/runtime/kernel/memory.cpp
+@@ -46,7 +50,12 @@
+ #ifdef _WIN32
+     HANDLE ram = CreateFileMappingW(INVALID_HANDLE_VALUE, nullptr, PAGE_READWRITE, 0, kPhysicalSize, nullptr);
+     // a fixed base keeps crash dumps comparable between runs
+-    for (uint64_t hint : {0x100000000ull, 0x200000000ull, 0x300000000ull, 0ull}) {
++    uint64_t hints[5];
++    int nh = 0;
++    if (g_base_hint) hints[nh++] = g_base_hint;
++    for (uint64_t h : {0x100000000ull, 0x200000000ull, 0x300000000ull, 0ull}) hints[nh++] = h;
++    for (int hi = 0; hi < nh; hi++) {
++        uint64_t hint = hints[hi];
+         uint8_t* b = static_cast<uint8_t*>(VirtualAlloc(reinterpret_cast<void*>(hint), size, MEM_RESERVE, PAGE_NOACCESS));
+         if (!b) continue;
+         VirtualFree(b, 0, MEM_RELEASE);
+@@ -207,6 +222,24 @@
+ 
+ bool IsCommitted(uint32_t va) { return InPhysical(va) || g_committed[va >> 12] != 0; }
+ 
++// XBE_SNAPSHOT
++void VisitCommitted(void (*fn)(uint32_t va, uint32_t pages, void* user), void* user) {
++    if (!fn) return;
++    uint32_t run = 0, pages = 0;
++    for (uint32_t i = 0; i < 0x100000; i++) {
++        uint32_t va = i << 12;
++        bool on = g_committed[i] != 0 && !InPhysical(va);
++        if (on) {
++            if (!pages) run = va;
++            pages++;
++        } else if (pages) {
++            fn(run, pages, user);
++            pages = 0;
++        }
++    }
++    if (pages) fn(run, pages, user);
++}
++
+ // first fit allocator over a guest range
+ class Ranges {
+ public:
+@@ -285,6 +318,42 @@
+ 
+     void Forget(uint32_t a) { used_.erase(a); }
+ 
++    void WriteMaps(std::vector<uint8_t>& o) const {
++        auto put = [&](const std::map<uint32_t, uint32_t>& m) {
++            uint32_t n = uint32_t(m.size());
++            const auto* b = reinterpret_cast<const uint8_t*>(&n);
++            o.insert(o.end(), b, b + 4);
++            for (const auto& [k, v] : m) {
++                const auto* kb = reinterpret_cast<const uint8_t*>(&k);
++                const auto* vb = reinterpret_cast<const uint8_t*>(&v);
++                o.insert(o.end(), kb, kb + 4);
++                o.insert(o.end(), vb, vb + 4);
++            }
++        };
++        put(free_);
++        put(used_);
++    }
++
++    bool ReadMaps(const uint8_t*& p, const uint8_t* end) {
++        auto get = [&](std::map<uint32_t, uint32_t>& m) {
++            if (p + 4 > end) return false;
++            uint32_t n = 0;
++            std::memcpy(&n, p, 4);
++            p += 4;
++            if (n > 1000000 || p + size_t(n) * 8 > end) return false;
++            m.clear();
++            for (uint32_t i = 0; i < n; i++) {
++                uint32_t k = 0, v = 0;
++                std::memcpy(&k, p, 4);
++                std::memcpy(&v, p + 4, 4);
++                p += 8;
++                m[k] = v;
++            }
++            return true;
++        };
++        return get(free_) && get(used_);
++    }
++
+     uint32_t SizeOf(uint32_t a) const {
+         auto it = used_.find(a);
+         return it == used_.end() ? 0 : it->second;
+@@ -519,6 +588,82 @@
+     return pa;
+ }
+ 
++void SnapshotCaptureRanges(std::vector<uint8_t>& out) {
++    std::lock_guard<std::recursive_mutex> lock(g_lock);
++    EnsureRanges();
++    g_contig.WriteMaps(out);
++    g_system.WriteMaps(out);
++    g_stacks.WriteMaps(out);
++    g_user.WriteMaps(out);
++    uint32_t n = uint32_t(g_stack_tops.size());
++    const auto* nb = reinterpret_cast<const uint8_t*>(&n);
++    out.insert(out.end(), nb, nb + 4);
++    for (const auto& [k, v] : g_stack_tops) {
++        const auto* kb = reinterpret_cast<const uint8_t*>(&k);
++        const auto* vb = reinterpret_cast<const uint8_t*>(&v);
++        out.insert(out.end(), kb, kb + 4);
++        out.insert(out.end(), vb, vb + 4);
++    }
++    n = uint32_t(g_reserved.size());
++    out.insert(out.end(), nb, nb + 4);
++    for (const auto& [k, r] : g_reserved) {
++        const auto* kb = reinterpret_cast<const uint8_t*>(&k);
++        out.insert(out.end(), kb, kb + 4);
++        const auto* sb = reinterpret_cast<const uint8_t*>(&r.size);
++        const auto* pb = reinterpret_cast<const uint8_t*>(&r.protect);
++        out.insert(out.end(), sb, sb + 4);
++        out.insert(out.end(), pb, pb + 4);
++        uint32_t cn = uint32_t(r.commit.size());
++        const auto* cb = reinterpret_cast<const uint8_t*>(&cn);
++        out.insert(out.end(), cb, cb + 4);
++        out.insert(out.end(), r.commit.begin(), r.commit.end());
++    }
++}
++
++bool SnapshotInstallRanges(const uint8_t* p, size_t n) {
++    std::lock_guard<std::recursive_mutex> lock(g_lock);
++    EnsureRanges();
++    const uint8_t* q = p;
++    const uint8_t* end = p + n;
++    if (!g_contig.ReadMaps(q, end) || !g_system.ReadMaps(q, end) || !g_stacks.ReadMaps(q, end) || !g_user.ReadMaps(q, end))
++        return false;
++    if (q + 4 > end) return false;
++    uint32_t count = 0;
++    std::memcpy(&count, q, 4);
++    q += 4;
++    if (count > 1000000 || q + size_t(count) * 8 > end) return false;
++    g_stack_tops.clear();
++    for (uint32_t i = 0; i < count; i++) {
++        uint32_t k = 0, v = 0;
++        std::memcpy(&k, q, 4);
++        std::memcpy(&v, q + 4, 4);
++        q += 8;
++        g_stack_tops[k] = v;
++    }
++    if (q + 4 > end) return false;
++    std::memcpy(&count, q, 4);
++    q += 4;
++    if (count > 1000000) return false;
++    std::map<uint32_t, Reservation> reserved;
++    for (uint32_t i = 0; i < count; i++) {
++        if (q + 16 > end) return false;
++        uint32_t k = 0, size = 0, protect = 0, cn = 0;
++        std::memcpy(&k, q, 4);
++        std::memcpy(&size, q + 4, 4);
++        std::memcpy(&protect, q + 8, 4);
++        std::memcpy(&cn, q + 12, 4);
++        q += 16;
++        if (cn > (1u << 20) || q + cn > end) return false;
++        Reservation r{size, protect, std::vector<uint8_t>(q, q + cn)};
++        q += cn;
++        reserved.emplace(k, std::move(r));
++    }
++    if (q != end) return false;
++    g_reserved.swap(reserved);
++    g_ranges_ready = true;
++    return true;
++}
++
+ Stats Query() {
+     std::lock_guard<std::recursive_mutex> lock(g_lock);
+     Stats s{};

@@ -129,3 +129,28 @@ total `6a609a6637cce6ba`.
 Reopen this when a host hashes a still-clear signal for a thread that
 returned before the present, or when holding a later return moves a Mac
 frame that already matches.
+
+## 2026-10-31. Snapshot stacks are copied at the setjmp
+
+The copy lives in `src/det/snapshot.cpp`. The SDK side is
+`patches/sdk-lockstep-snapshot.patch`. The guest-window hint is
+`patches/sdk-lockstep-snapshot-memory.patch` or the apple companion,
+because those two `memory.cpp` files do not share that function. The
+submodule pointer stays put. Tracy stays out of the patch.
+
+The blocked stack is copied in `Fill`, at the `sigsetjmp`, into a buffer
+allocated while the snapshot arena is bypassed. The bytes are `[sp, hi)`.
+Resume longjmps back to that point and takes the wait again. A copy taken
+later, or one that starts 2048 bytes below that SP, includes the wait the
+thread is already inside. The resumed thread then faults in `det::Park`
+(signal 11). Allocating the image on the arena changes a later guest
+checksum. The bypass keeps the save on the existing replay.
+
+On 31 Oct 2026 (Pacific) the Mac `RingHost` saved frames 20, 200, 1200,
+2200, 3400, and 5000 with `FUZION_STATE_EXPECT` on `gameplay2.detlog` and
+exited 0 at sim tick 22585. Resume of frame 20 through frame 140 exited 0
+at sim tick 1789. The five 120-frame scene resumes passed. Local
+`ctest -L fast` passed five tests.
+
+Reopen this when a resume faults in `Park`, or when a save run's expect
+mismatches on a frame before the snapshot.
