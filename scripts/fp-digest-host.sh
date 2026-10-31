@@ -37,6 +37,7 @@ OLM_CFLAGS="-std=c99 -O2 -ffp-contract=off -fno-fast-math -fno-builtin -fno-stri
 out=$(mktemp -d)
 trap 'rm -rf "$out"' EXIT
 while IFS= read -r name; do
+    name=${name%$'\r'}
     [ -z "$name" ] && continue
     base=$(basename "$name" .c)
     # shellcheck disable=SC2086

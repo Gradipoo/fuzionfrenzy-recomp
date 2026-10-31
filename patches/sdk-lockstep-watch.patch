@@ -50,7 +50,7 @@ diff --git a/runtime/core/determinism.cpp b/runtime/core/determinism.cpp
  namespace kernel {
  extern const xbe::Image* g_image;
  void SetDeterministicClocks(uint64_t interrupt_100ns, uint64_t system_100ns, uint32_t tick_ms);
-@@ -1234,8 +1274,634 @@
+@@ -1234,8 +1274,638 @@
      t_sw.has_ticket = true;
  }
  
@@ -85,8 +85,12 @@ diff --git a/runtime/core/determinism.cpp b/runtime/core/determinism.cpp
 +    }
 +    void emit() {
 +        ch('\n');
++#if defined(_WIN32)
++        if (n > 0) std::fwrite(d, 1, size_t(n), stderr);
++#else
 +        if (g_watch_fd >= 0) { ssize_t r = write(g_watch_fd, d, size_t(n)); (void)r; }
 +        if (g_watch_fd != STDERR_FILENO) { ssize_t r = write(STDERR_FILENO, d, size_t(n)); (void)r; }
++#endif
 +    }
 +};
 +
@@ -699,7 +703,7 @@ diff --git a/runtime/core/determinism.h b/runtime/core/determinism.h
 @@ -86,4 +86,10 @@
  // nobody still advances one tick, so a timed poll cannot spin on the wall clock.
  void PacerDelay(uint64_t hundred_ns);
-
+ 
 +// FUZION_WATCH_VA only. One relaxed load on the indirect-call path when the watch is off.
 +bool WatchArmed();
 +void NoteCompletion(uint32_t ret, uint32_t a, uint32_t ca, uint32_t ca2, uint32_t b, uint32_t cb, uint32_t cb2);
