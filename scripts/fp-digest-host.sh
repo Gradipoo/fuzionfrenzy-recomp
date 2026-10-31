@@ -32,12 +32,7 @@ if ! command -v clang >/dev/null 2>&1 || ! command -v clang++ >/dev/null 2>&1; t
     exit 1
 fi
 
-# COFF does not resolve a hidden symbol from another object the way ELF does.
-vis="-fvisibility=hidden"
-case "$(uname -s)" in
-    MINGW*|MSYS*|CYGWIN*) vis="" ;;
-esac
-OLM_CFLAGS="-std=c99 -O2 -ffp-contract=off -fno-fast-math -fno-builtin -fno-strict-aliasing $vis -DOLM_PRIVATE -D__BSD_VISIBLE -Wno-deprecated-non-prototype -I third_party/openlibm/include -I third_party/openlibm/src -include third_party/openlibm/olm_prefix.h"
+OLM_CFLAGS="-std=c99 -O2 -ffp-contract=off -fno-fast-math -fno-builtin -fno-strict-aliasing -fvisibility=hidden -DOLM_PRIVATE -D__BSD_VISIBLE -Wno-deprecated-non-prototype -I third_party/openlibm/include -I third_party/openlibm/src -include third_party/openlibm/olm_prefix.h"
 
 out=$(mktemp -d)
 trap 'rm -rf "$out"' EXIT
