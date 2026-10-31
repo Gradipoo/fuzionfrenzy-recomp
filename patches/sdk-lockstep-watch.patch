@@ -50,7 +50,7 @@ diff --git a/runtime/core/determinism.cpp b/runtime/core/determinism.cpp
  namespace kernel {
  extern const xbe::Image* g_image;
  void SetDeterministicClocks(uint64_t interrupt_100ns, uint64_t system_100ns, uint32_t tick_ms);
-@@ -1234,8 +1274,634 @@
+@@ -1234,8 +1274,638 @@
      t_sw.has_ticket = true;
  }
  
@@ -85,8 +85,12 @@ diff --git a/runtime/core/determinism.cpp b/runtime/core/determinism.cpp
 +    }
 +    void emit() {
 +        ch('\n');
++#if defined(_WIN32)
++        if (n > 0) std::fwrite(d, 1, size_t(n), stderr);
++#else
 +        if (g_watch_fd >= 0) { ssize_t r = write(g_watch_fd, d, size_t(n)); (void)r; }
 +        if (g_watch_fd != STDERR_FILENO) { ssize_t r = write(STDERR_FILENO, d, size_t(n)); (void)r; }
++#endif
 +    }
 +};
 +
