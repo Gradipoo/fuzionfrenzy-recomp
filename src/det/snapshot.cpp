@@ -25,6 +25,16 @@
 
 #include <setjmp.h>
 
+#if defined(_WIN32)
+using SnapJmp = jmp_buf;
+#define SNAP_SETJMP(b) setjmp(b)
+#define SNAP_LONGJMP(b, v) longjmp((b), (v))
+#else
+using SnapJmp = sigjmp_buf;
+#define SNAP_SETJMP(b) sigsetjmp((b), 0)
+#define SNAP_LONGJMP(b, v) siglongjmp((b), (v))
+#endif
+
 #if !defined(_WIN32)
 #include <pthread.h>
 #include <sys/mman.h>
@@ -89,7 +99,7 @@ struct Live {
     int kind = 0;
     int slot = -1;
     uintptr_t lo = 0, hi = 0, sp = 0;
-    sigjmp_buf jb{};
+    SnapJmp jb{};
     uint64_t cookie = 0;  // Apple arm64 thread cookie that hides fp/lr/sp
     det::TlsImage tls{};
     std::vector<uint8_t> stack;
@@ -233,7 +243,7 @@ uint64_t JmpCookie() {
 #endif
 }
 
-void RetargetJmp(sigjmp_buf jb, uint64_t saved) {
+void RetargetJmp(SnapJmp jb, uint64_t saved) {
 #if defined(__APPLE__) && defined(__aarch64__)
     if (!saved) return;
     uint64_t delta = saved ^ JmpCookie();
@@ -247,7 +257,7 @@ void RetargetJmp(sigjmp_buf jb, uint64_t saved) {
 #endif
 }
 
-void Fill(Live& live, int kind, sigjmp_buf jb) {
+void Fill(Live& live, int kind, SnapJmp jb) {
     uintptr_t sp = CurrentSp();
     Slot* s = SlotOf(sp);
     if (!s) return;
@@ -263,7 +273,7 @@ void Fill(Live& live, int kind, sigjmp_buf jb) {
     live.lo = s->lo;
     live.hi = s->hi;
     live.sp = sp;
-    std::memcpy(&live.jb, jb, sizeof(sigjmp_buf));
+    std::memcpy(&live.jb, jb, sizeof(SnapJmp));
     live.cookie = JmpCookie();
     det::ExportTls(live.tls);
     live.have = true;
@@ -332,7 +342,7 @@ bool WriteThreads(FILE* f) {
         put(&L.hi, 8);
         put(&L.sp, 8);
         put(&L.tls, sizeof L.tls);
-        uint32_t jn = uint32_t(sizeof(sigjmp_buf));
+        uint32_t jn = uint32_t(sizeof(SnapJmp));
         put(&jn, 4);
         put(&L.jb, jn);
         put(&L.cookie, 8);
@@ -485,12 +495,12 @@ void* ResumeEntry(void* raw) {
     det::ImportTls(live->tls);
     det::ReregisterTls();
     kernel::BindCurrent(live->tls.thread_id);
-    sigjmp_buf jb;
+    SnapJmp jb;
     std::memcpy(&jb, &live->jb, sizeof jb);
     RetargetJmp(jb, live->cookie);
     // The longjmp returns into the saved xbe_block_snap / xbe_present_snap.
     // That copy counts blockers once they are back on the restored stack.
-    siglongjmp(jb, 1);
+    SNAP_LONGJMP(jb, 1);
     return nullptr;
 }
 
@@ -548,7 +558,7 @@ bool LoadThreads(const uint8_t* p, size_t n, std::vector<Live>& blockers, Live& 
         i += sizeof L.tls;
         std::memcpy(&jn, p + i, 4);
         i += 4;
-        if (jn != sizeof(sigjmp_buf) || !need(jn + 8 + 8)) return false;
+        if (jn != sizeof(SnapJmp) || !need(jn + 8 + 8)) return false;
         std::memcpy(&L.jb, p + i, jn);
         i += jn;
         std::memcpy(&L.cookie, p + i, 8);
@@ -734,8 +744,8 @@ extern "C" void* xbe_take_stack(size_t* bytes) {
 extern "C" void xbe_present_snap(void) {
     if (!Saving()) return;
     if (EnvSet("FUZION_SNAPSHOT_NOJMP")) return;
-    sigjmp_buf jb;
-    if (sigsetjmp(jb, 0) != 0) return;
+    SnapJmp jb;
+    if (SNAP_SETJMP(jb) != 0) return;
     Fill(g_present, 1, jb);
     if (g_present.slot >= 0 && g_present.slot < kSlots) g_block[g_present.slot].have = false;
     uint64_t frame = det::FrameIndex();
@@ -748,8 +758,8 @@ extern "C" void xbe_block_snap(void) {
     if (!Saving()) return;
     if (EnvSet("FUZION_SNAPSHOT_NOJMP")) return;
     if (det::OnPacer()) return;
-    sigjmp_buf jb;
-    if (sigsetjmp(jb, 0) != 0) {
+    SnapJmp jb;
+    if (SNAP_SETJMP(jb) != 0) {
         g_entered.fetch_add(1, std::memory_order_release);
         return;
     }
