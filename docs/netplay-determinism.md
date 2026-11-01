@@ -35,6 +35,8 @@ The command line wins over the environment variable. `--name value` and `--name=
 
 `--instance N` is the existing launcher flag. Instance 0 and 1 share `hdd/` next to the executable. Instance 2 and up use `hddN`. The matrix uses 2, 3, and 4 and deletes only those directories.
 
+Lockstep compares a hello before the first poll: protocol, seed, delay, seat, and the width, height, and ultrawide from `settings.toml`. A mismatch exits. Seat 1's sample is port 1 of `--replay-input` when that is set, otherwise the pad on port 1. Seat 2's sample is the mash when `--port2-mash` is set. Ports 3 and 4 are sent disconnected. Both processes need the same HDD snapshot and the same explicit `settings.toml` (a 0 by 0 size follows the desktop, and that bit is in the hash). The second process uses `--instance 2` so it does not share `hdd/`. After the run, `scripts/det-diff.py` on the two state logs is the check. A hash mismatch writes `det-desync/desync_<frame>.txt` and exits 1. A silent peer logs a timeout and exits 2.
+
 ## What a frame is
 
 A frame is one `D3DDevice_Present` (this XDK has no `Swap` that the title calls). The guest body of `Present` is replaced, and the only caller of `BlockUntilVerticalBlank` sat inside that body, so the title does not wait on vblank itself.
