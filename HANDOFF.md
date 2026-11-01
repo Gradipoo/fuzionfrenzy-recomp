@@ -21,26 +21,22 @@ never leaves this Mac. SHA-1 of `default.xbe` is `c6fb6082900532cde5fa8dbb7de8df
 
 ## Latest branch
 
-`cursor/linux-det-c2dc` is the latest line. Review base is
-`cursor/fixed-step-pace-c2dc` @ `92002fe`. Parent of that is `cursor/xbox-one-usb-c2dc`
-@ `36d66fb`.
+`cursor/lockstep-udp-51ac` is the live line, branched from the PR #1 merge
+`529350f` on `cursor/linux-det-c2dc`. No pull request. Compare:
 
-The gameplay2 write-up is `fc4730d` ("Record the x86_64 gameplay2 match and
-the boot-thread exit."). The first cold-start handoff is `09b7843`. The
-shared agent docs landed in `b114caa`. The commit on top of that makes
-`AGENTS.md`, `docs/agent-workflow.md`, and `docs/decisions.md`
-contributor-neutral and leaves this file as the maintainer-local note.
-`git log -1` on this branch is the hash to report.
+https://github.com/Gradipoo/fuzionfrenzy-recomp/compare/cursor/linux-det-c2dc...cursor/lockstep-udp-51ac
 
-The live worktree is `cursor/fast-tests-cf19` at that same commit, plus uncommitted snapshot resume, fast tests, ccache, and a Windows CI draft. Nothing from that worktree is committed.
+Delay lockstep over UDP is in `src/net`. The flag is off unless
+`FUZION_LOCKSTEP` is set. Mac flags-off gameplay2 still matches (7766
+frames, exit 0, sim tick 25350). Two Mac processes on loopback, 240
+frames, `det-diff` printed `PASS 240 frames match`, sim tick 7234.
 
-No pull request was opened. `ManagePullRequest` `create_pr` returned unauthenticated.
-Compare:
-
-https://github.com/Gradipoo/fuzionfrenzy-recomp/compare/cursor/fixed-step-pace-c2dc...cursor/linux-det-c2dc
-
-Do not open that PR with `gh`. `gh` is logged in as Gradipoo and is for viewing CI
-only (`gh run list`, `gh run view`).
+Windows is Sean's Parallels VM `Windows 11` (ARM64 guest, x64
+`FuzionFrenzy.exe` from `build.bat`, clang 19.1.5 under emulation).
+Flags-off gameplay2 matches through frame 162. Frame 163 diverges in
+`.data`. Mac `qpc=2479`, Windows `qpc=2478`. `rdtsc` and `delay` match.
+The cross-machine pair was not run. `Pause idle` was turned off for the
+build and turned back on afterward.
 
 Commits on this line are authored `port <port@local>` by setting `GIT_AUTHOR_NAME`,
 `GIT_AUTHOR_EMAIL`, `GIT_COMMITTER_NAME`, and `GIT_COMMITTER_EMAIL` for that one
@@ -242,7 +238,7 @@ Also leave untracked `.DS_Store` unstaged. `--self-test` checks the rules. The X
 - A ctest suite. `ctest -L fast` is in the workflow. Locally it passed: `det_clock`, `xinput_packet`, `arena`, `fp_digest`, `det_diff`. Scene resumes are label `scenes` and stay off CI.
 - ccache. The compiler launcher when `ccache` is installed. The workflow fails the configure step if the cache file does not name ccache.
 - Windows CI. The workflow has a Windows job (runtime, math digest, det-diff, fast tests). It does not boot the game. `cmake --preset windows-cross` is documented at the bottom of `docs/netplay-determinism.md` and still has to run on Windows before an x86_64 Windows hash exists.
-- Networking later. There is still no socket. Leave it off. The gameplay2 hash now matches across Mac arm64, Linux arm64, and Linux x86_64, which was the prerequisite. `docs/netplay-determinism.md` is the design note.
+- Networking. Delay lockstep is on `cursor/lockstep-udp-51ac`. Mac loopback matches. Windows x64 gameplay2 diverges at frame 163 (one fewer `KeQueryPerformanceCounter` read). The Mac versus Windows pair waits on that.
 - Sumo glitches. No root-cause writeup on this branch. Sumo Balls is a recorded scene: present 3400 in `tools/shots/scenes.txt` on `cursor/screenshot-scenes-c2dc` (title 200, board 1200, character select 1400, Twisted System countdown 1800, Twisted System round 2200, Jetstream 5000). White characters and the white Twisted System floor are resolved in `docs/render-defect.md`. Scene indices stay on the screenshot branch.
 - Battery. Measured on battery during the 60 fps heavy scene: 11.168 V, −1231 mA, 13.7 W (`BatteryPower` −13747 mW), process CPU about 76% of one core, RSS about 195 MB. `powermetrics` needs root and `sudo -n` is unavailable, so there is no package or GPU watt split. The 4096-draw flush still waits inside a heavy frame. Do not retry a non-blocking slot rotation or a timeline submit on MoltenVK 1.4.2. The rest of that note is the next section.
 
