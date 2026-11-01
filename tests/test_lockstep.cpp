@@ -2,6 +2,7 @@
 #include "net/lockstep.h"
 
 #include <atomic>
+#include <chrono>
 #include <cstdio>
 #include <cstring>
 #include <mutex>
@@ -151,15 +152,19 @@ static void TestDesync() {
     net::Session a(Base(1));
     net::Session b(Base(2));
     Wire(link, a, b);
+    std::atomic<int> ready{0};
     std::atomic<int> saw{0};
     auto side = [&](net::Session& s, int seat, uint64_t bad_hash) {
         for (uint64_t f = 0; f < 8; f++) {
             if (s.Agree(f, Local(seat, f)).fail != net::Fail::None) return;
             if (s.NoteHash(f, 10).fail != net::Fail::None) return;
         }
+        if (s.Drain(7).fail != net::Fail::None) return;
+        ready.fetch_add(1);
+        while (ready.load() < 2) std::this_thread::sleep_for(std::chrono::milliseconds(1));
         net::Result r = s.NoteHash(7, bad_hash);
         if (r.fail == net::Fail::None) r = s.Drain(7);
-        if (r.fail == net::Fail::Desync && r.frame == 7) saw++;
+        if (r.fail == net::Fail::Desync && r.frame == 7) saw.fetch_add(1);
     };
     std::thread ta([&] { side(a, 1, 1); });
     std::thread tb([&] { side(b, 2, 2); });

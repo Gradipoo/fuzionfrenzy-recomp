@@ -189,3 +189,17 @@ if(NOT _snap_mem MATCHES "SetBaseHint")
     endif()
     message(STATUS "applied ${_snap_mem_patch}")
 endif()
+
+# Delay lockstep. The session lives in src/net. This hook calls it.
+set(_net "${REPO}/patches/sdk-lockstep-net.patch")
+if(EXISTS "${SDK}/runtime/core/determinism.cpp" AND EXISTS "${_net}")
+    file(READ "${SDK}/runtime/core/determinism.cpp" _net_src)
+    if(NOT _net_src MATCHES "XBE_LOCKSTEP_NET")
+        execute_process(COMMAND "${GIT_EXE}" -C "${SDK}" apply --whitespace=nowarn "${_net}"
+                        RESULT_VARIABLE _rc)
+        if(NOT _rc EQUAL 0)
+            message(FATAL_ERROR "patches/sdk-lockstep-net.patch failed (${_rc})")
+        endif()
+        message(STATUS "applied patches/sdk-lockstep-net.patch")
+    endif()
+endif()

@@ -154,3 +154,24 @@ at sim tick 1789. The five 120-frame scene resumes passed. Local
 
 Reopen this when a resume faults in `Park`, or when a save run's expect
 mismatches on a frame before the snapshot.
+
+## 2026-10-31 — Delay lockstep over UDP
+
+Commit `7307778` ("Add a delay lockstep session over UDP."). The present
+hook is the patch `patches/sdk-lockstep-net.patch` (`XBE_LOCKSTEP_NET`).
+
+The session lives in `src/net`. Frame N runs the samples from frame N
+minus the delay. Seat 1 publishes port 1, seat 2 publishes port 2, and
+ports 3 and 4 stay disconnected so the title fills them with AI. A
+mismatch of the per-frame total stops both sides. A silent peer stops
+them too. With the flag unset, no socket is opened.
+
+GekkoNet (`HeatXD/GekkoNet`, BSD-2-Clause) is a rollback library. Its
+update call returns save and load events, so it is not this protocol.
+GameNetworkingSockets (Valve, BSD-3-Clause) is a transport. Its build
+needs protobuf and a crypto library, and Steam Datagram Relay is
+Steamworks-only. Neither is vendored. The Steamworks SDK stays out of
+this repo.
+
+Reopen this when a session needs rollback, or when two machines cannot
+meet on plain UDP.

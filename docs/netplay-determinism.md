@@ -25,6 +25,13 @@ The command line wins over the environment variable. `--name value` and `--name=
 | `--state-dump-region NAME` | `FUZION_STATE_DUMP_REGION` | `phys_03`, `.data`, `system`, `user_0`, or a section name. Empty dumps the writable sections and the 64 physical slices. |
 | | `FUZION_PORT2_KEYS` | Move the keyboard map from port 1 onto port 2. Unset, empty, or `0` leaves it off. There is no command-line switch: the keyboard file does not see argv. |
 | `--port2-mash N` | `FUZION_PORT2_MASH` | Drive port 2 from a seeded pattern. Unset, empty, or `0` leaves it off. `1` uses `FUZION_SEED` when that is set, otherwise seed 1. Any other number is the seed. |
+| `--lockstep` | `FUZION_LOCKSTEP` | Delay lockstep over UDP. Forces fixed step. Unset, empty, or `0` leaves it off, and no socket is opened. |
+| `--lockstep-bind HOST:PORT` | `FUZION_LOCKSTEP_BIND` | Local UDP address. `0.0.0.0` accepts a peer that is not on this machine. |
+| `--lockstep-peer HOST:PORT` | `FUZION_LOCKSTEP_PEER` | The other process. |
+| `--lockstep-seat N` | `FUZION_LOCKSTEP_SEAT` | `1` publishes port 1. `2` publishes port 2. |
+| `--lockstep-delay N` | `FUZION_LOCKSTEP_DELAY` | Frames of input delay. Default 2. Sim frame N runs the samples from frame N minus this. The first frames use an empty pad. |
+| `--lockstep-timeout-ms N` | `FUZION_LOCKSTEP_TIMEOUT_MS` | Give up on a missing sample. Default 5000. |
+| `--lockstep-hello-ms N` | `FUZION_LOCKSTEP_HELLO_MS` | How long to wait for the other process to reach its first poll. Default 180000. |
 
 `--instance N` is the existing launcher flag. Instance 0 and 1 share `hdd/` next to the executable. Instance 2 and up use `hddN`. The matrix uses 2, 3, and 4 and deletes only those directories.
 
