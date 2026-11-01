@@ -188,6 +188,15 @@ set(OLM_SRCS "")
 foreach(n ${OLM_SRC_NAMES})
     list(APPEND OLM_SRCS "${CMAKE_CURRENT_SOURCE_DIR}/third_party/openlibm/src/${n}")
 endforeach()
+# The prefix leaves sqrt and scalbn as host names. The Windows CRT defines
+# those too, and lld-link rejects the duplicate. The host copies stay.
+if(WIN32)
+    list(REMOVE_ITEM OLM_SRCS
+        "${CMAKE_CURRENT_SOURCE_DIR}/third_party/openlibm/src/e_sqrt.c"
+        "${CMAKE_CURRENT_SOURCE_DIR}/third_party/openlibm/src/e_sqrtf.c"
+        "${CMAKE_CURRENT_SOURCE_DIR}/third_party/openlibm/src/s_scalbn.c"
+        "${CMAKE_CURRENT_SOURCE_DIR}/third_party/openlibm/src/s_scalbnf.c")
+endif()
 add_library(openlibm STATIC ${OLM_SRCS})
 target_include_directories(openlibm PRIVATE
     "${CMAKE_CURRENT_SOURCE_DIR}/third_party/openlibm/include"
