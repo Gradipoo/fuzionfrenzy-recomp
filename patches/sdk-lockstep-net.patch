@@ -1,0 +1,158 @@
+--- a/runtime/core/determinism.cpp
++++ b/runtime/core/determinism.cpp
+@@ -12,2 +12,4 @@
+ #include "core/input.h"
++#include "app/app.h"
++#include "net/lockstep.h"
+ #include "core/log.h"
+@@ -96,2 +98,5 @@
+ namespace det {
++// XBE_LOCKSTEP_NET. Defined below, after the mash. WriteState calls the note.
++void LockstepNote(uint64_t frame, uint64_t total);
++void LockstepFinish(uint64_t frame);
+ namespace {
+@@ -152,2 +157,11 @@
+     uint32_t port2_seed = 1;
++    // XBE_LOCKSTEP_NET. Off unless set. Forces fixed step. Seat 1 publishes
++    // port 1, seat 2 publishes port 2, and the other two ports stay empty.
++    bool lockstep = false;
++    const char* lock_bind = nullptr;
++    const char* lock_peer = nullptr;
++    int lock_seat = 1;
++    int lock_delay = 2;
++    int lock_timeout_ms = 5000;
++    int lock_hello_ms = 180000;
+ };
+@@ -184,2 +198,18 @@
+         }
++        // XBE_LOCKSTEP_NET
++        c.lockstep = EnvOrSwitch("FUZION_LOCKSTEP", "lockstep");
++        c.lock_bind = EnvOrOpt("FUZION_LOCKSTEP_BIND", "lockstep-bind");
++        c.lock_peer = EnvOrOpt("FUZION_LOCKSTEP_PEER", "lockstep-peer");
++        if (const char* v = EnvOrOpt("FUZION_LOCKSTEP_SEAT", "lockstep-seat")) c.lock_seat = std::atoi(v);
++        if (const char* v = EnvOrOpt("FUZION_LOCKSTEP_DELAY", "lockstep-delay")) c.lock_delay = std::atoi(v);
++        if (const char* v = EnvOrOpt("FUZION_LOCKSTEP_TIMEOUT_MS", "lockstep-timeout-ms"))
++            c.lock_timeout_ms = std::atoi(v);
++        if (const char* v = EnvOrOpt("FUZION_LOCKSTEP_HELLO_MS", "lockstep-hello-ms")) c.lock_hello_ms = std::atoi(v);
++        if (c.lockstep) {
++            c.fixed = true;
++            if (!c.have_seed) {
++                c.have_seed = true;
++                c.seed = 1;
++            }
++        }
+         return c;
+@@ -766,2 +796,3 @@
+         LOGR("det: frame %llu total %016llx seed %08x", (unsigned long long)frame, (unsigned long long)total, seed);
++    if (C().lockstep) LockstepNote(frame, total);  // XBE_LOCKSTEP_NET
+     CheckExpect(frame, total, data_h, phys_h, system_h, user_h, slices, exc);
+@@ -789,2 +820,5 @@
+         LOGR("det: keyboard drives port 2; a recording stores that sample");
++    if (c.lockstep)
++        LOGR("det: lockstep seat %d delay %d bind %s peer %s", c.lock_seat, c.lock_delay,
++             c.lock_bind ? c.lock_bind : "-", c.lock_peer ? c.lock_peer : "-");
+ }
+@@ -2168,4 +2202,84 @@
+     return s;
++}
++
++// XBE_LOCKSTEP_NET
++namespace {
++net::Report ReportOf(const Sample& s) {
++    net::Report r;
++    r.connected = s.connected ? 1 : 0;
++    r.buttons = s.buttons;
++    std::memcpy(r.analog, s.analog, 8);
++    r.lx = s.lx;
++    r.ly = s.ly;
++    r.rx = s.rx;
++    r.ry = s.ry;
++    return r;
++}
++
++input::Pad PadOf(const net::Report& r) {
++    Sample s;
++    s.connected = r.connected != 0;
++    s.buttons = r.buttons;
++    std::memcpy(s.analog, r.analog, 8);
++    s.lx = r.lx;
++    s.ly = r.ly;
++    s.rx = r.rx;
++    s.ry = r.ry;
++    return s.Pad();
++}
++}  // namespace
++
++net::Session& LockstepSession() {
++    static net::Session* s = nullptr;
++    if (!s) {
++        net::Config cfg;
++        cfg.bind = C().lock_bind;
++        cfg.peer = C().lock_peer;
++        cfg.seat = C().lock_seat;
++        cfg.delay = C().lock_delay;
++        cfg.timeout_ms = C().lock_timeout_ms;
++        cfg.hello_ms = C().lock_hello_ms;
++        cfg.seed = C().seed;
++        const app::Settings& st = app::Get();
++        cfg.width = st.width;
++        cfg.height = st.height;
++        cfg.ultrawide = st.ultrawide ? 1 : 0;
++        s = new net::Session(cfg);
++    }
++    return *s;
+ }
+ 
++void LockstepStop(const net::Result& r, uint64_t frame) {
++    if (r.fail == net::Fail::None) return;
++    if (r.fail == net::Fail::Desync) {
++        std::vector<Exc> none;
++        ReportDesync(r.frame, "total", r.local_hash, r.remote_hash, none);
++    }
++    LOGE("det: lockstep %s at frame %llu", r.why ? r.why : "failed",
++         (unsigned long long)(r.frame ? r.frame : frame));
++    kernel::Shutdown(2);
++}
++
++void LockstepNote(uint64_t frame, uint64_t total) { LockstepStop(LockstepSession().NoteHash(frame, total), frame); }
++
++void LockstepFinish(uint64_t frame) { LockstepStop(LockstepSession().Drain(frame), frame); }
++
++uint64_t g_agreed_frame = ~uint64_t{0};
++net::Report g_agreed[4];
++
++void LockstepApply(int port, input::Pad& pad) {
++    uint64_t frame = g_frame.load(std::memory_order_relaxed);
++    if (g_agreed_frame != frame) {
++        net::Report local;
++        if (C().lock_seat == 2 && C().port2_mash) local = ReportOf(MashPort2(frame));
++        else if (C().replay) local = ReportOf(ReplayAt(frame, 0));
++        else if (port == 0) local = ReportOf(Sample(pad));
++        net::Result agreed = LockstepSession().Agree(frame, local);
++        LockstepStop(agreed, frame);
++        for (int i = 0; i < 4; i++) g_agreed[i] = agreed.pad[i];
++        g_agreed_frame = frame;
++    }
++    pad = PadOf(g_agreed[port]);
++}
++
+ void FilterPad(int port, input::Pad& pad) {
+@@ -2178,5 +2292,7 @@
+         // Replay alone still returns here, so an unset mash flag changes nothing.
+-        if (!(C().port2_mash && C().record)) return;
++        // XBE_LOCKSTEP_NET keeps going so the agreed sample replaces the file.
++        if (!(C().port2_mash && C().record) && !C().lockstep) return;
+     }
+     if (mash) pad = MashPort2(g_frame.load(std::memory_order_relaxed)).Pad();
++    if (C().lockstep) LockstepApply(port, pad);  // XBE_LOCKSTEP_NET
+     if (C().record || C().fixed) {
+@@ -2193,3 +2309,4 @@
+     const Cfg& c = C();
+-    if (!c.fixed && !c.record && !c.replay && !c.state_log && !c.frames && !c.stall_ms && !c.expect) return;
++    if (!c.fixed && !c.record && !c.replay && !c.state_log && !c.frames && !c.stall_ms && !c.expect && !c.lockstep)
++        return;
+     if (g_in_present) return;
+@@ -2237,2 +2354,3 @@
+     if (c.frames && next >= c.frames) {
++        if (c.lockstep) LockstepFinish(frame);  // XBE_LOCKSTEP_NET
+         if (g_state) std::fflush(g_state);
