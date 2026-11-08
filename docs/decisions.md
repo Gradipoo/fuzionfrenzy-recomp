@@ -175,3 +175,238 @@ this repo.
 
 Reopen this when a session needs rollback, or when two machines cannot
 meet on plain UDP.
+
+## 2026-11-08: Kicked-sleeper pre-registration did not settle the turn
+
+No commit. Reverted. The working tree and patches are back at `0be2bb7`.
+
+`YieldGuest` was changed to wake the time waiters while it still held the
+turn, register every Park sleeper that could run as waiting before `g_busy`
+dropped, and acknowledge a wake in `AcquireTurn` instead of in `Park` or
+`WaitTicks`. `AbandonGuest` released a pre-registered wait. The edits were
+in `patches/sdk-lockstep-load-yield.patch` and `patches/sdk-lockstep-host.patch`.
+
+Mac arm64 passed 20 of 20 replays at 250 frames once, and the full 7766
+replay matched with frame 7765 total `6a609a6637cce6ba` and sim tick 25350.
+It then failed a 250-frame replay at frame 179 `.data`, so the pass was not
+stable. Windows passed 4 of 5 full 7766 runs, then failed at frame 201
+`phys_12`. In 20 runs at 250 frames it failed 2: frame 176 `.data` (one fewer
+QPC read) and frame 222 `phys_12`.
+
+A second variant also pre-registered a WaitTicks sleeper whose deadline the
+present had just reached. Mac fell to 17 of 20, with `.data` failures at
+frames 145 and 175, so that variant was not kept. The expected order is not
+simply the deadline order.
+
+Do not retry pre-registration alone. The remaining `.data` miss is still the
+first clock read, guest thread 40 at `0x0006A00A` against thread 44 at
+`0x0006AC0C`. The ticket order assigned in `BlockGuest` may itself differ
+across hosts, which pre-registration cannot repair. The `phys_12` difference
+is three bytes, each one higher on the Mac, at physical `0x80CDFEFC`,
+`0x80CDFF04`, and `0x80CE15B0`; the first two and the table at the third
+read like one counter pair plus a queue or free-list entry.
+
+Reopen when a scheduler change makes the first clock read deterministic by
+guest identity or priority rather than by host block order, or when the
+`phys_12` counter is explained.
+
+### 2026-11-08: Guest-id order
+
+No commit. Reverted. Ordering waiters by the guest `Thread::id` in
+`LowestTicketLocked` moved Mac hashes: 18 of 20 replays at 250 frames matched,
+with `.data` failures at frames 163 and 179 (one QPC read short). The expect
+log follows the ticket order, so guest-id order is not a drop-in replacement.
+The host scheduler does not use the guest priority field today. A fixed order
+needs either a rule that reproduces the existing log or a fresh recording.
+
+Reopen when a fixed order is derived from the guest's own scheduling state, or
+when a new expect log is recorded for that order.
+
+### 2026-11-08: The block-order flip and the id-order deadlock
+
+No commit. Reverted. Trace only, then the id-order variant was stopped.
+
+The earlier guest-id test was invalid. `t_sw.guest_id` was set when the thread
+first registered, and `kernel::Current()` is often null at that point, so every
+waiter compared as id 0 and fell back to tickets. Refreshing the id in
+`AcquireTurn` and `BlockGuest` showed the real order.
+
+Mac frame 176: waiters 40 (ticket 583), 28 (584), 44 (585). Thread 40 read
+QPC first. Windows frame 178, the failing frame: waiters 44 (602), 40 (603),
+28 (604). Thread 44 read QPC first and advanced the tick four times. The Mac
+order is 40, 28, 44. The order flips in the later waves of frame 177. Tickets
+are assigned when each thread blocks, so host wake timing changes the block
+order even though the guest code is the same.
+
+With the real id used as the first key, Mac matched 20 of 20 against a new
+250-frame baseline. The new baseline had sim tick 4400, not 4396, so the old
+expect log is tied to ticket order. On Windows, run 5 of 40 hung at frame 60.
+Id order overrides the guest's block order and can deadlock.
+
+Do not retry id order. The next step is to make the block order deterministic
+without replacing it. The second and later waves are the lead: every waiter
+shares `g_cv`, and the ticket is assigned at `BlockGuest`, so the object wait
+registration order is not modeled. A per-object wait list, or a wake sequence
+that orders the runnable set before it is served, is the likely fix.
+
+Reopen when the wake order of threads signaled in the same frame is modeled
+and both hosts match a fresh baseline.
+
+### 2026-11-08: Pinned wait ticket
+
+No commit. Reverted. `WaitForFixed` kept one ticket across every re-park
+through `BeginWait` and `EndWait`. A new Mac baseline at 250 frames had sim
+tick 4357, and Mac matched 20 of 20 against it. Windows matched 40 of 40 at
+250 frames against the same baseline. The full Mac 7766 baseline had sim tick
+25076 and frame 7765 total `8e58fe8335c7a76d`; a second Mac run matched it.
+One Windows 7766 run passed.
+
+The 40x7766 run then hung on run 2 at frame 5887. The pinned ticket can keep
+a low ticket on a waiter that depends on a thread with a higher ticket, and
+the presenter waits forever. The 40x250 gate passed before the hang, so a
+short gate cannot clear this class. Reverted. `patches/sdk-lockstep-wait-pin.patch`
+and its apply hook were withdrawn.
+
+The next scheduler design must release or reorder a wait ticket when the wait
+depends on another guest thread, or track the dependency, not just pin the
+entry order. A Windows gate now needs one full 7766 run before the 40x loop.
+
+Reopen when a wait-order policy handles dependencies and both hosts match a
+fresh baseline through 7766.
+
+### 2026-11-08: Event ready queue, phase 1
+
+No commit. Reverted. Added a host wait record on each waited object in
+`WaitForFixed`, registered in guest order, and marked satisfied waiters with a
+ready sequence when `SetEvent` fired. The scheduler served ready waiters ahead
+of the ticket order. Only events were covered.
+
+Mac matched 18 of 20 at 250 frames against the existing baseline. The two
+failures were frame 130 `phys_12` and frame 157 `.data`, the same shapes as
+before. No Windows run was made. The event wait order alone does not explain
+the flake, so phase 2 (all wait types) is not justified yet.
+
+Reverted. The ready-queue work in `objects.cpp`, `kernel.h`, and
+`determinism.cpp` is gone.
+
+Reopen when a trace of a failing frame shows an event waiter out of order, or
+when all wait types can be modeled in one change.
+
+### 2026-11-08: Event ready queue with pulse
+
+No commit. Reverted. The event ready queue was retried with `PulseEvent`
+also marking satisfied waiters. Mac matched 20 of 20 once, then 18 of 40.
+The failure was frame 173 `.data`.
+
+The in-memory wait-state dump at that failure showed threads 28, 36, 40, and
+44 waiting on `ObjType::Event` (mask `00000001`). Thread 20 was on an I/O
+completion port (mask `00000010`). `SetEvent` and `PulseEvent` both mark
+event waiters in registration order, so the missing pulse hook is not the
+whole cause. The signal may arrive through `SetSignal` from a timer path, or
+the guest may write the dispatcher signal directly, or the registration order
+is not the order the guest expects.
+
+Reverted. The diagnostic confirmed the failing threads wait on events, but
+not which signal path moves them. The next trace should tag each signal by
+source (`KeSetEvent`, `KePulseEvent`, timer, direct `SetSignal`) and log the
+ready sequence for the event object.
+
+Reopen when the signal source is known and the event order can be tied to it.
+
+### 2026-11-08: Signal-source trace
+
+No commit. Reverted. The trace recorded the last 128 signals, tagged by source,
+and the last wait state per guest thread. It also compared the guest dispatcher
+signal word with the host object's signal before each block.
+
+Mac failed at frame 172 `.data`. The wait state showed threads 28, 36, 40, and
+44 on events and thread 20 on an I/O completion port. There were no direct
+guest writes (`GUESTSIG` was empty). The signal ring at that frame was almost
+all mutant releases and consumes; no `set` or `pulse` for the event objects
+the waiting threads were on.
+
+So the event wait order is not the order-critical path at this frame. The
+mutant and semaphore waits are. The event-only ready queue could not fix it.
+
+Reverted. The next model should cover mutants and semaphores first, then
+events. The signal-source trace and wait-state dump are not kept.
+
+Reopen when the mutant and semaphore wait order is modeled, or when a trace
+shows a different signal source.
+
+### 2026-11-08: Mutant and semaphore wait order
+
+No commit. Reverted. The ready queue was extended to mutants and semaphores:
+one mutant waiter marked on `ReleaseMutant`, up to the count on
+`ReleaseSemaphore`, and events as before. A wait record kept its place across
+re-parks.
+
+Mac failed at frame 165 `.data` on run 10 of 40, one QPC read short. The same
+class of failure survived the event queue, the pin, and guest-id order. Wait
+order is not the remaining cause for this miss.
+
+The clock path is. `Hold` advances the sim tick when two QPC reads see the
+same tick, so which thread reads first decides which thread skips the
+`0x0006A00A` sample. Wait-order changes move who reads first but do not remove
+the read-count difference.
+
+Reverted. Do not retry wait-order variants for this `.data` miss. The next
+change should make the QPC tick independent of read order, or trace the exact
+read that advances the tick at the first differing frame.
+
+Reopen when a clock change is ready to test, or when a trace shows a wait-order
+cause that is not the QPC count.
+
+### 2026-11-08: Per-thread QPC clock
+
+No commit. Reverted. `ClockQpc` kept its last value and have flag per guest
+thread. A first read by a thread returned the tick; only that thread's repeat
+advanced it. The snapshot TLS image carried the per-thread state and the
+snapshot version went to 3.
+
+The change moved the baseline: frame 249 total `39df123dec811dd1`, sim tick
+4094, qpc 4405 at 250 frames. Against that fresh baseline Mac failed on run 4
+of 40 at frame 136 `phys_12`, cause still including a QPC read-count
+difference.
+
+So the host-dependent read count is not only which thread reads first. Wait
+order and clock ownership have both been tried and neither makes Mac
+deterministic. Reverted; snapshot version back to 2; no per-thread QPC state.
+
+The next design has to make the guest-visible clock and the guest run order
+deterministic together, not adjust either heuristic alone.
+
+Reopen when a scheduler and clock model can be tested as one change.
+
+### 2026-11-08: Run queue ordering, candidate
+
+No commit. The run queue is wired behind `FUZION_RUN_QUEUE=1`. The key is
+guest priority, then guest thread id, then ready sequence. `LowestTicketLocked`
+uses the queue when the flag is on; the ticket path stays the default.
+
+Mac matched 40 of 40 at 250 frames against a fresh baseline, and the full
+7766 matched a second run: sim tick 25383, frame 7765 total
+`fac2e181df2256fa`.
+
+Windows matched 40 of 40 at 250 frames against that baseline, and one full
+7766 run matched it. This is the first full cross-host match.
+
+The 40x7766 loop was stopped after run 1 showed about one hour per full run,
+or roughly forty hours for the gate. The 40x250 gate and the single full run
+passed. The candidate is not patched or committed; the new baselines are
+local `rq-250.detlog` and `rq-7766.detlog`.
+
+Reopen when the full-run gate is reduced or scheduled, or when the queue path
+shows a failure.
+
+### 2026-11-08: Run queue accepted
+
+Committed with this change. The queue path is behind `FUZION_RUN_QUEUE=1` and
+is not the default. Five full Windows 7766 runs passed against the new
+baseline, after the 40x250 gate. Mac passed 40x250 and two full 7766 runs.
+
+The new baseline is `rq-250.detlog` and `rq-7766.detlog`: sim tick 25383,
+frame 7765 total `fac2e181df2256fa`. The old `gameplay2.detlog` remains the
+default-path baseline and is not retired.
+
+Reopen if a host fails the queue path, or when the flag becomes the default.

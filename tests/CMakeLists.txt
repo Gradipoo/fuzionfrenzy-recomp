@@ -15,6 +15,7 @@ function(xbe_test name src)
 endfunction()
 
 xbe_test(test_det_clock test_det_clock.cpp)
+xbe_test(test_run_queue test_run_queue.cpp)
 xbe_test(test_xinput_packet test_xinput_packet.cpp)
 xbe_test(test_arena test_arena.cpp)
 target_sources(test_arena PRIVATE "${CMAKE_SOURCE_DIR}/src/det/arena.cpp")
@@ -32,6 +33,7 @@ else()
 endif()
 
 add_test(NAME det_clock COMMAND test_det_clock)
+add_test(NAME run_queue COMMAND test_run_queue)
 add_test(NAME xinput_packet COMMAND test_xinput_packet)
 add_test(NAME arena COMMAND test_arena)
 add_test(NAME lockstep COMMAND test_lockstep)
@@ -43,7 +45,7 @@ else()
 endif()
 add_test(NAME det_diff COMMAND python3 "${CMAKE_SOURCE_DIR}/scripts/det-diff.py" --self-check)
 
-set_tests_properties(det_clock xinput_packet arena lockstep fp_digest det_diff PROPERTIES LABELS fast)
+set_tests_properties(det_clock run_queue xinput_packet arena lockstep fp_digest det_diff PROPERTIES LABELS fast)
 set_tests_properties(scenes PROPERTIES LABELS scenes TIMEOUT 900)
 set_tests_properties(fp_digest det_diff PROPERTIES
     WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"

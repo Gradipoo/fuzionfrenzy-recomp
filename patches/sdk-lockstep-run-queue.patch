@@ -1,0 +1,86 @@
+diff --git a/runtime/core/determinism.cpp b/runtime/core/determinism.cpp
+--- a/runtime/core/determinism.cpp
++++ b/runtime/core/determinism.cpp
+@@ -11,2 +11,3 @@
+ #include "core/input.h"
++#include "det/run_queue.h"
+ #include "app/app.h"
+@@ -827,6 +828,15 @@
+ void SetArgs(int argc, char** argv) {
+     g_argc = argc;
+     g_argv = argv;
++}
++
++// XBE_RUN_QUEUE
++bool RunQueueFlag() {
++    static const bool on = [] {
++        const char* e = std::getenv("FUZION_RUN_QUEUE");
++        return e && *e && *e != '0';
++    }();
++    return on;
+ }
+ 
+ bool FixedStep() { return C().fixed; }
+@@ -1221,6 +1231,8 @@
+ // ticket whose thread stays parked would leave every later thread stuck.
+ struct SchedWait {
+     uint64_t ticket = 0;
++    uint32_t guest_id = 0;
++    int priority = 0;
+     bool waiting = false;
+     bool has_ticket = false;
+     bool registered = false;
+@@ -1242,7 +1254,22 @@
+     t_sw.registered = true;
+ }
+ 
++void RefreshSchedGuestId() {
++    kernel::Thread* t = kernel::Current();
++    if (!t) return;
++    t_sw.guest_id = t->id;
++    t_sw.priority = t->priority;
++}
++
+ bool LowestTicketLocked() {
++    if (RunQueueFlag()) {
++        RunQueue q;
++        for (SchedWait* w : g_sw)
++            if (w->waiting && w->has_ticket) q.Push({w->priority, w->guest_id, 0});
++        RunEntry e;
++        if (!q.Pop(e)) return true;
++        return e.id == t_sw.guest_id;
++    }
+     for (SchedWait* other : g_sw) {
+         if (other == &t_sw || !other->waiting || !other->has_ticket) continue;
+         if (other->ticket < t_sw.ticket) return false;
+@@ -1286,6 +1313,7 @@
+     xbe_block_snap();  // XBE_SNAPSHOT
+     std::unique_lock<std::mutex> lock(g_sched_mu);
+     EnsureSchedLocked();
++    RefreshSchedGuestId();
+     if (t_owed) {
+         t_owed = 0;
+         if (g_reserved > 0) g_reserved--;
+@@ -1998,6 +2026,7 @@
+     {
+         std::lock_guard<std::mutex> lock(g_sched_mu);
+         EnsureSchedLocked();
++        RefreshSchedGuestId();
+         t_sw.ticket = g_next_ticket++;
+         t_sw.has_ticket = true;
+     }
+@@ -2134,6 +2163,14 @@
+     WatchStart();
+     if (!C().fixed && !C().have_seed && !C().record && !C().replay && !C().state_log) return;
+     LogMode();
++    if (RunQueueFlag()) {
++        RunQueue q;
++        q.Push({0, 44, 1});
++        q.Push({0, 40, 2});
++        q.Push({0, 28, 3});
++        RunEntry e;
++        LOGR("det: run queue skeleton enabled, first=%u", q.Pop(e) ? e.id : 0);
++    }
+     if (!g_rng_va) return;
+     uint32_t cur = kernel::R32(g_rng_va);
+     LOGR("det: rng global %08x holds %08x at image load", g_rng_va, cur);

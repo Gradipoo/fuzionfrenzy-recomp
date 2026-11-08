@@ -203,3 +203,18 @@ if(EXISTS "${SDK}/runtime/core/determinism.cpp" AND EXISTS "${_net}")
         message(STATUS "applied patches/sdk-lockstep-net.patch")
     endif()
 endif()
+
+# Run queue ordering behind FUZION_RUN_QUEUE. The project header lives in
+# src/det/run_queue.h; the sdk build already has src on its include path.
+set(_runq "${REPO}/patches/sdk-lockstep-run-queue.patch")
+if(EXISTS "${SDK}/runtime/core/determinism.cpp" AND EXISTS "${_runq}")
+    file(READ "${SDK}/runtime/core/determinism.cpp" _runq_src)
+    if(NOT _runq_src MATCHES "XBE_RUN_QUEUE")
+        execute_process(COMMAND "${GIT_EXE}" -C "${SDK}" apply --whitespace=nowarn "${_runq}"
+                        RESULT_VARIABLE _rc)
+        if(NOT _rc EQUAL 0)
+            message(FATAL_ERROR "patches/sdk-lockstep-run-queue.patch failed (${_rc})")
+        endif()
+        message(STATUS "applied patches/sdk-lockstep-run-queue.patch")
+    endif()
+endif()
