@@ -290,6 +290,13 @@ You supply the game: the USA Xbox release, as either
    The same `settings.toml`, `logs/` and `hdd/` as on Linux are created beside the executable.
    HDR settings are ignored. Keyboard and pad mapping is the table above.
 
+## Releases
+
+The initial release, [v0.1.0](https://github.com/Gradipoo/fuzionfrenzy-recomp/releases/tag/v0.1.0),
+carries `RingHost-macos.zip`: the ad-hoc-signed Ring Host launcher and this port's sources, with no
+game binary and no game data. Linux and Windows have no launcher in this repository, so those builds
+stay source-only.
+
 ## Working on the port
 
 - Never edit anything in `generated/`; it is rewritten on every recompile.
