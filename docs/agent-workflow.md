@@ -228,6 +228,13 @@ A change that can move a hash:
    snapshot. On Linux set `LP_NO_RAST=1` and point `VK_DRIVER_FILES` at
    lavapipe when you want the checksum run described above.
 
+On Windows, run one full 7766 replay first, then gate a 40x7766 run with 40
+replays at 250 frames. Use the same pads, seed, and HDD snapshot, restore the
+snapshot before each run, and stop the game at 250 frames. The short loop
+takes about ten minutes and catches the turn-order and physical-RAM flakes.
+It does not catch a late hang, so the single full run comes first. A Mac
+20x250 pass does not cover Windows.
+
 `scripts/det-diff.py --self-check` is the synthetic check CI runs. It does
 not boot the game.
 

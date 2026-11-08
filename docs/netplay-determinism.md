@@ -20,6 +20,7 @@ The command line wins over the environment variable. `--name value` and `--name=
 | `--frames N` | `FUZION_FRAMES` | Exit 0 after N presents. |
 | `--stall-ms N` | `FUZION_STALL_MS` | Sleep N milliseconds at the start of each present, before the hash. |
 | `--minimized` | `FUZION_MINIMIZED` | Show the window, then minimize it. |
+| | `FUZION_RUN_QUEUE` | Order guest waiters by guest priority, then guest thread id, then ready sequence. Unset, empty, or `0` uses the ticket path. |
 | `--state-dump DIR` | `FUZION_STATE_DUMP` | With the frame below, write `frame_N_region.bin`. |
 | `--state-dump-frame N` | `FUZION_STATE_DUMP_FRAME` | Which present to dump. |
 | `--state-dump-region NAME` | `FUZION_STATE_DUMP_REGION` | `phys_03`, `.data`, `system`, `user_0`, or a section name. Empty dumps the writable sections and the 64 physical slices. |
