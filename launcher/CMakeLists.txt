@@ -33,6 +33,10 @@ set(SDL_OPENGLES OFF CACHE BOOL "" FORCE)
 if(UNIX AND NOT APPLE)
     set(SDL_X11 ON CACHE BOOL "" FORCE)
     set(SDL_WAYLAND ON CACHE BOOL "" FORCE)
+    # The launcher does not blank the screen or inject X events. SDL treats a
+    # missing library for either of these as a configure error.
+    set(SDL_X11_XSCRNSAVER OFF CACHE BOOL "" FORCE)
+    set(SDL_X11_XTEST OFF CACHE BOOL "" FORCE)
     set(SDL_ALSA OFF CACHE BOOL "" FORCE)
     set(SDL_PULSEAUDIO OFF CACHE BOOL "" FORCE)
     set(SDL_PIPEWIRE OFF CACHE BOOL "" FORCE)
