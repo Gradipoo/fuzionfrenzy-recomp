@@ -39,11 +39,16 @@ see uninitialized reads either (`docs/sanitizers.md`).
 Rosetta, gcc when it is installed). CI does not run it. Each runner hashes
 its own native binary and compares that hash to the same file.
 
+`.github/workflows/ci.yml` runs on a pull request and on a push to `main`.
+It does not run on a tag, or on a branch push that has no pull request.
+A newer push to the same ref cancels the run that is still queued.
+
 `.github/workflows/release.yml` runs on a `v*` tag, and on
-`workflow_dispatch` as a prerelease. It packs the Mac app
+`workflow_dispatch` as a prerelease. A tag does not also start `ci.yml`. It packs the Mac app
 (`macos/launcher/package-dmg.sh`), the Linux launcher, and the Windows
 launcher (`launcher/package.sh`). The GitHub Release gets
 `RingHost-macos.dmg`, `RingHost-macos.zip`, `RingHost-linux-x64.tar.zst`,
-and `RingHost-win64.zip`. Each archive is the launcher plus the port
-sources. The package scripts refuse a disc image, an xbe, recompiled guest
-sources, or a game binary.
+and `RingHost-win64.zip`. The packs include the toolchain from
+`tools/release/fetch-toolchain.sh`, with the launcher and the port sources.
+The package scripts refuse a disc image, an xbe, recompiled guest sources,
+or a game binary.
