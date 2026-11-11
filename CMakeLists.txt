@@ -2,8 +2,20 @@
 
 cmake_minimum_required(VERSION 3.25)
 
+# ccache when it is installed. A launcher passed on the command line wins, so an
+# incremental ninja build keeps working without ccache.
+find_program(CCACHE_PROGRAM ccache)
+if(CCACHE_PROGRAM)
+    if(NOT CMAKE_C_COMPILER_LAUNCHER)
+        set(CMAKE_C_COMPILER_LAUNCHER "${CCACHE_PROGRAM}" CACHE STRING "C compiler launcher")
+    endif()
+    if(NOT CMAKE_CXX_COMPILER_LAUNCHER)
+        set(CMAKE_CXX_COMPILER_LAUNCHER "${CCACHE_PROGRAM}" CACHE STRING "C++ compiler launcher")
+    endif()
+endif()
+
 # macOS arm64 support lives in patches/sdk-macos-arm64.patch, applied onto the
-# pinned SDK submodule. Idempotent. Linux and Windows configure the submodule as-is.
+# pinned SDK submodule. Idempotent. Linux and Windows do not apply it.
 if(APPLE)
     execute_process(
         COMMAND /bin/sh "${CMAKE_CURRENT_SOURCE_DIR}/tools/apply-macos-sdk.sh"
@@ -13,11 +25,26 @@ if(APPLE)
         message(FATAL_ERROR "tools/apply-macos-sdk.sh failed (${_xbe_macos_patch})")
     endif()
 endif()
+# Cross-platform lockstep math and fresh-commit zeroing. Every host applies
+# this, after the Apple patch when there is one. Idempotent.
+execute_process(
+    COMMAND "${CMAKE_COMMAND}" -P "${CMAKE_CURRENT_SOURCE_DIR}/tools/apply-lockstep.cmake"
+    WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
+    RESULT_VARIABLE _xbe_lockstep_patch)
+if(NOT _xbe_lockstep_patch EQUAL 0)
+    message(FATAL_ERROR "tools/apply-lockstep.cmake failed (${_xbe_lockstep_patch})")
+endif()
 
 project(FuzionFrenzy LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
+
+# x86-64-v2 enables SSE4.1. render_thread checks __SSE4_1__. The preset used
+# to pass this flag to every Linux host, which arm64 clang rejects.
+if(UNIX AND NOT APPLE AND CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|AMD64|amd64")
+    add_compile_options(-march=x86-64-v2)
+endif()
 
 # the SDK: sdk/ here, a checkout beside this repository, else downloaded
 if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/sdk/cmake/XbeRecomp.cmake)
@@ -37,7 +64,79 @@ if(XBE_HOST_TOOLS_ONLY)
     include(${SDK}/cmake/XbeTools.cmake)
     return()
 endif()
+# A wired Xbox Series pad is owned by Apple's XboxGamepad driver and opened
+# through GameController. libusb stays linked so SDL HIDAPI can open a USB
+# pad that driver does not claim. Linking the Homebrew dylib records its
+# absolute install name. SDL_HIDAPI_LIBUSB_SHARED would dlopen the leaf
+# name "libusb-1.0.dylib", which dyld does not search for under Homebrew.
+# Linux keeps SDL's own choice (hidraw, and libusb only when it is present).
+if(APPLE)
+    list(PREPEND CMAKE_PREFIX_PATH "/opt/homebrew" "/usr/local")
+    find_path(XBE_LIBUSB_INCLUDE libusb.h PATH_SUFFIXES libusb-1.0)
+    find_library(XBE_LIBUSB_LIBRARY NAMES usb-1.0)
+    if(NOT XBE_LIBUSB_INCLUDE OR NOT XBE_LIBUSB_LIBRARY)
+        message(FATAL_ERROR "SDL HIDAPI on macOS needs libusb (userspace, no kernel extension). Install it with: brew install libusb")
+    endif()
+    set(SDL_HIDAPI ON CACHE BOOL "HIDAPI inside the vendored SDL3" FORCE)
+    set(SDL_HIDAPI_LIBUSB ON CACHE BOOL "HIDAPI opens Xbox pads through libusb" FORCE)
+    set(SDL_HIDAPI_LIBUSB_SHARED OFF CACHE BOOL "Link libusb instead of dlopen(libusb-1.0.dylib)" FORCE)
+endif()
+# CI compiles the runtime. It does not open a disc image, so SDL does not
+# need a window system. These have to be set before SDL is fetched.
+option(XBE_CI_RUNTIME "Compile the SDK runtime without a game image" OFF)
+if(XBE_CI_RUNTIME AND NOT APPLE)
+    set(SDL_X11 OFF CACHE BOOL "" FORCE)
+    set(SDL_WAYLAND OFF CACHE BOOL "" FORCE)
+    # SDL3 refuses to configure a Unix build that has neither X11 nor Wayland
+    # unless this is set. CI has no display server.
+    set(SDL_UNIX_CONSOLE_BUILD ON CACHE BOOL "" FORCE)
+endif()
 include(${SDK}/cmake/XbeRecomp.cmake)
+
+# Compile the runtime with no disc image and no recompiled guest. CI uses
+# this. The symbol header is synthetic (tools/ci/stub_symbols.py) and lives
+# in the build directory. It is not a substitute for a real image.
+if(XBE_CI_RUNTIME)
+    set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
+        "${CMAKE_CURRENT_SOURCE_DIR}/tools/ci/stub_symbols.py")
+    set(_xbe_ci_syms "${CMAKE_BINARY_DIR}/ci-symbols/image_symbols.h")
+    execute_process(
+        COMMAND python3
+            "${CMAKE_CURRENT_SOURCE_DIR}/tools/ci/stub_symbols.py" "${_xbe_ci_syms}"
+        RESULT_VARIABLE _xbe_ci_stub)
+    if(NOT _xbe_ci_stub EQUAL 0)
+        message(FATAL_ERROR "tools/ci/stub_symbols.py failed (${_xbe_ci_stub})")
+    endif()
+    add_library(xbe_runtime OBJECT ${XBE_RUNTIME_SOURCES})
+    target_include_directories(xbe_runtime BEFORE PRIVATE
+        "${CMAKE_BINARY_DIR}/ci-symbols"
+        "${CMAKE_CURRENT_SOURCE_DIR}/src"
+        "${SDK}/runtime")
+    target_include_directories(xbe_runtime SYSTEM PRIVATE ${imgui_SOURCE_DIR} ${XBE_SHADER_INCLUDES})
+    target_compile_definitions(xbe_runtime PRIVATE UNICODE _UNICODE _CRT_SECURE_NO_WARNINGS ${XBE_SHADER_DEFINES})
+    if(WIN32)
+        target_link_libraries(xbe_runtime PRIVATE tomlplusplus::tomlplusplus d3d12 dxgi dxguid d3dcompiler xaudio2 ole32 windowscodecs dbghelp winmm dwmapi)
+    else()
+        target_link_libraries(xbe_runtime PRIVATE tomlplusplus::tomlplusplus SDL3::SDL3-static Vulkan::Vulkan ${XBE_SHADER_LIBS} ZLIB::ZLIB)
+    endif()
+    if(MSVC)
+        target_compile_options(xbe_runtime PRIVATE /fp:precise)
+        if(CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+            target_compile_options(xbe_runtime PRIVATE /clang:-ffp-contract=off /clang:-fno-fast-math /clang:-fno-stack-protector)
+        else()
+            target_compile_options(xbe_runtime PRIVATE /GS-)
+        endif()
+    else()
+        # Resumed threads longjmp onto stacks saved in another process. A stack
+        # canary is a per-process cookie, so the first return would abort.
+        target_compile_options(xbe_runtime PRIVATE -ffp-contract=off -fno-fast-math -fno-strict-aliasing -fno-stack-protector)
+        if(CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|AMD64|amd64")
+            target_compile_options(xbe_runtime PRIVATE -mfpmath=sse -msse2)
+        endif()
+    endif()
+    include("${CMAKE_CURRENT_SOURCE_DIR}/tests/CMakeLists.txt")
+    return()
+endif()
 
 file(GLOB XBE_HOST_SOURCES CONFIGURE_DEPENDS src/*/*.cpp)
 list(FILTER XBE_HOST_SOURCES EXCLUDE REGEX "/src/game/")
@@ -62,3 +161,69 @@ add_xbe_image(FuzionFrenzy default.xbe game.toml ${GAME_PARTITIONS} game)
 if(APPLE)
     set_target_properties(FuzionFrenzy PROPERTIES OUTPUT_NAME RingHost)
 endif()
+# Guest floating point has to match across arm64 and x86-64. No FMA contraction,
+# no fast-math, and no 80-bit x87 evaluation of float or double. clang-cl still
+# contracts under /fp:precise, so it gets the clang flag as well. GCC 16
+# contracts at -O2 unless -ffp-contract=off is passed.
+if(MSVC)
+    target_compile_options(FuzionFrenzy PRIVATE /fp:precise)
+    if(CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+        target_compile_options(FuzionFrenzy PRIVATE /clang:-ffp-contract=off /clang:-fno-fast-math /clang:-fno-stack-protector)
+    else()
+        target_compile_options(FuzionFrenzy PRIVATE /GS-)
+    endif()
+else()
+    # No stack canary: a resumed frame was entered in the process that wrote
+    # the snapshot, and that process's guard cookie does not match this one.
+    target_compile_options(FuzionFrenzy PRIVATE -ffp-contract=off -fno-fast-math -fno-stack-protector)
+    if(CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|AMD64|amd64")
+        target_compile_options(FuzionFrenzy PRIVATE -mfpmath=sse -msse2)
+    endif()
+endif()
+
+# Guest transcendentals. Portable C from openlibm, symbols renamed olm_*,
+# no arch asm and no long-double objects. sqrt at the FSQRT site stays hardware.
+file(STRINGS "${CMAKE_CURRENT_SOURCE_DIR}/third_party/openlibm/sources.txt" OLM_SRC_NAMES)
+set(OLM_SRCS "")
+foreach(n ${OLM_SRC_NAMES})
+    list(APPEND OLM_SRCS "${CMAKE_CURRENT_SOURCE_DIR}/third_party/openlibm/src/${n}")
+endforeach()
+# The prefix leaves sqrt and scalbn as host names. The Windows CRT defines
+# those too, and lld-link rejects the duplicate. The host copies stay.
+if(WIN32)
+    list(REMOVE_ITEM OLM_SRCS
+        "${CMAKE_CURRENT_SOURCE_DIR}/third_party/openlibm/src/e_sqrt.c"
+        "${CMAKE_CURRENT_SOURCE_DIR}/third_party/openlibm/src/e_sqrtf.c"
+        "${CMAKE_CURRENT_SOURCE_DIR}/third_party/openlibm/src/s_scalbn.c"
+        "${CMAKE_CURRENT_SOURCE_DIR}/third_party/openlibm/src/s_scalbnf.c")
+endif()
+add_library(openlibm STATIC ${OLM_SRCS})
+target_include_directories(openlibm PRIVATE
+    "${CMAKE_CURRENT_SOURCE_DIR}/third_party/openlibm/include"
+    "${CMAKE_CURRENT_SOURCE_DIR}/third_party/openlibm/src")
+target_compile_definitions(openlibm PRIVATE OLM_PRIVATE __BSD_VISIBLE)
+set_target_properties(openlibm PROPERTIES C_STANDARD 99 C_STANDARD_REQUIRED ON)
+set(OLM_PREFIX "${CMAKE_CURRENT_SOURCE_DIR}/third_party/openlibm/olm_prefix.h")
+if(MSVC)
+    target_compile_options(openlibm PRIVATE /fp:precise)
+    if(CMAKE_C_COMPILER_ID MATCHES "Clang")
+        target_compile_options(openlibm PRIVATE
+            /clang:-ffp-contract=off /clang:-fno-fast-math /clang:-fno-builtin
+            /clang:-fno-strict-aliasing /clang:-fvisibility=hidden
+            /clang:-Wno-deprecated-non-prototype
+            "/clang:-include${OLM_PREFIX}")
+    else()
+        target_compile_options(openlibm PRIVATE "/FI${OLM_PREFIX}")
+    endif()
+else()
+    target_compile_options(openlibm PRIVATE
+        -ffp-contract=off -fno-fast-math -fno-builtin -fno-strict-aliasing
+        -fvisibility=hidden -Wno-deprecated-non-prototype
+        "-include${OLM_PREFIX}")
+    if(CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|AMD64|amd64")
+        target_compile_options(openlibm PRIVATE -mfpmath=sse -msse2)
+    endif()
+endif()
+target_link_libraries(FuzionFrenzy PRIVATE openlibm)
+
+include("${CMAKE_CURRENT_SOURCE_DIR}/tests/CMakeLists.txt")

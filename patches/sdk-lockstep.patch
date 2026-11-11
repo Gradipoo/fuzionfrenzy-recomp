@@ -1,0 +1,934 @@
+diff --git a/runtime/cpu/softmath.h b/runtime/cpu/softmath.h
+new file mode 100644
+index 0000000..0000000
+--- /dev/null
++++ b/runtime/cpu/softmath.h
+@@ -0,0 +1,62 @@
++#pragma once
++// Guest-visible math. Transcendentals are openlibm (third_party/openlibm),
++// compiled once with contraction off. sqrt and the rounding builtins stay on
++// the hardware: IEEE-754 requires those to be correctly rounded.
++// x87 FSIN/FCOS/FPTAN are not the CRT sin: they use openlibm plus the 66-bit
++// pi reduction the x87 actually uses. 80-bit memory is integer arithmetic.
++// XBE_LOCKSTEP_FP
++
++#include <cstdint>
++
++double xbe_sin(double);
++double xbe_cos(double);
++double xbe_tan(double);
++double xbe_asin(double);
++double xbe_acos(double);
++double xbe_atan(double);
++double xbe_atan2(double y, double x);
++double xbe_log(double);
++double xbe_log2(double);
++double xbe_log10(double);
++double xbe_exp(double);
++double xbe_exp2(double);
++double xbe_pow(double x, double y);
++double xbe_fmod(double x, double y);
++double xbe_remainder(double x, double y);
++double xbe_ldexp(double v, int exp);
++double xbe_frexp(double v, int* exp);
++
++float xbe_sinf(float);
++float xbe_cosf(float);
++float xbe_log2f(float);
++float xbe_exp2f(float);
++float xbe_powf(float x, float y);
++
++// x87 transcendentals. |x| >= 2^63 is reported by the caller via C2; these
++// assume the operand was accepted. PC does not narrow them.
++double xbe_x87_sin(double);
++double xbe_x87_cos(double);
++void xbe_x87_sincos(double x, double* s, double* c);
++double xbe_x87_tan(double);
++
++// 24-bit precision control. Rounds the significand only, so a value outside
++// the float range stays finite instead of becoming inf or zero.
++double xbe_round24(double);
++
++// Float-to-int the way CVTSS2SI does: out of range, NaN, and infinities are
++// the integer indefinite 0x80000000. The cast itself only sees an in-range
++// value, so ARM's saturating convert is not used.
++int32_t xbe_cvt_i32(double rounded);
++// Truncate to a bounded int for FSCALE. Huge exponents clamp instead of
++// becoming an undefined float-to-int cast.
++int xbe_trunc_i32(double v);
++
++// 80-bit memory format. Registers in this recomp stay IEEE binary64. The
++// conversion is integer arithmetic, so it does not follow host long double.
++double xbe_load80(const uint8_t* p);
++void xbe_store80(uint8_t* p, double v);
++
++// Round to nearest even, no flush-to-zero, no denormals-are-zero.
++// The recompiled SSE/x87 arithmetic uses the host unit and does not consult
++// the guest MXCSR, so every thread is held to this mode.
++void xbe_arm_host_fp();
+diff --git a/runtime/cpu/softmath.cpp b/runtime/cpu/softmath.cpp
+new file mode 100644
+index 0000000..0000000
+--- /dev/null
++++ b/runtime/cpu/softmath.cpp
+@@ -0,0 +1,340 @@
++// Guest math. Transcendentals are openlibm under an olm_ prefix.
++// ldexp, frexp, and the 80-bit memory format stay integer arithmetic so they
++// do not follow host long double. sqrt stays a hardware instruction at the
++// call site (FSQRT). XBE_LOCKSTEP_FP
++#include "cpu/softmath.h"
++
++#include <cfloat>
++#include <cmath>
++#include <cstdint>
++#include <cstring>
++#include <limits>
++
++#if defined(_MSC_VER)
++#include <xmmintrin.h>
++#endif
++
++#if defined(__clang__)
++#pragma clang fp contract(off)
++#endif
++#pragma STDC FP_CONTRACT OFF
++
++static_assert(FLT_EVAL_METHOD == 0 || FLT_EVAL_METHOD == -1,
++              "float and double must evaluate in their own precision, not x87 80-bit");
++
++extern "C" {
++double olm_sin(double);
++double olm_cos(double);
++double olm_tan(double);
++double olm_asin(double);
++double olm_acos(double);
++double olm_atan(double);
++double olm_atan2(double, double);
++double olm_log(double);
++double olm_log10(double);
++double olm_log2(double);
++double olm_exp(double);
++double olm_exp2(double);
++double olm_pow(double, double);
++double olm_fmod(double, double);
++double olm_remainder(double, double);
++float olm_sinf(float);
++float olm_cosf(float);
++float olm_log2f(float);
++float olm_exp2f(float);
++float olm_powf(float, float);
++}
++
++namespace {
++
++constexpr double kInf = std::numeric_limits<double>::infinity();
++
++double Bits(uint64_t u) {
++    double d;
++    std::memcpy(&d, &u, 8);
++    return d;
++}
++
++uint64_t BitsOf(double d) {
++    uint64_t u;
++    std::memcpy(&u, &d, 8);
++    return u;
++}
++
++bool IsNan(double x) { return x != x; }
++bool IsInf(double x) { return x == kInf || x == -kInf; }
++
++double Copysign(double x, double s) {
++    uint64_t u = BitsOf(x);
++    uint64_t t = BitsOf(s);
++    u = (u & 0x7fffffffffffffffull) | (t & 0x8000000000000000ull);
++    return Bits(u);
++}
++
++int Normalize80(uint64_t& mant) {
++    int sh = 0;
++    if (mant == 0) return 0;
++    while ((mant & 0x8000000000000000ull) == 0) {
++        mant <<= 1;
++        sh++;
++    }
++    return sh;
++}
++
++
++}  // namespace
++
++double xbe_sin(double x) { return olm_sin(x); }
++double xbe_cos(double x) { return olm_cos(x); }
++double xbe_tan(double x) { return olm_tan(x); }
++double xbe_asin(double x) { return olm_asin(x); }
++double xbe_acos(double x) { return olm_acos(x); }
++double xbe_atan(double x) { return olm_atan(x); }
++double xbe_atan2(double y, double x) { return olm_atan2(y, x); }
++double xbe_log(double x) { return olm_log(x); }
++double xbe_log2(double x) { return olm_log2(x); }
++double xbe_log10(double x) { return olm_log10(x); }
++double xbe_exp(double x) { return olm_exp(x); }
++double xbe_exp2(double x) { return olm_exp2(x); }
++double xbe_pow(double x, double y) { return olm_pow(x, y); }
++double xbe_fmod(double x, double y) { return olm_fmod(x, y); }
++double xbe_remainder(double x, double y) { return olm_remainder(x, y); }
++
++float xbe_sinf(float x) { return olm_sinf(x); }
++float xbe_cosf(float x) { return olm_cosf(x); }
++float xbe_log2f(float x) { return olm_log2f(x); }
++float xbe_exp2f(float x) { return olm_exp2f(x); }
++float xbe_powf(float x, float y) { return olm_powf(x, y); }
++
++// 66-bit pi, 0xC90FDAA22168C234C * 2^-66. fsin reduces with this, not true pi.
++// xboxrecomp recomp_x87_sincos_pi66 (MIT). Below pi/4 there is no reduction.
++constexpr double kPi66D = 0x1.8518e2da2e893p-70;
++constexpr double kPi4 = 0x1.921fb54442d18p-1;
++
++bool X87Reduces(double x) { return std::isfinite(x) && std::fabs(x) > kPi4; }
++
++void X87SinCosPi66(double x, double* s, double* c) {
++    double e = x * kPi66D;
++    double sx = olm_sin(x);
++    double cx = olm_cos(x);
++    double se, v;
++    if (std::fabs(e) < 0x1p-26) {
++        se = e;
++        v = 0.0;
++    } else {
++        double h = olm_sin(0.5 * e);
++        se = olm_sin(e);
++        v = 2.0 * h * h;
++    }
++    *s = sx + (cx * se - sx * v);
++    *c = cx - (sx * se + cx * v);
++}
++
++double xbe_x87_sin(double x) {
++    if (!X87Reduces(x)) return olm_sin(x);
++    double s, c;
++    X87SinCosPi66(x, &s, &c);
++    return s;
++}
++
++double xbe_x87_cos(double x) {
++    if (!X87Reduces(x)) return olm_cos(x);
++    double s, c;
++    X87SinCosPi66(x, &s, &c);
++    return c;
++}
++
++void xbe_x87_sincos(double x, double* s, double* c) {
++    if (!X87Reduces(x)) {
++        *s = olm_sin(x);
++        *c = olm_cos(x);
++        return;
++    }
++    X87SinCosPi66(x, s, c);
++}
++
++double xbe_x87_tan(double x) {
++    if (!X87Reduces(x)) return olm_tan(x);
++    double s, c;
++    X87SinCosPi66(x, &s, &c);
++    return s / c;
++}
++
++double xbe_round24(double x) {
++    double ax = std::fabs(x);
++    // Inside the finite float range a cast rounds to 24 bits, including subnormals.
++    if ((ax <= 0x1.fffffep+127 && ax >= 0x1p-126) || ax == 0.0 || x != x || ax == kInf)
++        return (double)(float)x;
++    int e = 0;
++    double m = xbe_frexp(x, &e);
++    return xbe_ldexp((double)(float)m, e);
++}
++
++int32_t xbe_cvt_i32(double rounded) {
++    if (!(rounded >= -2147483648.0 && rounded <= 2147483647.0)) return (int32_t)0x80000000u;
++    return (int32_t)(int64_t)rounded;
++}
++
++int xbe_trunc_i32(double v) {
++    if (!std::isfinite(v)) return std::signbit(v) ? -4096 : 4096;
++    double t = std::trunc(v);
++    if (t > 4096.0) return 4096;
++    if (t < -4096.0) return -4096;
++    return (int)(int64_t)t;
++}
++
++double xbe_ldexp(double v, int exp) {
++    if (v == 0.0 || IsNan(v) || IsInf(v)) return v;
++    uint64_t u = BitsOf(v);
++    int e = int((u >> 52) & 0x7ff);
++    uint64_t frac = u & 0x000fffffffffffffull;
++    uint64_t sign = u & 0x8000000000000000ull;
++    uint64_t sig53;
++    int E;
++    if (e == 0) {
++        if (frac == 0) return Bits(sign);
++        int sh = 0;
++        uint64_t t = frac;
++        while ((t & 0x0010000000000000ull) == 0) {
++            t <<= 1;
++            sh++;
++        }
++        sig53 = t;
++        E = -1022 - sh;
++    } else {
++        sig53 = frac | 0x0010000000000000ull;
++        E = e - 1023;
++    }
++    long long ne = (long long)E + (long long)exp;
++    if (ne >= 1024) return Copysign(kInf, v);
++    if (ne >= -1022) return Bits(sign | (uint64_t(ne + 1023) << 52) | (sig53 & 0x000fffffffffffffull));
++    if (ne <= -1022 - 64) return Copysign(0.0, v);
++    int shift = -1022 - int(ne);
++    if (shift >= 64) return Copysign(0.0, v);
++    uint64_t out = sig53 >> shift;
++    uint64_t round = (sig53 >> (shift - 1)) & 1ull;
++    uint64_t sticky = (shift > 1) && (sig53 & ((1ull << (shift - 1)) - 1ull)) != 0;
++    if (round && (sticky || (out & 1ull))) out += 1;
++    if (out >= 0x0010000000000000ull) return Bits(sign | (1ull << 52));
++    return Bits(sign | out);
++}
++
++double xbe_frexp(double v, int* exp) {
++    if (exp == nullptr) return v;
++    if (v == 0.0) {
++        *exp = 0;
++        return v;
++    }
++    if (IsNan(v) || IsInf(v)) {
++        *exp = 0;
++        return v;
++    }
++    uint64_t u = BitsOf(v);
++    int e = int((u >> 52) & 0x7ff);
++    uint64_t sign = u & 0x8000000000000000ull;
++    uint64_t sig = u & 0x000fffffffffffffull;
++    if (e == 0) {
++        int sh = 0;
++        while ((sig & 0x0010000000000000ull) == 0) {
++            sig <<= 1;
++            sh++;
++        }
++        sig &= 0x000fffffffffffffull;
++        *exp = -1021 - sh;
++        return Bits(sign | (uint64_t(1022) << 52) | sig);
++    }
++    *exp = e - 1022;
++    return Bits(sign | (uint64_t(1022) << 52) | sig);
++}
++
++double xbe_load80(const uint8_t* p) {
++    uint64_t mant;
++    uint16_t se;
++    std::memcpy(&mant, p, 8);
++    std::memcpy(&se, p + 8, 2);
++    uint64_t sign = uint64_t(se >> 15) << 63;
++    int exp = se & 0x7fff;
++    if (exp == 0x7fff) {
++        if ((mant << 1) == 0) return Bits(sign | 0x7ff0000000000000ull);
++        return Bits(sign | 0x7ff8000000000000ull);
++    }
++    if (mant == 0) return Bits(sign);
++    int shift = 0;
++    if ((mant & 0x8000000000000000ull) == 0) shift = Normalize80(mant);
++    int unbiased = (exp == 0 ? -16382 : exp - 16383) - shift;
++    uint64_t frac = (mant >> 11) & 0x000fffffffffffffull;
++    uint64_t round = (mant >> 10) & 1ull;
++    uint64_t sticky = (mant & 0x3ffull) != 0;
++    if (round && (sticky || (frac & 1ull))) {
++        frac += 1;
++        if (frac == 0x0010000000000000ull) {
++            frac = 0;
++            unbiased += 1;
++        }
++    }
++    if (unbiased >= 1024) return Bits(sign | 0x7ff0000000000000ull);
++    if (unbiased <= -1023) {
++        int sh = -1022 - unbiased;
++        uint64_t full = frac | 0x0010000000000000ull;
++        if (sh >= 54) return Bits(sign);
++        uint64_t out = full >> sh;
++        uint64_t rbit = (full >> (sh - 1)) & 1ull;
++        uint64_t st = (sh >= 2) && (full & ((1ull << (sh - 1)) - 1ull)) != 0;
++        if (rbit && (st || (out & 1ull))) out += 1;
++        if (out >= 0x0010000000000000ull) return Bits(sign | (1ull << 52));
++        return Bits(sign | out);
++    }
++    return Bits(sign | (uint64_t(unbiased + 1023) << 52) | frac);
++}
++
++void xbe_store80(uint8_t* p, double v) {
++    uint64_t u = BitsOf(v);
++    uint64_t sign = u >> 63;
++    int exp = int((u >> 52) & 0x7ff);
++    uint64_t frac = u & 0x000fffffffffffffull;
++    uint64_t mant = 0;
++    uint16_t se = uint16_t(sign << 15);
++    if (exp == 0x7ff) {
++        se |= 0x7fff;
++        mant = frac ? 0xC000000000000000ull : 0x8000000000000000ull;
++    } else if (exp == 0) {
++        if (frac != 0) {
++            uint64_t m = frac;
++            int sh = 0;
++            while ((m & 0x8000000000000000ull) == 0) {
++                m <<= 1;
++                sh++;
++            }
++            mant = m;
++            // bit 0 of frac has weight 2^-1074. After the shift, bit 63 has
++            // weight 2^(-1074 + 63 - sh) = 2^(-1011 - sh).
++            se |= uint16_t(16383 - 1011 - sh);
++        }
++    } else {
++        mant = (1ull << 63) | (frac << 11);
++        se |= uint16_t(exp + 15360);
++    }
++    std::memcpy(p, &mant, 8);
++    std::memcpy(p + 8, &se, 2);
++}
++
++void xbe_arm_host_fp() {
++#if defined(__aarch64__)
++    uint64_t fpcr = 0;
++    __asm__ volatile("msr fpcr, %0" ::"r"(fpcr));
++#elif defined(__x86_64__) || defined(_M_X64)
++#if defined(_MSC_VER) && !defined(__clang__)
++    _mm_setcsr(0x1F80);
++#else
++    uint32_t mxcsr = 0x1F80;
++    __asm__ volatile("ldmxcsr %0" ::"m"(mxcsr));
++#endif
++#endif
++}
++
++namespace {
++struct ArmMain {
++    ArmMain() { xbe_arm_host_fp(); }
++};
++ArmMain g_arm_main;
++}  // namespace
+diff --git a/runtime/cpu/x86_ops.h b/runtime/cpu/x86_ops.h
+index 87bd588..cd0d098 100644
+--- a/runtime/cpu/x86_ops.h
++++ b/runtime/cpu/x86_ops.h
+@@ -5,8 +5,13 @@
+ #include <limits>
+ #include <type_traits>
+ 
++#include "cpu/softmath.h"
+ #include "x86_context.h"
+ 
++#if defined(__clang__)
++#pragma clang fp contract(off)
++#endif
++
+ typedef uint16_t __attribute__((aligned(1), may_alias)) x86_u16u;
+ typedef uint32_t __attribute__((aligned(1), may_alias)) x86_u32u;
+ typedef uint64_t __attribute__((aligned(1), may_alias)) x86_u64u;
+@@ -70,8 +75,9 @@ inline void x87_push(X86Context& ctx, double v) {
+ }
+ inline void x87_pop(X86Context& ctx) { ctx.top = (ctx.top + 1) & 7; }
+ 
+-// precision control: results round to 24 bits when the control word asks for it
+-inline double x87_prec(X86Context& ctx, double v) { return (ctx.fcw & 0x300) ? v : double(float(v)); }
++// precision control: PC=00 rounds the significand to 24 bits and keeps the exponent.
++// A plain float cast would overflow to inf outside the float range.
++inline double x87_prec(X86Context& ctx, double v) { return (ctx.fcw & 0x300) ? v : xbe_round24(v); }
+ 
+ // C0 bit 8, C2 bit 10, C3 bit 14
+ inline void x87_compare(X86Context& ctx, double a, double b) {
+@@ -86,21 +92,32 @@ inline void x87_compare(X86Context& ctx, double a, double b) {
+ // TOP lives in status word bits 11 to 13
+ inline uint16_t x87_status(X86Context& ctx) { return uint16_t((ctx.fsw & ~0x3800) | ((ctx.top & 7) << 11)); }
+ 
+-inline double x87_round(X86Context& ctx, double v) {
+-    switch ((ctx.fcw >> 10) & 3) {  // control word RC field
+-        case 0: return std::nearbyint(v);
+-        case 1: return std::floor(v);
+-        case 2: return std::ceil(v);
+-        default: return std::trunc(v);
++// RC is bits 10-11: 0 nearest-even, 1 down, 2 up, 3 toward zero. Done in software
++// so a guest fldcw does not depend on the host rounding mode. A zero result keeps
++// the operand's sign, matching FRNDINT.
++inline double x87_round_rc(double v, int rc) {
++    if (!std::isfinite(v)) return v;
++    double rounded;
++    switch (rc & 3) {
++        case 1: rounded = std::floor(v); break;
++        case 2: rounded = std::ceil(v); break;
++        case 3: rounded = std::trunc(v); break;
++        default: {
++            double lo = std::floor(v);
++            double fraction = v - lo;
++            rounded = lo;
++            bool odd = false;
++            if (std::fabs(lo) < 0x1p53) odd = ((int64_t)lo & 1) != 0;
++            if (fraction > 0.5 || (fraction == 0.5 && odd)) rounded = lo + 1.0;
++            break;
++        }
+     }
++    return rounded == 0.0 ? std::copysign(0.0, v) : rounded;
+ }
++inline double x87_round(X86Context& ctx, double v) { return x87_round_rc(v, (ctx.fcw >> 10) & 3); }
+ 
+ // out of range gives the integer indefinite value, as the FPU does
+-inline int32_t x87_to_i32(X86Context& ctx, double v) {
+-    double r = x87_round(ctx, v);
+-    if (!(r >= -2147483648.0 && r <= 2147483647.0)) return INT32_MIN;
+-    return int32_t(r);
+-}
++inline int32_t x87_to_i32(X86Context& ctx, double v) { return xbe_cvt_i32(x87_round(ctx, v)); }
+ inline int16_t x87_to_i16(X86Context& ctx, double v) {
+     double r = x87_round(ctx, v);
+     if (!(r >= -32768.0 && r <= 32767.0)) return INT16_MIN;
+@@ -112,54 +129,55 @@ inline int64_t x87_to_i64(X86Context& ctx, double v) {
+     return int64_t(r);
+ }
+ 
+-inline double x87_load80(const uint8_t* p) {
+-    uint64_t mant;
+-    uint16_t se;
+-    std::memcpy(&mant, p, 8);
+-    std::memcpy(&se, p + 8, 2);
+-    int sign = se >> 15;
+-    int exp = se & 0x7FFF;
+-    double v;
+-    if (exp == 0 && mant == 0) v = 0.0;
+-    else if (exp == 0x7FFF) v = (mant << 1) ? NAN : INFINITY;
+-    else v = std::ldexp(double(mant), exp - 16383 - 63);
+-    return sign ? -v : v;
+-}
+-
+-inline void x87_store80(uint8_t* p, double v) {
+-    uint64_t mant = 0;
+-    uint16_t se = std::signbit(v) ? 0x8000 : 0;
+-    double a = std::fabs(v);
+-    if (std::isnan(v)) {
+-        se |= 0x7FFF;
+-        mant = 0xC000000000000000ull;
+-    } else if (std::isinf(v)) {
+-        se |= 0x7FFF;
+-        mant = 0x8000000000000000ull;
+-    } else if (a != 0.0) {
+-        int e;
+-        double m = std::frexp(a, &e);  // a = m * 2^e, m in [0.5,1)
+-        mant = uint64_t(std::ldexp(m, 64));
+-        se |= uint16_t(e - 1 + 16383);
+-    }
+-    std::memcpy(p, &mant, 8);
+-    std::memcpy(p + 8, &se, 2);
+-}
++inline double x87_load80(const uint8_t* p) { return xbe_load80(p); }
++inline void x87_store80(uint8_t* p, double v) { xbe_store80(p, v); }
+ 
+ inline uint32_t x87_examine(X86Context& ctx) {
+-    // FXAM class into C3 C2 C0, C1 = sign
++    // FXAM: C1 = sign. A nonzero finite, including a subnormal, is C2 (0x0400).
+     double v = X87_ST(0);
+-    uint16_t c;
+-    if (std::isnan(v)) c = 0x0100;
+-    else if (std::isinf(v)) c = 0x0500;
+-    else if (v == 0.0) c = 0x4000;
+-    else if (std::fpclassify(v) == FP_SUBNORMAL) c = 0x4400;
+-    else c = 0x0400;
+-    if (std::signbit(v)) c |= 0x0200;
++    uint16_t c = std::signbit(v) ? 0x0200 : 0;
++    if (std::isnan(v)) c |= 0x0100;
++    else if (std::isinf(v)) c |= 0x0500;
++    else if (v == 0.0) c |= 0x4000;
++    else c |= 0x0400;
+     ctx.fsw = uint16_t((ctx.fsw & ~0x4700) | c);
+     return 0;
+ }
+ 
++// |x| >= 2^63 sets C2 and leaves ST(0) and the stack depth alone.
++inline bool x87_trig_ok(X86Context& ctx, double x) {
++    if (std::isfinite(x) && std::fabs(x) >= 0x1p63) {
++        ctx.fsw = uint16_t(ctx.fsw | 0x400);
++        return false;
++    }
++    ctx.fsw = uint16_t(ctx.fsw & ~0x400);
++    return true;
++}
++inline void x87_fsin(X86Context& ctx) {
++    double x = X87_ST(0);
++    if (!x87_trig_ok(ctx, x)) return;
++    X87_ST(0) = xbe_x87_sin(x);
++}
++inline void x87_fcos(X86Context& ctx) {
++    double x = X87_ST(0);
++    if (!x87_trig_ok(ctx, x)) return;
++    X87_ST(0) = xbe_x87_cos(x);
++}
++inline void x87_fsincos(X86Context& ctx) {
++    double x = X87_ST(0);
++    if (!x87_trig_ok(ctx, x)) return;
++    double s, c;
++    xbe_x87_sincos(x, &s, &c);
++    X87_ST(0) = s;
++    x87_push(ctx, c);
++}
++inline void x87_fptan(X86Context& ctx) {
++    double x = X87_ST(0);
++    if (!x87_trig_ok(ctx, x)) return;
++    X87_ST(0) = xbe_x87_tan(x);
++    x87_push(ctx, 1.0);
++}
++
+ inline float sse_min(float a, float b) { return a < b ? a : b; }
+ inline float sse_max(float a, float b) { return a > b ? a : b; }
+ 
+@@ -178,14 +196,17 @@ inline uint32_t sse_cmp(float a, float b, int pred) {
+     return r ? 0xFFFFFFFFu : 0u;
+ }
+ 
+-inline int32_t sse_cvt(float v) {
+-    float r = std::nearbyint(v);
+-    if (!(r >= -2147483648.0f && r < 2147483648.0f)) return INT32_MIN;
+-    return int32_t(r);
++// CVTSS2SI rounds under MXCSR.RC (bits 13-14, same encoding as the x87 RC field).
++// CVTTSS2SI truncates. Both return 0x80000000 out of range. The range test is in
++// double, and the cast goes through int64, so ARM does not saturate.
++inline int32_t sse_cvt(const X86Context& ctx, float v) {
++    uint16_t rc = uint16_t(((ctx.mxcsr >> 13) & 3u) << 10);
++    return xbe_cvt_i32(x87_round_rc(double(v), rc >> 10));
+ }
+-inline int32_t sse_cvtt(float v) {
+-    if (!(v >= -2147483648.0f && v < 2147483648.0f)) return INT32_MIN;
+-    return int32_t(v);
++inline int32_t sse_cvtt(const X86Context&, float v) {
++    double d = double(v);
++    if (!std::isfinite(d)) return (int32_t)0x80000000u;
++    return xbe_cvt_i32(std::trunc(d));
+ }
+ 
+ template <typename T>
+diff --git a/runtime/gpu/d3d12.cpp b/runtime/gpu/d3d12.cpp
+index ab38b02..6041ac9 100644
+--- a/runtime/gpu/d3d12.cpp
++++ b/runtime/gpu/d3d12.cpp
+@@ -15,6 +15,8 @@
+ #include <algorithm>
+ #include <chrono>
+ #include <cmath>
++
++#include "cpu/softmath.h"
+ #include <cstdlib>
+ #include <cstdio>
+ #include <cstring>
+@@ -216,6 +218,7 @@ float4 psmain(O i) : SV_Target {
+ float Pq(float nits) {
+     constexpr float m1 = 2610.0f / 16384, m2 = 2523.0f / 4096 * 128;
+     constexpr float c1 = 3424.0f / 4096, c2 = 2413.0f / 4096 * 32, c3 = 2392.0f / 4096 * 32;
++    // Display tone map only. Not guest state, so it stays on the host libm.
+     float y = std::pow(nits / 10000, m1);
+     return std::pow((c1 + c2 * y) / (1 + c3 * y), m2);
+ }
+@@ -2369,8 +2372,8 @@ void LightToView(const std::array<uint32_t, kLightFloats>& l, const float* vm, f
+     o[5][0] = f[kLightAttenuation0];
+     o[5][1] = f[kLightAttenuation1];
+     o[5][2] = f[kLightAttenuation2];
+-    o[6][0] = std::cos(f[kLightTheta] * 0.5f);
+-    o[6][1] = std::cos(f[kLightPhi] * 0.5f);
++    o[6][0] = xbe_cosf(f[kLightTheta] * 0.5f);
++    o[6][1] = xbe_cosf(f[kLightPhi] * 0.5f);
+ }
+ 
+ void FillLightConstants(const State& s, const FixedKey& fk, DrawConstants& c) {
+diff --git a/runtime/xdk/crt_math.cpp b/runtime/xdk/crt_math.cpp
+index c530ba6..54b4422 100644
+--- a/runtime/xdk/crt_math.cpp
++++ b/runtime/xdk/crt_math.cpp
+@@ -3,6 +3,7 @@
+ // the host instead.
+ #include <cmath>
+ 
++#include "cpu/softmath.h"
+ #include "xdk/hle.h"
+ 
+ // each function's body, shared by its stack entry (sin) and its register entry (_CIsin): x in st0, popped by its ret
+@@ -24,32 +25,32 @@
+ #define SYM_crt_log10 FFFFFD08
+ #define SYM_crt_pow FFFFFD09
+ #endif
+-CRT_MATH(crt_sin, std::sin)
+-CRT_MATH(crt_cos, std::cos)
+-CRT_MATH(crt_tan, std::tan)
+-CRT_MATH(crt_asin, std::asin)
+-CRT_MATH(crt_acos, std::acos)
+-CRT_MATH(crt_atan, std::atan)
++CRT_MATH(crt_sin, xbe_sin)
++CRT_MATH(crt_cos, xbe_cos)
++CRT_MATH(crt_tan, xbe_tan)
++CRT_MATH(crt_asin, xbe_asin)
++CRT_MATH(crt_acos, xbe_acos)
++CRT_MATH(crt_atan, xbe_atan)
+ CRT_MATH(crt_sqrt, std::sqrt)
+-CRT_MATH(crt_log, std::log)
+-CRT_MATH(crt_log10, std::log10)
++CRT_MATH(crt_log, xbe_log)
++CRT_MATH(crt_log10, xbe_log10)
+ #undef CRT_MATH
+ 
+ // x and y above the return address, y in st0
+ X86_FUNC(GUEST(crt_pow)) {
+-    X87_ST(0) = std::pow(double(X86_MEMF64(ctx.esp + 4)), double(X86_MEMF64(ctx.esp + 12)));
++    X87_ST(0) = xbe_pow(double(X86_MEMF64(ctx.esp + 4)), double(X86_MEMF64(ctx.esp + 12)));
+     ctx.esp += 4;
+ }
+ 
+ // configs written before the bodies had names
+ X86_FUNC(GUEST(_CIacos)) {
+     (void)base;
+-    X87_ST(0) = std::acos(X87_ST(0));
++    X87_ST(0) = xbe_acos(X87_ST(0));
+     ctx.esp += 4;
+ }
+ 
+ X86_FUNC(GUEST(_CIasin)) {
+     (void)base;
+-    X87_ST(0) = std::asin(X87_ST(0));
++    X87_ST(0) = xbe_asin(X87_ST(0));
+     ctx.esp += 4;
+ }
+diff --git a/tools/recomp/codegen_fp.cpp b/tools/recomp/codegen_fp.cpp
+index 559f112..403b3d7 100644
+--- a/tools/recomp/codegen_fp.cpp
++++ b/tools/recomp/codegen_fp.cpp
+@@ -162,45 +162,41 @@ bool CodeGen::EmitX87(uint32_t va, const ZydisDecodedInstruction& in, const Zydi
+         case ZYDIS_MNEMONIC_FCHS: emit("X87_ST(0) = -X87_ST(0);"); return true;
+         case ZYDIS_MNEMONIC_FABS: emit("X87_ST(0) = std::fabs(X87_ST(0));"); return true;
+         case ZYDIS_MNEMONIC_FSQRT: emit("X87_ST(0) = x87_prec(ctx, std::sqrt(X87_ST(0)));"); return true;
+-        // clearing C2 (0x400) reports the argument in range
+-        case ZYDIS_MNEMONIC_FSIN: emit("X87_ST(0) = std::sin(X87_ST(0)); ctx.fsw &= ~0x400;"); return true;
+-        case ZYDIS_MNEMONIC_FCOS: emit("X87_ST(0) = std::cos(X87_ST(0)); ctx.fsw &= ~0x400;"); return true;
+-        case ZYDIS_MNEMONIC_FSINCOS:
+-            emit("double v = X87_ST(0); X87_ST(0) = std::sin(v); x87_push(ctx, std::cos(v)); ctx.fsw &= ~0x400;");
+-            return true;
+-        case ZYDIS_MNEMONIC_FPTAN:
+-            emit("X87_ST(0) = std::tan(X87_ST(0)); x87_push(ctx, 1.0); ctx.fsw &= ~0x400;");
+-            return true;
++        // C2 stays set, and the stack is unchanged, when |x| >= 2^63.
++        case ZYDIS_MNEMONIC_FSIN: emit("x87_fsin(ctx);"); return true;
++        case ZYDIS_MNEMONIC_FCOS: emit("x87_fcos(ctx);"); return true;
++        case ZYDIS_MNEMONIC_FSINCOS: emit("x87_fsincos(ctx);"); return true;
++        case ZYDIS_MNEMONIC_FPTAN: emit("x87_fptan(ctx);"); return true;
+         case ZYDIS_MNEMONIC_FPATAN:
+-            emit("double v = std::atan2(X87_ST(1), X87_ST(0)); x87_pop(ctx); X87_ST(0) = v;");
++            emit("double v = xbe_atan2(X87_ST(1), X87_ST(0)); x87_pop(ctx); X87_ST(0) = v;");
+             return true;
+-        case ZYDIS_MNEMONIC_F2XM1: emit("X87_ST(0) = std::exp2(X87_ST(0)) - 1.0;"); return true;
++        case ZYDIS_MNEMONIC_F2XM1: emit("X87_ST(0) = xbe_exp2(X87_ST(0)) - 1.0;"); return true;
+         case ZYDIS_MNEMONIC_FYL2X:
+-            emit("double v = X87_ST(1) * std::log2(X87_ST(0)); x87_pop(ctx); X87_ST(0) = v;");
++            emit("double v = X87_ST(1) * xbe_log2(X87_ST(0)); x87_pop(ctx); X87_ST(0) = v;");
+             return true;
+         case ZYDIS_MNEMONIC_FYL2XP1:
+-            emit("double v = X87_ST(1) * std::log2(X87_ST(0) + 1.0); x87_pop(ctx); X87_ST(0) = v;");
++            emit("double v = X87_ST(1) * xbe_log2(X87_ST(0) + 1.0); x87_pop(ctx); X87_ST(0) = v;");
+             return true;
+         case ZYDIS_MNEMONIC_FSCALE:
+-            emit("X87_ST(0) = std::ldexp(X87_ST(0), (int)std::trunc(X87_ST(1)));");
++            emit("X87_ST(0) = xbe_ldexp(X87_ST(0), xbe_trunc_i32(X87_ST(1)));");
+             return true;
+         case ZYDIS_MNEMONIC_FRNDINT: emit("X87_ST(0) = x87_round(ctx, X87_ST(0));"); return true;
+         case ZYDIS_MNEMONIC_FPREM:
+-            emit("X87_ST(0) = std::fmod(X87_ST(0), X87_ST(1)); ctx.fsw &= ~0x400;");
++            emit("X87_ST(0) = xbe_fmod(X87_ST(0), X87_ST(1)); ctx.fsw &= ~0x400;");
+             return true;
+         case ZYDIS_MNEMONIC_FPREM1:
+-            emit("X87_ST(0) = std::remainder(X87_ST(0), X87_ST(1)); ctx.fsw &= ~0x400;");
++            emit("X87_ST(0) = xbe_remainder(X87_ST(0), X87_ST(1)); ctx.fsw &= ~0x400;");
+             return true;
+         case ZYDIS_MNEMONIC_FXTRACT:
+-            emit("int e; double v = X87_ST(0); double mnt = std::frexp(v, &e); X87_ST(0) = (double)(e - 1); x87_push(ctx, mnt * 2.0);");
++            emit("int e; double v = X87_ST(0); double mnt = xbe_frexp(v, &e); X87_ST(0) = (double)(e - 1); x87_push(ctx, mnt * 2.0);");
+             return true;
+         case ZYDIS_MNEMONIC_FLD1: emit("x87_push(ctx, 1.0);"); return true;
+         case ZYDIS_MNEMONIC_FLDZ: emit("x87_push(ctx, 0.0);"); return true;
+-        case ZYDIS_MNEMONIC_FLDPI: emit("x87_push(ctx, 3.14159265358979323846);"); return true;
+-        case ZYDIS_MNEMONIC_FLDL2E: emit("x87_push(ctx, 1.44269504088896340736);"); return true;
+-        case ZYDIS_MNEMONIC_FLDL2T: emit("x87_push(ctx, 3.32192809488736234787);"); return true;
+-        case ZYDIS_MNEMONIC_FLDLN2: emit("x87_push(ctx, 0.693147180559945309417);"); return true;
+-        case ZYDIS_MNEMONIC_FLDLG2: emit("x87_push(ctx, 0.301029995663981195214);"); return true;
++        case ZYDIS_MNEMONIC_FLDPI: emit("x87_push(ctx, 0x1.921fb54442d18p+1);"); return true;
++        case ZYDIS_MNEMONIC_FLDL2E: emit("x87_push(ctx, 0x1.71547652b82fep+0);"); return true;
++        case ZYDIS_MNEMONIC_FLDL2T: emit("x87_push(ctx, 0x1.a934f0979a371p+1);"); return true;
++        case ZYDIS_MNEMONIC_FLDLN2: emit("x87_push(ctx, 0x1.62e42fefa39efp-1);"); return true;
++        case ZYDIS_MNEMONIC_FLDLG2: emit("x87_push(ctx, 0x1.34413509f79ffp-2);"); return true;
+         case ZYDIS_MNEMONIC_FLDCW: emit("ctx.fcw = X86_MEM16(ea);"); return true;
+         case ZYDIS_MNEMONIC_FNSTCW: emit("X86_MEM16(ea) = ctx.fcw;"); return true;
+         case ZYDIS_MNEMONIC_FNSTSW:
+@@ -329,10 +325,10 @@ bool CodeGen::EmitSse(uint32_t va, const ZydisDecodedInstruction& in, const Zydi
+             emit(F("ctx.xmm[%d].f[0] = (float)(int32_t)%s;", d, Read(ops[1], "ea").c_str()));
+             return true;
+         case ZYDIS_MNEMONIC_CVTSS2SI:
+-            emit(RegWrite(ops[0].reg.value, F("(uint32_t)sse_cvt(%s)", s >= 0 ? F("ctx.xmm[%d].f[0]", s).c_str() : "X86_MEMF32(ea)")));
++            emit(RegWrite(ops[0].reg.value, F("(uint32_t)sse_cvt(ctx, %s)", s >= 0 ? F("ctx.xmm[%d].f[0]", s).c_str() : "X86_MEMF32(ea)")));
+             return true;
+         case ZYDIS_MNEMONIC_CVTTSS2SI:
+-            emit(RegWrite(ops[0].reg.value, F("(uint32_t)sse_cvtt(%s)", s >= 0 ? F("ctx.xmm[%d].f[0]", s).c_str() : "X86_MEMF32(ea)")));
++            emit(RegWrite(ops[0].reg.value, F("(uint32_t)sse_cvtt(ctx, %s)", s >= 0 ? F("ctx.xmm[%d].f[0]", s).c_str() : "X86_MEMF32(ea)")));
+             return true;
+         case ZYDIS_MNEMONIC_CVTPI2PS: {
+             std::string src = MmIndex(ops[1]) >= 0 ? F("ctx.mm[%d]", MmIndex(ops[1])) : "X86_MEM64(ea)";
+@@ -344,7 +340,7 @@ bool CodeGen::EmitSse(uint32_t va, const ZydisDecodedInstruction& in, const Zydi
+         case ZYDIS_MNEMONIC_CVTTPS2PI: {
+             const char* fn = m == ZYDIS_MNEMONIC_CVTPS2PI ? "sse_cvt" : "sse_cvtt";
+             std::string src = s >= 0 ? F("ctx.xmm[%d]", s) : "*X86_PTR(X86Xmm, ea)";
+-            emit(F("X86Xmm v = %s; ctx.mm[%d] = (uint64_t)(uint32_t)%s(v.f[0]) | ((uint64_t)(uint32_t)%s(v.f[1]) << 32);",
++            emit(F("X86Xmm v = %s; ctx.mm[%d] = (uint64_t)(uint32_t)%s(ctx, v.f[0]) | ((uint64_t)(uint32_t)%s(ctx, v.f[1]) << 32);",
+                    src.c_str(), MmIndex(ops[0]), fn, fn));
+             return true;
+         }
+--- a/runtime/cpu/dispatch.cpp
++++ b/runtime/cpu/dispatch.cpp
+@@ -74,6 +74,7 @@
+ }  // namespace dispatch
+ 
+ void x86_icall(X86Context& ctx, uint8_t* base, uint32_t target) {
++    xbe_arm_host_fp();
+     ctx.last_icall = target;
+     if (target >= g_lo && target < g_hi && g_continuation[target - g_lo]) throw X86Resume{target, ctx.esp};
+     if (X86Func* f = dispatch::Find(target)) {
+@@ -103,6 +104,7 @@
+ }
+ 
+ void x86_resume(X86Context& ctx, uint8_t* base, const X86Resume& r) {
++    xbe_arm_host_fp();
+     ctx.esp = r.esp;
+     dispatch::Find(r.target)(ctx, base);
+ }
+@@ -110,6 +112,7 @@
+ void x86_kernel(X86Context& ctx, uint8_t* base, uint32_t ordinal) {
+     if (ordinal < 400 && g_exports[ordinal].fn) {
+         g_exports[ordinal].fn(ctx, base);
++        xbe_arm_host_fp();
+         return;
+     }
+     LOGE("kernel export %u (%s) is not implemented, return address %08X", ordinal, kernel::ExportName(ordinal),
+--- a/runtime/kernel/threads.cpp
++++ b/runtime/kernel/threads.cpp
+@@ -7,4 +7,5 @@
+ #include "kernel/kernel.h"
++#include "cpu/softmath.h"
+ 
+ #ifdef _WIN32
+ #define WIN32_LEAN_AND_MEAN
+@@ -104,6 +105,7 @@
+     auto* f = new std::function<void()>(std::move(fn));
+ #ifdef _WIN32
+     auto entry = [](void* p) -> DWORD {
++        xbe_arm_host_fp();
+         std::unique_ptr<std::function<void()>> g(static_cast<std::function<void()>*>(p));
+         (*g)();
+         return 0;
+@@ -116,6 +118,7 @@
+     pthread_attr_setstacksize(&attr, 64u << 20);
+     pthread_t th;
+     pthread_create(&th, &attr, [](void* p) -> void* {
++        xbe_arm_host_fp();
+         std::unique_ptr<std::function<void()>> g(static_cast<std::function<void()>*>(p));
+         (*g)();
+         return nullptr;
+--- a/runtime/xdk/dsound.cpp
++++ b/runtime/xdk/dsound.cpp
+@@ -13,6 +13,7 @@
+ #include "xbe/xbe.h"
+ #include "xdk/hle.h"
+ #include "xdk/layout.h"
++#include "cpu/softmath.h"
+ 
+ using namespace kernel;
+ 
+@@ -159,7 +160,7 @@
+ float g_stat_peak = 0.0f;
+ 
+ 
+-float Db(int32_t hundredths) { return hundredths <= -10000 ? 0.0f : std::pow(10.0f, hundredths / 2000.0f); }
++float Db(int32_t hundredths) { return hundredths <= -10000 ? 0.0f : xbe_powf(10.0f, hundredths / 2000.0f); }
+ 
+ uint32_t FramesOf(const Voice& v, uint32_t bytes) {
+     if (v.tag == 0x69) return bytes / (36u * v.channels) * 64;  // WAVE_FORMAT_XBOX_ADPCM
+@@ -331,7 +332,7 @@
+                         v.pos = 0;
+                         break;
+                     }
+-                    v.pos = start + std::fmod(v.pos - start, double(end - start));
++                    v.pos = start + xbe_fmod(v.pos - start, double(end - start));
+                     f = uint32_t(v.pos);
+                 }
+                 if (!v.data) break;
+--- a/runtime/gpu/vulkan.cpp
++++ b/runtime/gpu/vulkan.cpp
+@@ -10,6 +10,8 @@
+ #include <array>
+ #include <chrono>
+ #include <cmath>
++
++#include "cpu/softmath.h"
+ #include <cstdio>
+ #include <cstring>
+ #include <filesystem>
+@@ -1613,7 +1615,7 @@
+             for (int j = 0; j < 4; j++) { o[0][j] = f[1 + j]; o[1][j] = f[5 + j]; o[2][j] = f[9 + j]; }
+             for (int j = 0; j < 3; j++) { o[3][j] = f[13] * vm[j] + f[14] * vm[4 + j] + f[15] * vm[8 + j] + vm[12 + j]; o[4][j] = f[16] * vm[j] + f[17] * vm[4 + j] + f[18] * vm[8 + j]; }
+             o[3][3] = f[19]; o[4][3] = f[20]; o[5][0] = f[21]; o[5][1] = f[22]; o[5][2] = f[23];
+-            o[6][0] = std::cos(f[24] * 0.5f); o[6][1] = std::cos(f[25] * 0.5f);
++            o[6][0] = xbe_cosf(f[24] * 0.5f); o[6][1] = xbe_cosf(f[25] * 0.5f);
+         }
+     }
+ }
+@@ -1834,16 +1836,16 @@
+                 case 12: for (int i = 0; i < 4; i++) mr[i] = A[i] >= B[i] ? 1.0f : 0.0f; break;
+                 default: break;
+             }
+-            float x = C[0], whole = std::floor(x), mag = std::fabs(x), l2 = std::log2(mag), ex = std::floor(l2);
++            float x = C[0], whole = std::floor(x), mag = std::fabs(x), l2 = xbe_log2f(mag), ex = std::floor(l2);
+             switch (ilu) {
+                 case 1: std::memcpy(ir, C, sizeof(ir)); break;
+                 case 2: ir[0] = ir[1] = ir[2] = ir[3] = 1.0f / x; break;
+                 case 3: ir[0] = ir[1] = ir[2] = ir[3] = VsMagClamp(1.0f / x); break;
+                 case 4: ir[0] = ir[1] = ir[2] = ir[3] = x == 0 ? INFINITY : 1.0f / std::sqrt(mag); break;
+-                case 5: ir[0] = std::exp2(whole); ir[1] = x - whole; ir[2] = std::exp2(x); ir[3] = 1; break;
+-                case 6: if (mag == 0) { ir[0] = ir[2] = -INFINITY; ir[1] = ir[3] = 1; } else { ir[0] = ex; ir[1] = mag / std::exp2(ex); ir[2] = l2; ir[3] = 1; } break;
++                case 5: ir[0] = xbe_exp2f(whole); ir[1] = x - whole; ir[2] = xbe_exp2f(x); ir[3] = 1; break;
++                case 6: if (mag == 0) { ir[0] = ir[2] = -INFINITY; ir[1] = ir[3] = 1; } else { ir[0] = ex; ir[1] = mag / xbe_exp2f(ex); ir[2] = l2; ir[3] = 1; } break;
+                 case 7: { const float cap = 127.99609375f; float d = std::max(C[0], 0.0f);
+-                          ir[0] = 1; ir[1] = d; ir[2] = d > 0 ? std::exp2(std::clamp(C[3], -cap, cap) * std::log2(std::max(C[1], 0.0f))) : 0; ir[3] = 1; break; }
++                          ir[0] = 1; ir[1] = d; ir[2] = d > 0 ? xbe_exp2f(std::clamp(C[3], -cap, cap) * xbe_log2f(std::max(C[1], 0.0f))) : 0; ir[3] = 1; break; }
+                 default: break;
+             }
+             uint32_t r = VsField(t, 3, 20, 4), omask = VsField(t, 3, 12, 4);
+--- a/runtime/kernel/objects.cpp
++++ b/runtime/kernel/objects.cpp
+@@ -141,10 +141,20 @@
+         return s;
+     };
+     std::string want = fold(name);
+-    for (auto& [key, weak] : g_names)
+-        if (fold(key) == want)
+-            if (ObjectRef found = weak.lock()) return found;
+-    return nullptr;
++    // Hash order is not stable across standard libraries. When two names differ
++    // only by case, the lowest key wins so every platform resolves the same object.
++    ObjectRef best;
++    std::string best_key;
++    for (auto& [key, weak] : g_names) {
++        if (fold(key) != want) continue;
++        ObjectRef found = weak.lock();
++        if (!found) continue;
++        if (!best || key < best_key) {
++            best = std::move(found);
++            best_key = key;
++        }
++    }
++    return best;
+ }
+ 
+ void AddNamed(const std::string& name, ObjectRef obj) {

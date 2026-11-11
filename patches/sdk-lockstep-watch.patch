@@ -1,0 +1,794 @@
+diff --git a/runtime/core/determinism.cpp b/runtime/core/determinism.cpp
+--- a/runtime/core/determinism.cpp
++++ b/runtime/core/determinism.cpp
+@@ -26,7 +25,48 @@
+ #if defined(_WIN32)
+ #include <direct.h>
+ #endif
++#if defined(__APPLE__) || defined(__linux__)
++#include <dlfcn.h>
++#include <fcntl.h>
++#include <pthread.h>
++#include <signal.h>
++#include <unistd.h>
++#endif
++#if defined(__APPLE__)
++#include <mach/mach.h>
++#include <mach/exception.h>
++#include <mach/thread_act.h>
++#include <sys/ucontext.h>
++#elif defined(__linux__)
++#include <dirent.h>
++#include <linux/hw_breakpoint.h>
++#include <linux/perf_event.h>
++#include <sys/ioctl.h>
++#include <sys/syscall.h>
++#include <ucontext.h>
++#endif
+ 
++#if defined(__APPLE__)
++static void (*g_mac_watch_exc)(thread_t, int) = nullptr;
++
++extern "C" kern_return_t catch_exception_raise(mach_port_t, mach_port_t thread, mach_port_t, exception_type_t,
++                                              exception_data_t code, mach_msg_type_number_t) {
++    if (g_mac_watch_exc && code) g_mac_watch_exc(thread, code[0]);
++    return KERN_SUCCESS;
++}
++extern "C" kern_return_t catch_exception_raise_state(mach_port_t, exception_type_t, exception_data_t, mach_msg_type_number_t,
++                                                    int*, thread_state_t, mach_msg_type_number_t, thread_state_t,
++                                                    mach_msg_type_number_t*) {
++    return KERN_FAILURE;
++}
++extern "C" kern_return_t catch_exception_raise_state_identity(mach_port_t, mach_port_t, mach_port_t, exception_type_t,
++                                                             exception_data_t, mach_msg_type_number_t, int*, thread_state_t,
++                                                             mach_msg_type_number_t, thread_state_t, mach_msg_type_number_t*) {
++    return KERN_FAILURE;
++}
++extern "C" boolean_t exc_server(mach_msg_header_t*, mach_msg_header_t*);
++#endif
++
+ namespace kernel {
+ extern const xbe::Image* g_image;
+ void SetDeterministicClocks(uint64_t interrupt_100ns, uint64_t system_100ns, uint32_t tick_ms);
+@@ -1234,8 +1274,638 @@
+     t_sw.has_ticket = true;
+ }
+ 
++// XBE_WATCH_VA: hardware write watch for one guest dword. Off unless FUZION_WATCH_VA
++// is set, so a replay that does not set it keeps the same stores and the same timing.
++// The trap is taken before the store retires. A one-instruction breakpoint (Mac) or an
++// execution breakpoint (Linux) lets that store finish, then the watch is armed again.
++namespace {
++std::atomic<int> g_watch_state{0};  // 2 armed, 3 capped
++std::atomic<uint64_t> g_watch_hits{0};
++std::atomic<uintptr_t> g_watch_host{0};
++std::atomic<uint32_t> g_watch_va{0};
++std::atomic<uintptr_t> g_watch_bias{0};
++int g_watch_fd = -1;
++std::atomic<int> g_watch_capped{0};
++
++struct WBuf {
++    char d[700];
++    int n = 0;
++    void ch(char c) { if (n < 680) d[n++] = c; }
++    void lit(const char* s) { while (s && *s) ch(*s++); }
++    void hex(uint64_t v, int digits) {
++        static const char* H = "0123456789abcdef";
++        for (int i = digits - 1; i >= 0; --i) ch(H[(v >> (i * 4)) & 0xf]);
++    }
++    void dec(uint64_t v) {
++        char t[24];
++        int k = 0;
++        if (!v) { ch('0'); return; }
++        while (v && k < 24) { t[k++] = char('0' + (v % 10)); v /= 10; }
++        while (k) ch(t[--k]);
++    }
++    void emit() {
++        ch('\n');
++#if defined(_WIN32)
++        if (n > 0) std::fwrite(d, 1, size_t(n), stderr);
++#else
++        if (g_watch_fd >= 0) { ssize_t r = write(g_watch_fd, d, size_t(n)); (void)r; }
++        if (g_watch_fd != STDERR_FILENO) { ssize_t r = write(STDERR_FILENO, d, size_t(n)); (void)r; }
++#endif
++    }
++};
++
++#if defined(__APPLE__) || defined(__linux__)
++void WatchLog(uint64_t tid, uint64_t frame, uint64_t tick, uint32_t val, uint64_t pc, uint64_t lr, const char* name,
++              uint64_t sia = 0, const char* tag = nullptr) {
++    if (g_watch_capped.load(std::memory_order_relaxed)) return;
++    uint64_t n = g_watch_hits.fetch_add(1, std::memory_order_relaxed) + 1;
++    uint32_t insn = 0;
++    if (pc >= 0x10000) std::memcpy(&insn, reinterpret_cast<void*>(pc), 4);
++    const char* sym = "";
++    uint64_t sym_off = 0;
++    WBuf b;
++    b.lit("watch n="); b.dec(n);
++    b.lit(" tid="); b.dec(tid);
++    b.lit(" frame="); b.dec(frame);
++    b.lit(" tick="); b.dec(tick);
++    b.lit(" val="); b.hex(val, 8);
++    b.lit(" va="); b.hex(g_watch_va.load(std::memory_order_relaxed), 8);
++    b.lit(" pc="); b.hex(pc, 12);
++    uintptr_t bias = g_watch_bias.load(std::memory_order_relaxed);
++    b.lit(" off="); b.hex(bias && pc >= bias ? pc - bias : pc, 12);
++    b.lit(" lr="); b.hex(lr, 12);
++    b.lit(" insn="); b.hex(insn, 8);
++    b.lit(" sia="); b.hex(sia, 12);
++    b.lit(" tag="); b.lit(tag && tag[0] ? tag : "-");
++    b.lit(" name="); b.lit(name && name[0] ? name : "-");
++    if (sym[0]) {
++        b.lit(" sym="); b.lit(sym); b.ch('+'); b.hex(sym_off, 4);
++    }
++    b.emit();
++    if (n >= 400) {
++        g_watch_capped.store(1, std::memory_order_relaxed);
++        g_watch_state.store(3, std::memory_order_relaxed);
++        WBuf c; c.lit("watch cap 400"); c.emit();
++    }
++}
++#endif
++
++#if defined(__linux__) && (defined(__aarch64__) || defined(__x86_64__))
++struct WatchSlot {
++    std::atomic<int> tid{0};
++    std::atomic<int> watch_fd{-1};
++    std::atomic<int> step_fd{-1};
++    std::atomic<int> phase{0};
++    std::atomic<uint64_t> pc{0};
++    std::atomic<uint64_t> lr{0};
++    std::atomic<uint64_t> frame{0};
++    std::atomic<uint64_t> tick{0};
++    std::atomic<int64_t> armed_at{0};
++};
++WatchSlot g_slots[160];
++std::atomic<int> g_scanner_tid{0};
++std::atomic<int> g_rearm_tid{0};
++std::atomic<int> g_arm_fail{0};
++
++int64_t WatchNowMs() {
++    return std::chrono::duration_cast<std::chrono::milliseconds>(
++               std::chrono::steady_clock::now().time_since_epoch())
++        .count();
++}
++
++int MyTid() { return int(syscall(SYS_gettid)); }
++
++int OpenBp(uint64_t addr, int type, int len, int tid, int disabled) {
++    perf_event_attr attr{};
++    attr.type = PERF_TYPE_BREAKPOINT;
++    attr.size = sizeof(attr);
++    attr.bp_type = type;
++    attr.bp_addr = addr;
++    attr.bp_len = uint64_t(len);
++    attr.sample_period = 1;
++    attr.exclude_kernel = 1;
++    attr.exclude_hv = 1;
++    attr.disabled = disabled ? 1 : 0;
++    attr.sigtrap = 1;
++    attr.remove_on_exec = 1;
++    return int(syscall(__NR_perf_event_open, &attr, tid, -1, -1, 0));
++}
++
++void IoctlFd(int fd, unsigned long req) {
++    if (fd >= 0) syscall(__NR_ioctl, fd, req, 0);
++}
++
++WatchSlot* FindSlot(int tid) {
++    for (auto& s : g_slots)
++        if (s.tid.load(std::memory_order_acquire) == tid) return &s;
++    return nullptr;
++}
++
++bool ArmTid(int tid) {
++    if (tid <= 0 || tid == g_scanner_tid.load(std::memory_order_relaxed) || tid == g_rearm_tid.load(std::memory_order_relaxed))
++        return false;
++    if (FindSlot(tid)) return true;
++    WatchSlot* slot = nullptr;
++    for (auto& s : g_slots) {
++        int cur = 0;
++        if (s.tid.compare_exchange_strong(cur, tid, std::memory_order_acq_rel)) { slot = &s; break; }
++    }
++    if (!slot) return false;
++    for (auto& s : g_slots) {
++        if (&s != slot && s.tid.load(std::memory_order_acquire) == tid) {
++            slot->tid.store(0, std::memory_order_release);
++            return true;
++        }
++    }
++    uintptr_t host = g_watch_host.load(std::memory_order_acquire);
++    int fd = OpenBp(host, HW_BREAKPOINT_W, HW_BREAKPOINT_LEN_4, tid, 1);
++    if (fd < 0) {
++        if (g_arm_fail.exchange(1) == 0)
++            LOGR("det: watch perf_event_open tid %d errno %d", tid, errno);
++        slot->tid.store(0, std::memory_order_release);
++        return false;
++    }
++    slot->watch_fd.store(fd, std::memory_order_release);
++    IoctlFd(fd, PERF_EVENT_IOC_ENABLE);
++    return true;
++}
++
++void ThreadComm(int tid, char* out, int cap) {
++    char path[64];
++    int n = 0;
++    const char* pre = "/proc/self/task/";
++    for (const char* p = pre; *p && n < 48; ++p) path[n++] = *p;
++    int x = tid;
++    char tmp[16];
++    int k = 0;
++    if (x <= 0) { out[0] = 0; return; }
++    while (x && k < 16) { tmp[k++] = char('0' + x % 10); x /= 10; }
++    while (k && n < 60) path[n++] = tmp[--k];
++    const char* suf = "/comm";
++    for (const char* p = suf; *p && n < 62; ++p) path[n++] = *p;
++    path[n] = 0;
++    int fd = open(path, O_RDONLY | O_CLOEXEC);
++    out[0] = 0;
++    if (fd < 0) return;
++    int r = int(read(fd, out, size_t(cap - 1)));
++    close(fd);
++    if (r < 0) r = 0;
++    out[r] = 0;
++    for (int i = 0; i < r; i++)
++        if (out[i] == '\n' || out[i] == ' ') out[i] = '_';
++}
++
++void OnWatchTrap(int, siginfo_t* info, void* uctx) {
++    auto* uc = static_cast<ucontext_t*>(uctx);
++    int tid = MyTid();
++    WatchSlot* s = FindSlot(tid);
++#ifndef TRAP_PERF
++#define TRAP_PERF 6
++#endif
++    const bool perf = info && info->si_code == TRAP_PERF;
++#if defined(__x86_64__)
++    const bool trace = info && info->si_code == TRAP_TRACE;
++#else
++    const bool trace = false;
++#endif
++    if (!s || (!perf && !(trace && s->phase.load(std::memory_order_relaxed) == 1))) return;
++#if defined(__aarch64__)
++    uint64_t pc = uc->uc_mcontext.pc;
++    uint64_t lr = uc->uc_mcontext.regs[30];
++#elif defined(__x86_64__)
++    uint64_t pc = uint64_t(uc->uc_mcontext.gregs[REG_RIP]);
++    uint64_t lr = uint64_t(uc->uc_mcontext.gregs[REG_RBP]);
++#else
++    uint64_t pc = 0, lr = 0;
++#endif
++    int phase = s->phase.load(std::memory_order_relaxed);
++    uint64_t sia = info && info->si_addr ? uint64_t(uintptr_t(info->si_addr)) : 0;
++    auto enable_watch = [&] {
++        if (g_watch_state.load(std::memory_order_relaxed) == 2)
++            IoctlFd(s->watch_fd.load(std::memory_order_acquire), PERF_EVENT_IOC_ENABLE);
++    };
++    if (phase == 0 && perf) {
++        s->pc.store(pc, std::memory_order_relaxed);
++        s->lr.store(lr, std::memory_order_relaxed);
++        s->frame.store(g_frame.load(std::memory_order_relaxed), std::memory_order_relaxed);
++        s->tick.store(g_time.load(std::memory_order_relaxed), std::memory_order_relaxed);
++        char name[32];
++        ThreadComm(tid, name, 32);
++        uint32_t val = 0;
++        uintptr_t host = g_watch_host.load(std::memory_order_acquire);
++        if (host) std::memcpy(&val, reinterpret_cast<void*>(host), 4);
++        // Log before the step. A step that never returns used to leave the data
++        // watch disabled, so the later increment never appeared.
++        WatchLog(uint64_t(tid), s->frame.load(), s->tick.load(), val, pc, lr, name, sia, "pre");
++        s->phase.store(1, std::memory_order_release);
++        IoctlFd(s->watch_fd.load(std::memory_order_acquire), PERF_EVENT_IOC_DISABLE);
++        int old = s->step_fd.exchange(-1, std::memory_order_acq_rel);
++        if (old >= 0) close(old);
++#if defined(__aarch64__)
++        int step = OpenBp(pc + 4, HW_BREAKPOINT_X, int(sizeof(long)), 0, 0);
++        s->step_fd.store(step, std::memory_order_release);
++        if (step < 0) {
++            WBuf b;
++            b.lit("watch stepfail errno="); b.dec(uint64_t(errno)); b.emit();
++            s->phase.store(0, std::memory_order_relaxed);
++            enable_watch();
++            return;
++        }
++        s->armed_at.store(WatchNowMs(), std::memory_order_relaxed);
++#elif defined(__x86_64__)
++        uc->uc_mcontext.gregs[REG_EFL] |= 0x100;
++        s->armed_at.store(WatchNowMs(), std::memory_order_relaxed);
++#endif
++        return;
++    }
++    if (phase == 1 && (perf || trace)) {
++        int step = s->step_fd.exchange(-1, std::memory_order_acq_rel);
++        if (step >= 0) {
++            IoctlFd(step, PERF_EVENT_IOC_DISABLE);
++            close(step);
++        }
++#if defined(__x86_64__)
++        uc->uc_mcontext.gregs[REG_EFL] &= ~0x100ull;
++#endif
++        uint32_t val = 0;
++        uintptr_t host = g_watch_host.load(std::memory_order_acquire);
++        if (host) std::memcpy(&val, reinterpret_cast<void*>(host), 4);
++        char name[32];
++        ThreadComm(tid, name, 32);
++        uint64_t store_pc = s->pc.load(std::memory_order_relaxed);
++        WatchLog(uint64_t(tid), s->frame.load(), s->tick.load(), val, store_pc, s->lr.load(), name, sia, "post");
++        s->armed_at.store(0, std::memory_order_relaxed);
++        s->phase.store(0, std::memory_order_release);
++        enable_watch();
++    }
++}
++
++void ScanTids() {
++    if (g_watch_state.load(std::memory_order_relaxed) != 2) return;
++    DIR* d = opendir("/proc/self/task");
++    if (!d) return;
++    while (dirent* de = readdir(d)) {
++        if (de->d_name[0] < '0' || de->d_name[0] > '9') continue;
++        int tid = 0;
++        for (char* p = de->d_name; *p >= '0' && *p <= '9'; ++p) tid = tid * 10 + (*p - '0');
++        ArmTid(tid);
++    }
++    closedir(d);
++}
++
++void WatchScanner() {
++    g_scanner_tid.store(MyTid(), std::memory_order_relaxed);
++#if defined(__APPLE__)
++    pthread_setname_np("watch-scan");
++#else
++    pthread_setname_np(pthread_self(), "watch-scan");
++#endif
++    while (g_watch_state.load(std::memory_order_relaxed) == 2) {
++        ScanTids();
++        std::this_thread::sleep_for(std::chrono::milliseconds(1));
++    }
++}
++
++thread_local int t_watch_armed = 0;
++void WatchArmCurrent() {
++    if (t_watch_armed) return;
++    t_watch_armed = 1;
++    ArmTid(MyTid());
++}
++
++void WatchRearm() {
++    g_rearm_tid.store(MyTid(), std::memory_order_relaxed);
++    pthread_setname_np(pthread_self(), "watch-rearm");
++    while (g_watch_state.load(std::memory_order_relaxed) >= 2) {
++        std::this_thread::sleep_for(std::chrono::milliseconds(2));
++        if (g_watch_state.load(std::memory_order_relaxed) != 2) continue;
++        int64_t now = WatchNowMs();
++        for (auto& s : g_slots) {
++            if (s.phase.load(std::memory_order_acquire) != 1) continue;
++            int64_t at = s.armed_at.load(std::memory_order_relaxed);
++            if (!at || now - at < 8) continue;
++            int expect = 1;
++            if (!s.phase.compare_exchange_strong(expect, 0, std::memory_order_acq_rel)) continue;
++            int step = s.step_fd.exchange(-1, std::memory_order_acq_rel);
++            if (step >= 0) {
++                IoctlFd(step, PERF_EVENT_IOC_DISABLE);
++                close(step);
++            }
++            s.armed_at.store(0, std::memory_order_relaxed);
++            IoctlFd(s.watch_fd.load(std::memory_order_acquire), PERF_EVENT_IOC_ENABLE);
++            WBuf b;
++            b.lit("watch rearm tid="); b.dec(uint64_t(s.tid.load(std::memory_order_relaxed)));
++            b.lit(" pc="); b.hex(s.pc.load(std::memory_order_relaxed), 12);
++            b.emit();
++        }
++    }
++}
++#elif defined(__APPLE__)
++std::atomic<unsigned long long> g_armed_id[160]{};
++std::atomic<int> g_armed_n{0};
++pthread_t g_skip_server{};
++pthread_t g_skip_scanner{};
++std::atomic<int> g_server_ready{0};
++mach_port_t g_exc_port = MACH_PORT_NULL;
++std::atomic<int> g_stuck_logs{0};
++
++bool AlreadyArmed(uint64_t id) {
++    int n = g_armed_n.load(std::memory_order_acquire);
++    for (int i = 0; i < n && i < 160; i++)
++        if (g_armed_id[i].load(std::memory_order_relaxed) == id) return true;
++    return false;
++}
++
++void Remember(uint64_t id) {
++    if (!id || AlreadyArmed(id)) return;
++    int i = g_armed_n.fetch_add(1, std::memory_order_acq_rel);
++    if (i >= 160) return;
++    g_armed_id[i].store(id, std::memory_order_release);
++}
++
++uint64_t MachId(thread_t thread) {
++    pthread_t p = pthread_from_mach_thread_np(thread);
++    uint64_t id = 0;
++    if (p) pthread_threadid_np(p, &id);
++    return id ? id : uint64_t(thread);
++}
++
++void ApplyDebug(thread_t thread, uint64_t bvr, bool brk, bool watch) {
++    if (g_watch_capped.load(std::memory_order_relaxed)) { brk = false; watch = false; }
++    arm_debug_state64_t st{};
++    mach_msg_type_number_t cnt = ARM_DEBUG_STATE64_COUNT;
++    thread_get_state(thread, ARM_DEBUG_STATE64, reinterpret_cast<thread_state_t>(&st), &cnt);
++    uintptr_t addr = g_watch_host.load(std::memory_order_acquire);
++    st.__wvr[0] = addr & ~uintptr_t(7);
++    uint32_t bas = 0xFu << (addr & 7);
++    st.__wcr[0] = watch ? (1ull | (2ull << 1) | (2ull << 3) | (uint64_t(bas) << 5)) : 0;
++    st.__bvr[0] = bvr;
++    st.__bcr[0] = brk ? (1ull | (2ull << 1) | (0xFull << 5)) : 0;
++    st.__mdscr_el1 |= 1ull << 15;
++    thread_set_state(thread, ARM_DEBUG_STATE64, reinterpret_cast<thread_state_t>(&st), ARM_DEBUG_STATE64_COUNT);
++}
++
++std::atomic<int> g_scanner_live{0};
++
++void ArmMach(thread_t thread) {
++    pthread_t p = pthread_from_mach_thread_np(thread);
++    if (p && g_server_ready.load(std::memory_order_acquire) && pthread_equal(p, g_skip_server)) return;
++    if (p && g_scanner_live.load(std::memory_order_acquire) && pthread_equal(p, g_skip_scanner)) return;
++    uint64_t id = MachId(thread);
++    if (AlreadyArmed(id)) return;
++    Remember(id);
++    ApplyDebug(thread, 0, false, true);
++}
++
++void MacWatchExc(thread_t thread, int code) {
++    arm_thread_state64_t ts{};
++    mach_msg_type_number_t cnt = ARM_THREAD_STATE64_COUNT;
++    if (thread_get_state(thread, ARM_THREAD_STATE64, reinterpret_cast<thread_state_t>(&ts), &cnt) != KERN_SUCCESS) return;
++    uint64_t pc = arm_thread_state64_get_pc(ts);
++    uint64_t lr = arm_thread_state64_get_lr(ts);
++    // The watch fires before the store retires. Single-step one instruction with the
++    // watch off, then arm it again. A breakpoint at PC+4 lost the race with the
++    // retry on this kernel, so the step bit is what lets the store finish.
++    static uint64_t store_pc = 0;
++    static int stepping = 0;
++    static int same = 0;
++    uint64_t tid = MachId(thread);
++    auto step = [&](bool watch_on, bool do_step) {
++        arm_debug_state64_t st{};
++        mach_msg_type_number_t cnt = ARM_DEBUG_STATE64_COUNT;
++        thread_get_state(thread, ARM_DEBUG_STATE64, reinterpret_cast<thread_state_t>(&st), &cnt);
++        uintptr_t addr = g_watch_host.load(std::memory_order_acquire);
++        st.__wvr[0] = addr & ~uintptr_t(7);
++        uint32_t bas = 0xFu << (addr & 7);
++        st.__wcr[0] = watch_on ? (1ull | (2ull << 1) | (2ull << 3) | (uint64_t(bas) << 5)) : 0;
++        st.__bcr[0] = 0;
++        st.__mdscr_el1 = (1ull << 15) | (do_step ? 1ull : 0ull);
++        thread_set_state(thread, ARM_DEBUG_STATE64, reinterpret_cast<thread_state_t>(&st), ARM_DEBUG_STATE64_COUNT);
++        if (do_step) {
++            arm_thread_state64_t ts{};
++            mach_msg_type_number_t c2 = ARM_THREAD_STATE64_COUNT;
++            if (thread_get_state(thread, ARM_THREAD_STATE64, reinterpret_cast<thread_state_t>(&ts), &c2) == KERN_SUCCESS) {
++                ts.__cpsr |= 1u << 21;
++                thread_set_state(thread, ARM_THREAD_STATE64, reinterpret_cast<thread_state_t>(&ts), c2);
++            }
++        }
++    };
++    if (code == EXC_ARM_DA_DEBUG) {
++        if (stepping && pc == store_pc) same++;
++        else same = 0;
++        if (same > 4) {
++            step(false, false);
++            if (g_stuck_logs.fetch_add(1) == 0) {
++                WBuf b; b.lit("watch stuck pc="); b.hex(pc, 12); b.emit();
++            }
++            stepping = 0;
++            return;
++        }
++        store_pc = pc;
++        stepping = 1;
++        step(false, true);
++        return;
++    }
++    uint32_t val = 0;
++    uintptr_t host = g_watch_host.load(std::memory_order_acquire);
++    if (host) std::memcpy(&val, reinterpret_cast<void*>(host), 4);
++    uint64_t logged = stepping ? store_pc : pc;
++    WatchLog(tid, g_frame.load(std::memory_order_relaxed), g_time.load(std::memory_order_relaxed), val, logged, lr, "-");
++    stepping = 0;
++    same = 0;
++    step(g_watch_state.load(std::memory_order_relaxed) == 2, false);
++}
++
++void WatchServer() {
++    g_skip_server = pthread_self();
++    pthread_setname_np("watch-exc");
++    g_server_ready.store(1, std::memory_order_release);
++    uint8_t req[4096];
++    uint8_t rep[4096];
++    while (g_watch_state.load(std::memory_order_relaxed) >= 2) {
++        auto* request = reinterpret_cast<mach_msg_header_t*>(req);
++        auto* reply = reinterpret_cast<mach_msg_header_t*>(rep);
++        kern_return_t kr = mach_msg(request, MACH_RCV_MSG | MACH_RCV_TIMEOUT, 0, sizeof(req), g_exc_port, 200, MACH_PORT_NULL);
++        if (kr == MACH_RCV_TIMED_OUT) continue;
++        if (kr != KERN_SUCCESS) continue;
++        if (!exc_server(request, reply)) continue;
++        mach_msg(reply, MACH_SEND_MSG, reply->msgh_size, 0, MACH_PORT_NULL, 50, MACH_PORT_NULL);
++    }
++}
++
++void ScanMach() {
++    if (g_watch_state.load(std::memory_order_relaxed) != 2) return;
++    thread_act_array_t threads = nullptr;
++    mach_msg_type_number_t n = 0;
++    if (task_threads(mach_task_self(), &threads, &n) != KERN_SUCCESS) return;
++    for (mach_msg_type_number_t i = 0; i < n; i++) {
++        ArmMach(threads[i]);
++        mach_port_deallocate(mach_task_self(), threads[i]);
++    }
++    vm_deallocate(mach_task_self(), reinterpret_cast<vm_address_t>(threads), n * sizeof(thread_t));
++}
++
++void WatchScanner() {
++    g_skip_scanner = pthread_self();
++    g_scanner_live.store(1, std::memory_order_release);
++    pthread_setname_np("watch-scan");
++    while (g_watch_state.load(std::memory_order_relaxed) == 2) {
++        ScanMach();
++        std::this_thread::sleep_for(std::chrono::milliseconds(1));
++    }
++}
++
++thread_local int t_watch_armed = 0;
++void WatchArmCurrent() {
++    if (t_watch_armed) return;
++    t_watch_armed = 1;
++    thread_t self = mach_thread_self();
++    ArmMach(self);
++    mach_port_deallocate(mach_task_self(), self);
++}
++#else
++void WatchArmCurrent() {}
++#endif
++
++void WatchStart() {
++#if defined(__linux__) && (defined(__aarch64__) || defined(__x86_64__)) || defined(__APPLE__)
++    static std::once_flag once;
++    std::call_once(once, [] {
++        const char* env = std::getenv("FUZION_WATCH_VA");
++        if (!env || !env[0]) return;
++        const char* p = env;
++        if (p[0] == '0' && (p[1] == 'x' || p[1] == 'X')) p += 2;
++        char* end = nullptr;
++        unsigned long va = std::strtoul(p, &end, 16);
++        if (!va || va > 0xfffffffful) {
++            LOGR("det: watch ignored FUZION_WATCH_VA=%s", env);
++            return;
++        }
++        void* host = kernel::HostPtr(uint32_t(va));
++        g_watch_va.store(uint32_t(va), std::memory_order_relaxed);
++        g_watch_host.store(reinterpret_cast<uintptr_t>(host), std::memory_order_release);
++        Dl_info inf{};
++        if (dladdr(reinterpret_cast<void*>(&WatchStart), &inf) && inf.dli_fbase)
++            g_watch_bias.store(reinterpret_cast<uintptr_t>(inf.dli_fbase), std::memory_order_relaxed);
++        if (const char* path = std::getenv("FUZION_WATCH_LOG")) {
++            if (path[0]) g_watch_fd = open(path, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
++        }
++        if (g_watch_fd < 0) g_watch_fd = STDERR_FILENO;
++#if defined(__linux__)
++        struct sigaction sa{};
++        sa.sa_sigaction = OnWatchTrap;
++        sa.sa_flags = SA_SIGINFO | SA_RESTART;
++        sigemptyset(&sa.sa_mask);
++        sigaction(SIGTRAP, &sa, nullptr);
++        g_watch_state.store(2, std::memory_order_release);
++        ScanTids();
++        std::thread(WatchRearm).detach();
++#elif defined(__APPLE__)
++        g_mac_watch_exc = &MacWatchExc;
++        kern_return_t kr = mach_port_allocate(mach_task_self(), MACH_PORT_RIGHT_RECEIVE, &g_exc_port);
++        if (kr != KERN_SUCCESS) {
++            LOGR("det: watch mach port %d", kr);
++            return;
++        }
++        kr = mach_port_insert_right(mach_task_self(), g_exc_port, g_exc_port, MACH_MSG_TYPE_MAKE_SEND);
++        if (kr != KERN_SUCCESS) {
++            LOGR("det: watch mach right %d", kr);
++            return;
++        }
++        kr = task_set_exception_ports(mach_task_self(), EXC_MASK_BREAKPOINT, g_exc_port, EXCEPTION_DEFAULT, ARM_THREAD_STATE64);
++        if (kr != KERN_SUCCESS) {
++            LOGR("det: watch exception port %d", kr);
++            return;
++        }
++        // The server thread exits while this is still 0, so publish it first.
++        // Nothing is armed yet, so a watch cannot fire before the server receives.
++        g_watch_state.store(2, std::memory_order_release);
++        std::thread(WatchServer).detach();
++        while (!g_server_ready.load(std::memory_order_acquire)) std::this_thread::yield();
++        ScanMach();
++#endif
++        // The page may not be committed yet. Reading it here faults. Hits log the value.
++        LOGR("det: watch va %08lx host %p", va, host);
++        WBuf b;
++        b.lit("watch arm va="); b.hex(va, 8);
++        b.lit(" host="); b.hex(reinterpret_cast<uintptr_t>(host), 12);
++        b.lit(" bias="); b.hex(g_watch_bias.load(), 12);
++        b.emit();
++        const char* scan = std::getenv("FUZION_WATCH_SCAN");
++        if (!(scan && scan[0] == '0')) std::thread(WatchScanner).detach();
++    });
++#else
++    (void)0;
++#endif
++}
++}  // namespace
++
++bool WatchArmed() { return g_watch_state.load(std::memory_order_relaxed) == 2; }
++
++static uint64_t NoteTid() {
++#if defined(__linux__)
++    return uint64_t(syscall(SYS_gettid));
++#elif defined(__APPLE__)
++    uint64_t id = 0;
++    pthread_threadid_np(nullptr, &id);
++    return id;
++#else
++    return 0;
++#endif
++}
++
++void NoteCompletion(uint32_t ret, uint32_t a, uint32_t ca, uint32_t ca2, uint32_t b, uint32_t cb, uint32_t cb2) {
++    if (!WatchArmed()) return;
++    static std::atomic<int> n{0};
++    int i = n.fetch_add(1, std::memory_order_relaxed);
++    if (i >= 80) return;
++    WBuf buf;
++    buf.lit("compl n="); buf.dec(uint64_t(i + 1));
++    buf.lit(" tid="); buf.dec(NoteTid());
++    buf.lit(" frame="); buf.dec(g_frame.load(std::memory_order_relaxed));
++    buf.lit(" tick="); buf.dec(g_time.load(std::memory_order_relaxed));
++    buf.lit(" ret="); buf.hex(ret, 8);
++    buf.lit(" a="); buf.hex(a, 8);
++    buf.lit(" ca="); buf.hex(ca, 8);
++    buf.lit(" ca2="); buf.hex(ca2, 8);
++    buf.lit(" b="); buf.hex(b, 8);
++    buf.lit(" cb="); buf.hex(cb, 8);
++    buf.lit(" cb2="); buf.hex(cb2, 8);
++    buf.emit();
++}
++
++void NoteDpc(const char* where, uint32_t routine) {
++    if (!WatchArmed() || !where) return;
++    static std::atomic<int> n{0};
++    int i = n.fetch_add(1, std::memory_order_relaxed);
++    if (i >= 80) return;
++    WBuf buf;
++    buf.lit("dpc n="); buf.dec(uint64_t(i + 1));
++    buf.lit(" "); buf.lit(where);
++    buf.lit(" frame="); buf.dec(g_frame.load(std::memory_order_relaxed));
++    buf.lit(" tick="); buf.dec(g_time.load(std::memory_order_relaxed));
++    buf.lit(" routine="); buf.hex(routine, 8);
++    buf.emit();
++}
++
++void NoteTimer(uint32_t dpc, int32_t period_ms, uint32_t due_lo) {
++    if (!WatchArmed()) return;
++    static std::atomic<int> n{0};
++    int i = n.fetch_add(1, std::memory_order_relaxed);
++    if (i >= 40) return;
++    WBuf buf;
++    buf.lit("timer n="); buf.dec(uint64_t(i + 1));
++    buf.lit(" frame="); buf.dec(g_frame.load(std::memory_order_relaxed));
++    buf.lit(" tick="); buf.dec(g_time.load(std::memory_order_relaxed));
++    buf.lit(" dpc="); buf.hex(dpc, 8);
++    buf.lit(" period="); buf.dec(uint64_t(uint32_t(period_ms)));
++    buf.lit(" due="); buf.hex(due_lo, 8);
++    buf.emit();
++}
++
+ void EnterGuest() {
+     if (!FixedStep()) return;
++    if (g_watch_state.load(std::memory_order_relaxed) == 2) WatchArmCurrent();
+     if (t_guest_depth++ > 0) return;
+     AcquireTurn();
+ }
+@@ -1384,6 +2047,7 @@
+ void WatchRng(uint32_t guest_va) { g_rng_va = guest_va; }
+ 
+ void OnImageLoaded() {
++    WatchStart();
+     if (!C().fixed && !C().have_seed && !C().record && !C().replay && !C().state_log) return;
+     LogMode();
+     if (!g_rng_va) return;
+diff --git a/runtime/core/determinism.h b/runtime/core/determinism.h
+--- a/runtime/core/determinism.h
++++ b/runtime/core/determinism.h
+@@ -86,4 +86,10 @@
+ // nobody still advances one tick, so a timed poll cannot spin on the wall clock.
+ void PacerDelay(uint64_t hundred_ns);
+ 
++// FUZION_WATCH_VA only. One relaxed load on the indirect-call path when the watch is off.
++bool WatchArmed();
++void NoteCompletion(uint32_t ret, uint32_t a, uint32_t ca, uint32_t ca2, uint32_t b, uint32_t cb, uint32_t cb2);
++void NoteDpc(const char* where, uint32_t routine);
++void NoteTimer(uint32_t dpc, int32_t period_ms, uint32_t due_lo);
++
+ }  // namespace det
+diff --git a/runtime/cpu/dispatch.cpp b/runtime/cpu/dispatch.cpp
+--- a/runtime/cpu/dispatch.cpp
++++ b/runtime/cpu/dispatch.cpp
+@@ -76,9 +76,23 @@
+ void x86_icall(X86Context& ctx, uint8_t* base, uint32_t target) {
+     xbe_arm_host_fp();
+     ctx.last_icall = target;
++    uint32_t note_ret = 0, note_a = 0, note_b = 0, note_ca = 0, note_cb = 0;
++    const bool note = target == 0x0024D626u && det::WatchArmed();
++    if (note) {
++        note_ret = kernel::R32(ctx.esp);
++        note_a = kernel::R32(ctx.esp + 4);
++        note_b = kernel::R32(ctx.esp + 8);
++        if (note_a >= 0x10000u) note_ca = kernel::R32(note_a + 8);
++        if (note_b >= 0x10000u) note_cb = kernel::R32(note_b + 8);
++    }
+     if (target >= g_lo && target < g_hi && g_continuation[target - g_lo]) throw X86Resume{target, ctx.esp};
+     if (X86Func* f = dispatch::Find(target)) {
+         f(ctx, base);
++        if (note) {
++            uint32_t ca2 = note_a >= 0x10000u ? kernel::R32(note_a + 8) : 0;
++            uint32_t cb2 = note_b >= 0x10000u ? kernel::R32(note_b + 8) : 0;
++            det::NoteCompletion(note_ret, note_a, note_ca, ca2, note_b, note_cb, cb2);
++        }
+         return;
+     }
+     if (target >= kKernelThunkBase && target < kKernelThunkBase + 400 * 4) {
+diff --git a/runtime/kernel/objects.cpp b/runtime/kernel/objects.cpp
+--- a/runtime/kernel/objects.cpp
++++ b/runtime/kernel/objects.cpp
+@@ -470,6 +470,7 @@
+     W32(dpc + 0x14, arg1);  // KDPC.SystemArgument1 and 2
+     W32(dpc + 0x18, arg2);
+     g_dpcs.push_back({dpc, arg1, arg2});
++    det::NoteDpc("queue", R32(dpc + 0x0C));
+     // XBE_INPUT_DPC: the host DPC thread races the title's input poll. Fixed
+     // step leaves the DPC queued. FireDueTimers drains it on the next present,
+     // after that frame's poll and before the state hash. A wait drains first
+@@ -499,7 +500,10 @@
+         uint32_t dpc = d[0];
+         G<uint8_t>(dpc + 2) = 0;  // Inserted
+         uint32_t routine = R32(dpc + 0x0C), context = R32(dpc + 0x10);
+-        if (routine) CallGuest(ctx, routine, {dpc, context, d[1], d[2]});
++        if (routine) {
++            det::NoteDpc("drain", routine);
++            CallGuest(ctx, routine, {dpc, context, d[1], d[2]});
++        }
+     }
+     t_dpc_drain--;
+     return ran;
+@@ -599,7 +603,10 @@
+             uint32_t dpc = e.dpc;
+             G<uint8_t>(dpc + 2) = 0;
+             uint32_t routine = R32(dpc + 0x0C), context = R32(dpc + 0x10);
+-            if (routine) CallGuest(ctx, routine, {dpc, context, uint32_t(now), uint32_t(now >> 32)});
++            if (routine) {
++                det::NoteDpc("timer", routine);
++                CallGuest(ctx, routine, {dpc, context, uint32_t(now), uint32_t(now >> 32)});
++            }
+         }
+         if (auto t = e.apc_thread.lock(); t && e.apc_routine)
+             QueueApc(*t, e.apc_routine, e.apc_context, uint32_t(now), uint32_t(now >> 32));
+diff --git a/runtime/kernel/xboxkrnl.cpp b/runtime/kernel/xboxkrnl.cpp
+--- a/runtime/kernel/xboxkrnl.cpp
++++ b/runtime/kernel/xboxkrnl.cpp
+@@ -762,6 +762,7 @@
+     int64_t due = int64_t(uint64_t(a[1]) | uint64_t(a[2]) << 32);
+     W32(a[0] + 0x20, a[4]);  // KTIMER.Dpc
+     W32(a[0] + 0x24, a[3]);  // KTIMER.Period
++    det::NoteTimer(a[4], int32_t(a[3]), a[1]);
+     SetTimer(t, due, int32_t(a[3]), a[4]);
+     return was;
+ }
+@@ -770,6 +771,7 @@
+     ObjectRef t = FromPointer(a[0]);
+     bool was = CancelTimer(*t);
+     int64_t due = int64_t(uint64_t(a[1]) | uint64_t(a[2]) << 32);
++    det::NoteTimer(a[3], 0, a[1]);
+     SetTimer(t, due, 0, a[3]);
+     return was;
+ }
