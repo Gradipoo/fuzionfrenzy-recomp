@@ -396,6 +396,39 @@ EOF
     fi
 }
 
+trim_linux_compiler() {
+    real=$(readlink -f "$DEST/llvm/bin/clang")
+    real_name=$(basename "$real")
+    keep_bin=$WORK/keep-bin
+    keep_lib=$WORK/keep-lib
+    rm -rf "$keep_bin" "$keep_lib"
+    mkdir -p "$keep_bin" "$keep_lib"
+    for name in clang clang++ "$real_name"; do
+        if [ -e "$DEST/llvm/bin/$name" ]; then
+            cp -a "$DEST/llvm/bin/$name" "$keep_bin/$name"
+        fi
+    done
+    if [ -d "$DEST/llvm/lib/clang" ]; then
+        cp -a "$DEST/llvm/lib/clang" "$keep_lib/clang"
+    fi
+    ldd "$real" | awk '/=> \// { print $3 }' | while read -r lib; do
+        case "$lib" in
+            "$DEST/llvm/"*) cp -aL "$lib" "$keep_lib/$(basename "$lib")" ;;
+        esac
+    done
+    if [ -d "$keep_lib/clang" ]; then
+        find "$keep_lib/clang" -type f ! -name 'libclang_rt.builtins*' ! -path '*/include/*' -delete
+    fi
+    rm -rf "$DEST/llvm/bin" "$DEST/llvm/lib"
+    mkdir -p "$DEST/llvm/bin" "$DEST/llvm/lib"
+    cp -a "$keep_bin/." "$DEST/llvm/bin/"
+    if [ -d "$keep_lib/clang" ]; then
+        mv "$keep_lib/clang" "$DEST/llvm/lib/clang"
+    fi
+    find "$keep_lib" -maxdepth 1 -type f -exec cp -a {} "$DEST/llvm/lib/" \;
+    echo "llvm kept $(du -sk "$DEST/llvm" | awk '{print $1}') KiB"
+}
+
 install_llvm() {
     case "$OS" in
         darwin)
@@ -421,7 +454,10 @@ install_llvm() {
             # A GitHub release file must be under 2 GiB. The LLVM static
             # archives and headers are not needed to run clang.
             find "$DEST/llvm/lib" -name '*.a' -delete
-            rm -rf "$DEST/llvm/include" "$DEST/llvm/share"
+            rm -rf "$DEST/llvm/include" "$DEST/llvm/share" "$DEST/llvm/libexec"
+            # The other LLVM tools are separate multi-hundred-megabyte binaries.
+            # clang and the shared libraries it loads are enough to compile.
+            trim_linux_compiler
             ;;
         windows)
             if [ ! -f "$DEST/llvm/bin/clang-cl.exe" ]; then
