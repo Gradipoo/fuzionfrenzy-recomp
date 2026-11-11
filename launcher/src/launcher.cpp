@@ -51,7 +51,7 @@ std::string Lower(std::string text) {
     return text;
 }
 
-std::string ReadFile(const fs::path& path) {
+std::string ReadWholeFile(const fs::path& path) {
     std::ifstream in(path, std::ios::binary);
     if (!in) return {};
     std::ostringstream out;
@@ -447,7 +447,7 @@ int RunProcess(const std::vector<std::string>& argv, const fs::path& cwd,
     std::string pending;
     char buffer[4096];
     DWORD got = 0;
-    while (ReadFile(read_pipe, buffer, sizeof(buffer), &got, nullptr) && got > 0) {
+    while (::ReadFile(read_pipe, buffer, sizeof(buffer), &got, nullptr) && got > 0) {
         pending.append(buffer, got);
         size_t pos;
         while ((pos = pending.find_first_of("\r\n")) != std::string::npos) {
@@ -636,7 +636,7 @@ std::string InstallHint() {
 #else
     std::string id;
     std::string like;
-    std::istringstream in(ReadFile("/etc/os-release"));
+    std::istringstream in(ReadWholeFile("/etc/os-release"));
     std::string line;
     while (std::getline(in, line)) {
         if (line.rfind("ID=", 0) == 0) id = Trim(line.substr(3));
@@ -857,7 +857,7 @@ void Pipeline::Run(Job job) {
         fs::create_directories(job.support, ec);
         fs::path src = job.support / "src";
         fs::path stamp = src / ".port-version";
-        std::string have = Trim(ReadFile(stamp));
+        std::string have = Trim(ReadWholeFile(stamp));
 #ifdef _WIN32
         const char* build_script = "build.bat";
 #else
@@ -934,7 +934,7 @@ void Pipeline::Run(Job job) {
 
         fs::path binary = GameBinary(src);
         fs::path built_stamp = job.support / "built-version";
-        std::string built = Trim(ReadFile(built_stamp));
+        std::string built = Trim(ReadWholeFile(built_stamp));
         bool need_build = job.force_rebuild || built != job.version || !fs::exists(binary);
         if (need_build) {
             if (job.force_rebuild || built != job.version) {
