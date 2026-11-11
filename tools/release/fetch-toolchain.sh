@@ -474,13 +474,19 @@ install_cmake_files() {
     esac
     fetch_extract "$url"
     one_top "$url"
-    if [ ! -d "$ONE_TOP/bin" ] || [ ! -d "$ONE_TOP/share" ]; then
+    # The macOS archive is a CMake.app bundle. Linux and Windows put bin and
+    # share at the top of the archive.
+    cmake_root=$ONE_TOP
+    if [ -d "$ONE_TOP/CMake.app/Contents/bin" ]; then
+        cmake_root=$ONE_TOP/CMake.app/Contents
+    fi
+    if [ ! -d "$cmake_root/bin" ] || [ ! -d "$cmake_root/share" ]; then
         echo "cmake archive has no bin and share" >&2
         exit 1
     fi
     mkdir -p "$DEST/bin" "$DEST/share"
-    cp -a "$ONE_TOP/share/." "$DEST/share/"
-    for file in "$ONE_TOP/bin"/*; do
+    cp -a "$cmake_root/share/." "$DEST/share/"
+    for file in "$cmake_root/bin"/*; do
         base=$(basename "$file")
         if [ "$base" = cmake ] || [ "$base" = cmake.exe ]; then
             continue
@@ -489,12 +495,12 @@ install_cmake_files() {
             cp -a "$file" "$DEST/bin/$base"
         fi
     done
-    if [ -f "$ONE_TOP/bin/cmake" ]; then
-        cp -f "$ONE_TOP/bin/cmake" "$DEST/bin/.cmake-entry"
+    if [ -f "$cmake_root/bin/cmake" ]; then
+        cp -fL "$cmake_root/bin/cmake" "$DEST/bin/.cmake-entry"
         chmod 755 "$DEST/bin/.cmake-entry"
     fi
-    if [ -f "$ONE_TOP/bin/cmake.exe" ]; then
-        cp -f "$ONE_TOP/bin/cmake.exe" "$DEST/bin/cmake.exe"
+    if [ -f "$cmake_root/bin/cmake.exe" ]; then
+        cp -fL "$cmake_root/bin/cmake.exe" "$DEST/bin/cmake.exe"
         chmod 755 "$DEST/bin/cmake.exe"
     fi
 }
