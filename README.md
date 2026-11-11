@@ -290,8 +290,9 @@ You supply the game: the USA Xbox release, as either
 
    `macos/launcher/package-dmg.sh` builds the player app and a compressed disk image in
    `macos/launcher/dist/` (gitignored): `Ring Host.app` and `RingHost-macos.dmg`. The image
-   holds the launcher and this port's sources. It does not hold a game binary. What the
-   launcher shows is under "What this fork adds" above. The app is ad-hoc signed.
+   holds the launcher, this port's sources, and the compile tools. It does not hold a game
+   binary. The player needs Xcode Command Line Tools (`xcode-select --install`). No Homebrew.
+   What the launcher shows is under "What this fork adds" above. The app is ad-hoc signed.
 
    The same `settings.toml`, `logs/`, and `hdd/` as on Linux are created beside the executable.
    HDR settings are ignored.
@@ -306,11 +307,27 @@ A `v*` tag builds the three launchers in `.github/workflows/release.yml` and att
 
 | File | What it is |
 | --- | --- |
-| `RingHost-macos.dmg`, `RingHost-macos.zip` | Apple Silicon app. Ad-hoc signed. |
-| `RingHost-linux-x64.tar.zst` | Linux launcher from `launcher/package.sh` |
-| `RingHost-win64.zip` | Windows launcher from the same script |
+| `RingHost-macos.dmg`, `RingHost-macos.zip` | Apple Silicon launcher. Ad-hoc signed. The toolchain is inside. The game is not. |
+| `RingHost-linux-x64.tar.zst` | Linux launcher from `launcher/package.sh`. The toolchain is inside. The game is not. |
+| `RingHost-win64.zip` | Windows launcher from the same script. The toolchain is inside. The game is not. |
 
-None of those files contain a recompiled game binary. The player supplies a USA disc, and the launcher compiles it locally. `launcher/package.sh` is the Linux and Windows pack. `macos/launcher/package-dmg.sh` is the Mac pack.
+Releases are launchers. They do not contain the game, a recompiled binary, or disc art. The player
+picks a USA disc. The first launch compiles it locally. Later launches reuse that build until the
+launcher version changes. The first compile does not clone SDL. Those sources are in the archive.
+
+On Mac the archive has CMake, Ninja, MoltenVK, the Vulkan loader and headers, glslang, libusb, and
+the SDL, imgui, zydis, and tomlplusplus sources. The player still needs Xcode Command Line Tools
+(`xcode-select --install`). Apple's clang and SDK cannot be redistributed. That dialog also
+provides git and python3. No Homebrew.
+
+On Linux the archive has clang, CMake, Ninja, Python, the Vulkan headers and loader, glslang, zlib,
+and those sources. The player needs a Vulkan graphics driver (the ICD from Mesa or NVIDIA).
+
+On Windows the archive has LLVM clang-cl, CMake, Ninja, Python, xwin, and those sources. No Visual
+Studio. The first launch downloads the Microsoft Windows SDK into `%LOCALAPPDATA%\RingHost\winsdk`
+and accepts that SDK license. Later launches stay offline.
+
+`launcher/package.sh` is the Linux and Windows pack. `macos/launcher/package-dmg.sh` is the Mac pack.
 
 ## Working on the port
 

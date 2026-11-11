@@ -97,6 +97,8 @@ if [ ! -f "$STAGE/port/build.sh" ] || [ ! -f "$STAGE/port/build.bat" ] || [ ! -f
     exit 1
 fi
 
+sh "$ROOT/tools/release/fetch-toolchain.sh" "$STAGE/port/toolchain"
+
 cat > "$STAGE/ReadMe.txt" <<'EOF'
 Ring Host
 
@@ -112,21 +114,15 @@ this machine.
 Linux keeps the built game in ~/.local/share/ringhost
 (or $XDG_DATA_HOME/ringhost). Windows keeps it in %LOCALAPPDATA%\RingHost.
 
-Linux tools, Debian or Ubuntu:
-  sudo apt install clang cmake ninja-build git python3 libvulkan-dev glslang-dev zlib1g-dev
+The compiler and libraries are in this folder. Linux needs a Vulkan
+graphics driver. No other packages.
 
-Fedora:
-  sudo dnf install clang cmake ninja-build git python3 vulkan-loader-devel glslang-devel zlib-devel
+On Windows, the first launch downloads the Microsoft Windows SDK into
+%LOCALAPPDATA%\RingHost\winsdk and accepts that SDK license. Later launches
+stay offline. No Visual Studio install.
 
-Arch:
-  sudo pacman -S clang cmake ninja git python vulkan-headers vulkan-icd-loader glslang zlib
-
-Windows tools: Visual Studio 2022 with "Desktop development with C++",
-the "C++ Clang tools for Windows" and "C++ CMake tools for Windows"
-components, plus git.
-
-The first compile downloads SDL and needs a network connection. Later
-launches reuse the build until this copy's version changes.
+The first compile is local and takes a while. Later launches reuse the
+build until this copy's version changes.
 EOF
 
 rm -f "$ARCHIVE"

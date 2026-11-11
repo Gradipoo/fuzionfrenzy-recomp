@@ -425,3 +425,18 @@ frame 7765 total `fac2e181df2256fa`. The old `gameplay2.detlog` remains the
 default-path baseline and is not retired.
 
 Reopen if a host fails the queue path, or when the flag becomes the default.
+
+### 2026-11-11: Release archives carry the player toolchain
+
+No commit yet. The published launcher compiles the player's USA disc on
+their machine. The archive carries CMake, Ninja, the pinned SDL, imgui,
+zydis, and tomlplusplus sources, and the libraries that compile used to
+find on the system. Mac still asks for Xcode Command Line Tools. Linux
+still uses the machine's Vulkan driver. Windows downloads the Windows SDK
+once, with xwin, into %LOCALAPPDATA%\RingHost\winsdk, because that SDK
+cannot be redistributed in the zip.
+
+Developer builds are unchanged when RINGHOST_TOOLCHAIN is unset.
+
+Reopen this if a release must ship a prebuilt game binary, or if the
+Windows SDK download is replaced.
