@@ -10,4 +10,7 @@ void Draw(double fps);
 // keyboard-to-pad layer (input_kbm.cpp) must keep its hands off them
 bool SettingsOpen();
 
+// Window thread. 1 host, 2 join, 3 start. addr and link are the fields from the panel.
+void RelayAction(int action, const char* addr, const char* link);
+
 }  // namespace overlay

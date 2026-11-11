@@ -1,6 +1,8 @@
 #pragma once
 // Delay lockstep over datagrams. Off unless a caller builds a Session.
-// Frame N runs the inputs sampled at frame N - delay. Ports 3 and 4 stay empty.
+// Frame N runs the inputs sampled at frame N - delay. With mask 0, peers
+// of 2 waits for the other of seats 1 and 2. Peers of 4 waits for the
+// other three. A mask waits only for its seats. Empty ports stay disconnected.
 #include <cstdint>
 #include <memory>
 #include <vector>
@@ -19,7 +21,9 @@ enum class Fail : int { None = 0, Desync = 1, Timeout = 2, Hello = 3 };
 struct Config {
     const char* bind = nullptr;  // "127.0.0.1:27015" or "0.0.0.0:27015"
     const char* peer = nullptr;
-    int seat = 1;  // 1 or 2. Seat 1 is port 1. Seat 2 is port 2.
+    int seat = 1;     // 1 or 2 for a direct peer. 1 through 4 for a relay.
+    int peers = 2;    // With mask 0: 2 is the other of seats 1 and 2. 4 is every seat.
+    uint8_t mask = 0; // Bit 0 is seat 1. 0 keeps the peers rule above.
     int delay = 2;
     int timeout_ms = 5000;
     int hello_ms = 180000;
@@ -79,20 +83,26 @@ public:
     Result Drain(uint64_t through_frame);
 
 private:
+    struct From {
+        bool in = false;
+        Report report;
+        bool hashed = false;
+        uint64_t hash = 0;
+    };
+
     struct Slot {
         bool in = false;
         Report report;
         bool hashed = false;
         uint64_t hash = 0;
-        bool remote_in = false;
-        Report remote;
-        bool remote_hashed = false;
-        uint64_t remote_hash = 0;
+        From from[4];
     };
 
     Config cfg_;
+    uint8_t mask_ = 0;
     std::unique_ptr<Datagram> pipe_;
     bool hello_ok_ = false;
+    bool seen_[4] = {};
     bool opened_ = false;
     Fail sticky_ = Fail::None;
     uint64_t sticky_frame_ = 0;
@@ -108,6 +118,11 @@ private:
     void Ingest(const uint8_t* p, int n);
     Result Pump(int wait_ms, bool want_hello, int64_t need_remote, bool want_hashes, uint64_t through);
     void Fill(uint64_t sample_frame, Report out[4]);
+    bool SeatIn(int seat) const;
+    bool OtherSeat(int seat) const;
+    bool AllOthersSeen() const;
+    bool HaveRemote(const Slot& s) const;
+    bool HaveRemoteHash(const Slot& s) const;
 };
 
 }  // namespace net

@@ -26,7 +26,7 @@ The command line wins over the environment variable. `--name value` and `--name=
 | `--state-dump-region NAME` | `FUZION_STATE_DUMP_REGION` | `phys_03`, `.data`, `system`, `user_0`, or a section name. Empty dumps the writable sections and the 64 physical slices. |
 | | `FUZION_PORT2_KEYS` | Move the keyboard map from port 1 onto port 2. Unset, empty, or `0` leaves it off. There is no command-line switch: the keyboard file does not see argv. |
 | `--port2-mash N` | `FUZION_PORT2_MASH` | Drive port 2 from a seeded pattern. Unset, empty, or `0` leaves it off. `1` uses `FUZION_SEED` when that is set, otherwise seed 1. Any other number is the seed. |
-| `--lockstep` | `FUZION_LOCKSTEP` | Delay lockstep over UDP. Forces fixed step. Unset, empty, or `0` leaves it off, and no socket is opened. |
+| `--lockstep` | `FUZION_LOCKSTEP` | Delay lockstep over UDP. Forces fixed step. Unset, empty, or `0` leaves it off, and no socket is opened. With no `--lockstep-peer`, the game keeps running until the host starts the relay match. |
 | `--lockstep-bind HOST:PORT` | `FUZION_LOCKSTEP_BIND` | Local UDP address. `0.0.0.0` accepts a peer that is not on this machine. |
 | `--lockstep-peer HOST:PORT` | `FUZION_LOCKSTEP_PEER` | The other process. |
 | `--lockstep-seat N` | `FUZION_LOCKSTEP_SEAT` | `1` publishes port 1. `2` publishes port 2. |
@@ -36,7 +36,7 @@ The command line wins over the environment variable. `--name value` and `--name=
 
 `--instance N` is the existing launcher flag. Instance 0 and 1 share `hdd/` next to the executable. Instance 2 and up use `hddN`. The matrix uses 2, 3, and 4 and deletes only those directories.
 
-Lockstep compares a hello before the first poll: protocol, seed, delay, seat, and the width, height, and ultrawide from `settings.toml`. A mismatch exits. Seat 1's sample is port 1 of `--replay-input` when that is set, otherwise the pad on port 1. Seat 2's sample is the mash when `--port2-mash` is set. Ports 3 and 4 are sent disconnected. Both processes need the same HDD snapshot and the same explicit `settings.toml` (a 0 by 0 size follows the desktop, and that bit is in the hash). The second process uses `--instance 2` so it does not share `hdd/`. After the run, `scripts/det-diff.py` on the two state logs is the check. A hash mismatch writes `det-desync/desync_<frame>.txt` and exits 1. A silent peer logs a timeout and exits 2.
+Lockstep compares a hello before the first poll: protocol, seed, delay, seat, and the width, height, and ultrawide from `settings.toml`. A mismatch exits. Seat 1's sample is port 1 of `--replay-input` when that is set, otherwise the pad on port 1. Seat 2's sample is the mash when `--port2-mash` is set. A direct peer leaves ports 3 and 4 disconnected. A relay match writes each seat in the start mask onto its own port. Empty ports stay disconnected. Both processes need the same HDD snapshot and the same explicit `settings.toml` (a 0 by 0 size follows the desktop, and that bit is in the hash). The second process uses `--instance 2` so it does not share `hdd/`. After the run, `scripts/det-diff.py` on the two state logs is the check. A hash mismatch writes `det-desync/desync_<frame>.txt` and exits 1. A silent peer logs a timeout and exits 2.
 
 ## What a frame is
 

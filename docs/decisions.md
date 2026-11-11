@@ -176,6 +176,21 @@ this repo.
 Reopen this when a session needs rollback, or when two machines cannot
 meet on plain UDP.
 
+## 2026-11-11: Relay datagram when plain UDP cannot meet
+
+The 2026-10-31 lockstep decision reopens here. Two machines cannot meet
+on plain UDP. Both sides still run delay lockstep. The datagram is a
+relay. No accounts. Not for public deployment.
+
+The server mints a 16 byte token. One session holds four human seats.
+The F1 settings panel hosts or joins, and the server assigns the seat.
+The host starts the match. Whoever has joined plays. Empty seats stay
+disconnected. With `--lockstep` and no `--lockstep-peer`, the title
+thread keeps presenting until that start notice. Frame 0 waits for it.
+A direct peer still uses two-seat UDP. The hooks are
+`patches/sdk-lockstep-relay.patch` (`XBE_LOCKSTEP_RELAY`) and
+`patches/sdk-lockstep-lobby.patch` (`XBE_LOCKSTEP_LOBBY`).
+
 ## 2026-11-08: Kicked-sleeper pre-registration did not settle the turn
 
 No commit. Reverted. The working tree and patches are back at `0be2bb7`.

@@ -1,0 +1,184 @@
+--- a/runtime/app/app.h
++++ b/runtime/app/app.h
+@@ -38,6 +38,8 @@
+ void LogSettings();  // every setting, as the settings file has them
+ void LogSystem();    // the machine and the settings, at a run's start
+ void ApplyDisplay();  // any thread
++// The window thread runs these. The render thread must not call SDL itself.
++void PostRelay(int action, const char* addr, const char* link);
+ struct Mode {
+     uint32_t width, height;
+ };
+--- a/runtime/app/main.cpp
++++ b/runtime/app/main.cpp
+@@ -23,6 +23,7 @@
+ #include <backends/imgui_impl_win32.h>
+ 
+ #include "app/app.h"
++#include "common/overlay.h"
+ #include "det/clock.h"
+ #include "core/input.h"
+ #include "core/log.h"
+@@ -200,6 +201,14 @@
+ }
+ 
+ void ApplyDisplay() { PostMessageW(g_hwnd, kApplyDisplay, 0, 0); }
++
++void PostRelay(int action, const char* addr, const char* link) {
++    if (action == 4) {
++        ImGui::SetClipboardText(link ? link : "");
++        return;
++    }
++    overlay::RelayAction(action, addr ? addr : "", link ? link : "");
++}
+ void OpenGameWindow(bool apply) { SendMessageW(g_hwnd, kOpenWindow, apply, 0); }
+ 
+ void Pace() {
+--- a/runtime/app/main_sdl.cpp
++++ b/runtime/app/main_sdl.cpp
+@@ -40,9 +40,11 @@
+ 
+ #include "app/app.h"
+ #include "app/platform.h"
++#include "app/text_input.h"
+ #include "core/determinism.h"
+ #include "det/clock.h"
+ #include "common/input_kbm.h"  // kbm::NoteMouse (D11 mouse cache)
++#include "common/overlay.h"
+ #include "core/input.h"
+ #include "core/log.h"
+ #include "gpu/backend.h"  // gpu::g_capture (F3)
+@@ -65,7 +67,14 @@
+ std::atomic<bool> g_imgui_vulkan{false};
+ // Cross-thread requests to the window thread, mirroring main.cpp's
+ // kApplyDisplay / kOpenWindow window messages.
+-Uint32 g_apply_event = 0, g_open_event = 0;
++Uint32 g_apply_event = 0, g_open_event = 0, g_relay_event = 0;
++TextInputQueue g_ime;
++
++struct RelayMsg {
++    int action = 0;
++    char addr[64]{};
++    char link[128]{};
++};
+ 
+ std::string Narrow(const wchar_t* wide) {
+     std::string out;
+@@ -292,6 +301,14 @@
+         auto* req = static_cast<OpenRequest*>(e.user.data1);
+         DoOpenGameWindow(req->apply);
+         SDL_SignalSemaphore(req->done);
++        return false;
++    }
++    if (e.type == g_relay_event) {
++        std::unique_ptr<RelayMsg> msg(static_cast<RelayMsg*>(e.user.data1));
++        if (msg) {
++            if (msg->action == 4) SDL_SetClipboardText(msg->link);
++            else overlay::RelayAction(msg->action, msg->addr, msg->link);
++        }
+         return false;
+     }
+     if (e.type == SDL_EVENT_QUIT) return true;
+@@ -330,6 +347,28 @@
+ 
+ }  // namespace
+ 
++void ApplyTextInput() { g_ime.Apply(g_window); }
++
++void InstallTextInputHook() {
++    ImGui::GetPlatformIO().Platform_SetImeDataFn = [](ImGuiContext*, ImGuiViewport*, ImGuiPlatformImeData* data) {
++        if (!data) return;
++        g_ime.Want(data->WantVisible, static_cast<int>(data->InputPos.x), static_cast<int>(data->InputPos.y),
++                   static_cast<int>(data->InputLineHeight));
++    };
++}
++
++void PostRelay(int action, const char* addr, const char* link) {
++    if (!g_relay_event) return;
++    auto* msg = new RelayMsg;
++    msg->action = action;
++    if (addr) std::snprintf(msg->addr, sizeof msg->addr, "%s", addr);
++    if (link) std::snprintf(msg->link, sizeof msg->link, "%s", link);
++    SDL_Event e{};
++    e.type = g_relay_event;
++    e.user.data1 = msg;
++    if (!SDL_PushEvent(&e)) delete msg;
++}
++
+ std::filesystem::path ExeDir() {
+ #if defined(__APPLE__)
+     char self[4096] = {};
+@@ -539,8 +578,9 @@
+         LOGE("sdl: video failed to start: %s", SDL_GetError());
+         return 1;
+     }
+-    app::g_apply_event = SDL_RegisterEvents(2);
++    app::g_apply_event = SDL_RegisterEvents(3);
+     app::g_open_event = app::g_apply_event + 1;
++    app::g_relay_event = app::g_apply_event + 2;
+ 
+     app::Mode out = app::Output();
+     SDL_WindowFlags flags = SDL_WINDOW_VULKAN;
+@@ -586,6 +626,8 @@
+     io.IniFilename = nullptr;
+     io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard | ImGuiConfigFlags_NavEnableGamepad;
+     ImGui_ImplSDL3_InitForVulkan(app::g_window);
++    // The render thread ends a frame. Stopping text input there aborts AppKit.
++    app::InstallTextInputHook();
+     // ImGui_ImplVulkan_Init waits for the backend's device: TryInitImGuiVulkan
+     // in the loop below, once gpu::GetVulkanHandles() is valid.
+ 
+@@ -614,6 +656,7 @@
+ 
+     bool quit = false;
+     while (!quit) {
++        app::ApplyTextInput();
+         SDL_Event e;
+         if (SDL_WaitEventTimeout(&e, 16)) {
+             if (app::HandleEvent(e)) quit = true;
+--- /dev/null
++++ b/runtime/app/text_input.h
+@@ -0,0 +1,43 @@
++#pragma once
++// SDL text input and the clipboard talk to AppKit. Those calls belong on the
++// window thread. The render thread only records a request.
++#include <SDL3/SDL.h>
++
++#include <mutex>
++
++namespace app {
++
++struct TextInputQueue {
++    void Want(bool visible, int x, int y, int h) {
++        std::lock_guard<std::mutex> lock(mu_);
++        op_ = visible ? 2 : 1;
++        area_.x = x;
++        area_.y = y;
++        area_.w = 1;
++        area_.h = h > 0 ? h : 1;
++    }
++    // Window thread. A request from another thread is applied here.
++    void Apply(SDL_Window* window) {
++        int op = 0;
++        SDL_Rect area{};
++        {
++            std::lock_guard<std::mutex> lock(mu_);
++            op = op_;
++            op_ = 0;
++            area = area_;
++        }
++        if (!window || !op) return;
++        if (op == 1) SDL_StopTextInput(window);
++        else {
++            SDL_SetTextInputArea(window, &area, 0);
++            SDL_StartTextInput(window);
++        }
++    }
++
++private:
++    std::mutex mu_;
++    int op_ = 0;
++    SDL_Rect area_{};
++};
++
++}  // namespace app

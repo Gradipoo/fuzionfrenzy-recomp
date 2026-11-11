@@ -46,6 +46,24 @@ endif()
 add_test(NAME det_diff COMMAND python3 "${CMAKE_SOURCE_DIR}/scripts/det-diff.py" --self-check)
 
 set_tests_properties(det_clock run_queue xinput_packet arena lockstep fp_digest det_diff PROPERTIES LABELS fast)
+
+if(NOT WIN32 AND TARGET SDL3::SDL3-static AND DEFINED imgui_SOURCE_DIR)
+    add_executable(test_text_input
+        "${_xbe_tests_dir}/test_text_input.cpp"
+        "${imgui_SOURCE_DIR}/imgui.cpp"
+        "${imgui_SOURCE_DIR}/imgui_draw.cpp"
+        "${imgui_SOURCE_DIR}/imgui_tables.cpp"
+        "${imgui_SOURCE_DIR}/imgui_widgets.cpp"
+        "${imgui_SOURCE_DIR}/backends/imgui_impl_sdl3.cpp")
+    target_include_directories(test_text_input PRIVATE
+        "${CMAKE_SOURCE_DIR}/sdk/runtime"
+        "${imgui_SOURCE_DIR}"
+        "${imgui_SOURCE_DIR}/backends")
+    target_compile_features(test_text_input PRIVATE cxx_std_20)
+    target_link_libraries(test_text_input PRIVATE SDL3::SDL3-static)
+    add_test(NAME text_input COMMAND test_text_input)
+    set_tests_properties(text_input PROPERTIES LABELS ime TIMEOUT 60)
+endif()
 set_tests_properties(scenes PROPERTIES LABELS scenes TIMEOUT 900)
 set_tests_properties(fp_digest det_diff PROPERTIES
     WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"

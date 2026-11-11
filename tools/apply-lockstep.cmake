@@ -204,6 +204,49 @@ if(EXISTS "${SDK}/runtime/core/determinism.cpp" AND EXISTS "${_net}")
     endif()
 endif()
 
+# Relay lobby on top of the net hook. With --lockstep and no peer, the
+# first present waits for an armed RelayClient. A direct peer skips it.
+set(_relay "${REPO}/patches/sdk-lockstep-relay.patch")
+if(EXISTS "${SDK}/runtime/core/determinism.cpp" AND EXISTS "${_relay}")
+    file(READ "${SDK}/runtime/core/determinism.cpp" _relay_src)
+    if(NOT _relay_src MATCHES "XBE_LOCKSTEP_RELAY")
+        execute_process(COMMAND "${GIT_EXE}" -C "${SDK}" apply --whitespace=nowarn "${_relay}"
+                        RESULT_VARIABLE _rc)
+        if(NOT _rc EQUAL 0)
+            message(FATAL_ERROR "patches/sdk-lockstep-relay.patch failed (${_rc})")
+        endif()
+        message(STATUS "applied patches/sdk-lockstep-relay.patch")
+    endif()
+endif()
+
+# Keep presenting while four relay seats join. A direct peer skips it.
+set(_lobby "${REPO}/patches/sdk-lockstep-lobby.patch")
+if(EXISTS "${SDK}/runtime/core/determinism.cpp" AND EXISTS "${_lobby}")
+    file(READ "${SDK}/runtime/core/determinism.cpp" _lobby_src)
+    if(NOT _lobby_src MATCHES "XBE_LOCKSTEP_LOBBY")
+        execute_process(COMMAND "${GIT_EXE}" -C "${SDK}" apply --whitespace=nowarn "${_lobby}"
+                        RESULT_VARIABLE _rc)
+        if(NOT _rc EQUAL 0)
+            message(FATAL_ERROR "patches/sdk-lockstep-lobby.patch failed (${_rc})")
+        endif()
+        message(STATUS "applied patches/sdk-lockstep-lobby.patch")
+    endif()
+endif()
+
+# Host, Join, and Copy run on the window thread. Text input does too.
+set(_relay_ui "${REPO}/patches/sdk-lockstep-relay-ui.patch")
+if(EXISTS "${SDK}/runtime/app/app.h" AND EXISTS "${_relay_ui}")
+    file(READ "${SDK}/runtime/app/app.h" _relay_ui_src)
+    if(NOT _relay_ui_src MATCHES "PostRelay")
+        execute_process(COMMAND "${GIT_EXE}" -C "${SDK}" apply --whitespace=nowarn "${_relay_ui}"
+                        RESULT_VARIABLE _rc)
+        if(NOT _rc EQUAL 0)
+            message(FATAL_ERROR "patches/sdk-lockstep-relay-ui.patch failed (${_rc})")
+        endif()
+        message(STATUS "applied patches/sdk-lockstep-relay-ui.patch")
+    endif()
+endif()
+
 # Run queue ordering behind FUZION_RUN_QUEUE. The project header lives in
 # src/det/run_queue.h; the sdk build already has src on its include path.
 set(_runq "${REPO}/patches/sdk-lockstep-run-queue.patch")

@@ -1,7 +1,7 @@
 // Delay lockstep. Packet layout, little-endian:
 //   4 bytes magic "FFL1", 1 byte type.
 //   type 1 hello: u32 seed, u16 delay, u8 seat, u32 width, u32 height, u8 ultrawide.
-//   type 2 state: u8 nIn, nIn times (u32 frame, u8 connected, u16 buttons,
+//   type 2 state: u8 seat, u8 nIn, nIn times (u32 frame, u8 connected, u16 buttons,
 //   8 analog bytes, i16 lx ly rx ry), then u8 nHash, nHash times (u32 frame, u64 total).
 #include "net/lockstep.h"
 
@@ -222,7 +222,54 @@ bool Udp::Recv(std::vector<std::vector<uint8_t>>& out) {
     }
 }
 
-Session::Session(Config cfg) : cfg_(cfg) {}
+Session::Session(Config cfg) : cfg_(cfg) {
+    if (cfg_.mask != 0) {
+        mask_ = uint8_t(cfg_.mask & 0x0F);
+        int n = 0;
+        for (int i = 0; i < 4; i++)
+            if (mask_ & uint8_t(1u << i)) n++;
+        cfg_.peers = n > 0 ? n : 1;
+    } else if (cfg_.peers == 4) {
+        mask_ = 0x0F;
+        cfg_.peers = 4;
+    } else {
+        mask_ = 0x03;
+        cfg_.peers = 2;
+    }
+    hello_ok_ = true;
+    for (int seat = 1; seat <= 4; seat++)
+        if (OtherSeat(seat)) hello_ok_ = false;
+}
+
+bool Session::SeatIn(int seat) const {
+    return seat >= 1 && seat <= 4 && (mask_ & uint8_t(1u << (seat - 1))) != 0;
+}
+
+bool Session::OtherSeat(int seat) const { return SeatIn(seat) && seat != cfg_.seat; }
+
+bool Session::AllOthersSeen() const {
+    for (int seat = 1; seat <= 4; seat++) {
+        if (!OtherSeat(seat)) continue;
+        if (!seen_[seat - 1]) return false;
+    }
+    return true;
+}
+
+bool Session::HaveRemote(const Slot& s) const {
+    for (int seat = 1; seat <= 4; seat++) {
+        if (!OtherSeat(seat)) continue;
+        if (!s.from[seat - 1].in) return false;
+    }
+    return true;
+}
+
+bool Session::HaveRemoteHash(const Slot& s) const {
+    for (int seat = 1; seat <= 4; seat++) {
+        if (!OtherSeat(seat)) continue;
+        if (!s.from[seat - 1].hashed) return false;
+    }
+    return true;
+}
 
 void Session::SetPipe(std::unique_ptr<Datagram> pipe) { pipe_ = std::move(pipe); }
 
@@ -281,6 +328,7 @@ void Session::SendState() {
     std::vector<uint8_t> o;
     for (uint8_t b : kMagic) PutU8(o, b);
     PutU8(o, kState);
+    PutU8(o, uint8_t(cfg_.seat));
     PutU8(o, uint8_t(ins.size()));
     for (uint64_t f : ins) {
         PutU32(o, uint32_t(f));
@@ -307,14 +355,18 @@ void Session::Ingest(const uint8_t* p, int n) {
         uint32_t height = rd.U32();
         uint8_t wide = rd.U8();
         if (seed != cfg_.seed || int(delay) != cfg_.delay || width != cfg_.width || height != cfg_.height ||
-            wide != (cfg_.ultrawide ? 1 : 0) || (seat != 1 && seat != 2) || int(seat) == cfg_.seat) {
+            wide != (cfg_.ultrawide ? 1 : 0) || !OtherSeat(int(seat))) {
             sticky_ = Fail::Hello;
             return;
         }
-        hello_ok_ = true;
+        seen_[seat - 1] = true;
+        hello_ok_ = AllOthersSeen();
         return;
     }
     if (p[4] != kState || !hello_ok_) return;
+    if (!rd.Ok(1)) return;
+    int from = rd.U8();
+    if (!OtherSeat(from)) return;
     if (!rd.Ok(1)) return;
     int n_in = rd.U8();
     for (int i = 0; i < n_in; i++) {
@@ -323,8 +375,9 @@ void Session::Ingest(const uint8_t* p, int n) {
         Report rep = rd.Rep();
         if (frame >= kMaxFrame) return;
         Slot& s = At(frame);
-        s.remote_in = true;
-        s.remote = rep;
+        From& src = s.from[from - 1];
+        src.in = true;
+        src.report = rep;
     }
     if (!rd.Ok(1)) return;
     int n_hash = rd.U8();
@@ -334,9 +387,10 @@ void Session::Ingest(const uint8_t* p, int n) {
         uint64_t total = rd.U64();
         if (frame >= kMaxFrame) return;
         Slot& s = At(frame);
-        s.remote_hashed = true;
-        s.remote_hash = total;
-        if (s.hashed && s.hash != total && sticky_ == Fail::None) {
+        From& src = s.from[from - 1];
+        src.hashed = true;
+        src.hash = total;
+        if (s.hashed && src.hash != s.hash && sticky_ == Fail::None) {
             sticky_ = Fail::Desync;
             sticky_frame_ = frame;
             sticky_local_ = s.hash;
@@ -351,15 +405,9 @@ void Session::Fill(uint64_t sample_frame, Report out[4]) {
     uint64_t src = sample_frame - uint64_t(cfg_.delay);
     if (src >= slots_.size()) return;
     const Slot& s = slots_[src];
-    Report mine = s.in ? s.report : Report{};
-    Report theirs = s.remote_in ? s.remote : Report{};
-    if (cfg_.seat == 1) {
-        out[0] = mine;
-        out[1] = theirs;
-    } else {
-        out[0] = theirs;
-        out[1] = mine;
-    }
+    if (s.in && SeatIn(cfg_.seat)) out[cfg_.seat - 1] = s.report;
+    for (int i = 0; i < 4; i++)
+        if (s.from[i].in && SeatIn(i + 1)) out[i] = s.from[i].report;
 }
 
 Result Session::Pump(int wait_ms, bool want_hello, int64_t need_remote, bool want_hashes, uint64_t through) {
@@ -383,12 +431,12 @@ Result Session::Pump(int wait_ms, bool want_hello, int64_t need_remote, bool wan
         bool hello_ready = !want_hello || hello_ok_;
         bool remote_ready = true;
         if (need_remote >= 0) {
-            remote_ready = uint64_t(need_remote) < slots_.size() && slots_[size_t(need_remote)].remote_in;
+            remote_ready = uint64_t(need_remote) < slots_.size() && HaveRemote(slots_[size_t(need_remote)]);
         }
         bool hash_ready = true;
         if (want_hashes) {
             for (uint64_t f = 0; f < slots_.size() && f <= through; f++) {
-                if (slots_[f].hashed && !slots_[f].remote_hashed) hash_ready = false;
+                if (slots_[f].hashed && !HaveRemoteHash(slots_[f])) hash_ready = false;
             }
         }
         if (hello_ready && remote_ready && hash_ready) {
@@ -410,12 +458,12 @@ Result Session::Pump(int wait_ms, bool want_hello, int64_t need_remote, bool wan
 
 Result Session::Hello() {
     if (sticky_ != Fail::None) return FailNow(sticky_, sticky_frame_, sticky_local_, sticky_remote_);
+    if (!SeatIn(cfg_.seat)) return FailNow(Fail::Hello, 0, 0, 0);
+    if (cfg_.delay < 0 || cfg_.delay > 20) return FailNow(Fail::Hello, 0, 0, 0);
     if (hello_ok_) {
         Result r;
         return r;
     }
-    if (cfg_.seat != 1 && cfg_.seat != 2) return FailNow(Fail::Hello, 0, 0, 0);
-    if (cfg_.delay < 0 || cfg_.delay > 20) return FailNow(Fail::Hello, 0, 0, 0);
     if (!opened_) {
         if (!pipe_) {
             if (!cfg_.bind || !cfg_.peer) return FailNow(Fail::Hello, 0, 0, 0);
@@ -450,11 +498,12 @@ Result Session::NoteHash(uint64_t frame, uint64_t total) {
     Slot& s = At(frame);
     s.hashed = true;
     s.hash = total;
-    if (s.remote_hashed && s.remote_hash != total) {
+    for (int i = 0; i < 4; i++) {
+        if (!s.from[i].hashed || s.from[i].hash == total) continue;
         sticky_ = Fail::Desync;
         sticky_frame_ = frame;
         sticky_local_ = total;
-        sticky_remote_ = s.remote_hash;
+        sticky_remote_ = s.from[i].hash;
         return FailNow(sticky_, sticky_frame_, sticky_local_, sticky_remote_);
     }
     return Pump(0, false, -1, false, 0);
