@@ -204,6 +204,22 @@ if(EXISTS "${SDK}/runtime/core/determinism.cpp" AND EXISTS "${_net}")
     endif()
 endif()
 
+# Run queue ordering behind FUZION_RUN_QUEUE. The project header lives in
+# src/det/run_queue.h; the sdk build already has src on its include path.
+# The relay patch below expects that include, so this lands first.
+set(_runq "${REPO}/patches/sdk-lockstep-run-queue.patch")
+if(EXISTS "${SDK}/runtime/core/determinism.cpp" AND EXISTS "${_runq}")
+    file(READ "${SDK}/runtime/core/determinism.cpp" _runq_src)
+    if(NOT _runq_src MATCHES "XBE_RUN_QUEUE")
+        execute_process(COMMAND "${GIT_EXE}" -C "${SDK}" apply --whitespace=nowarn "${_runq}"
+                        RESULT_VARIABLE _rc)
+        if(NOT _rc EQUAL 0)
+            message(FATAL_ERROR "patches/sdk-lockstep-run-queue.patch failed (${_rc})")
+        endif()
+        message(STATUS "applied patches/sdk-lockstep-run-queue.patch")
+    endif()
+endif()
+
 # Relay lobby on top of the net hook. With --lockstep and no peer, the
 # first present waits for an armed RelayClient. A direct peer skips it.
 set(_relay "${REPO}/patches/sdk-lockstep-relay.patch")
@@ -244,20 +260,5 @@ if(EXISTS "${SDK}/runtime/app/app.h" AND EXISTS "${_relay_ui}")
             message(FATAL_ERROR "patches/sdk-lockstep-relay-ui.patch failed (${_rc})")
         endif()
         message(STATUS "applied patches/sdk-lockstep-relay-ui.patch")
-    endif()
-endif()
-
-# Run queue ordering behind FUZION_RUN_QUEUE. The project header lives in
-# src/det/run_queue.h; the sdk build already has src on its include path.
-set(_runq "${REPO}/patches/sdk-lockstep-run-queue.patch")
-if(EXISTS "${SDK}/runtime/core/determinism.cpp" AND EXISTS "${_runq}")
-    file(READ "${SDK}/runtime/core/determinism.cpp" _runq_src)
-    if(NOT _runq_src MATCHES "XBE_RUN_QUEUE")
-        execute_process(COMMAND "${GIT_EXE}" -C "${SDK}" apply --whitespace=nowarn "${_runq}"
-                        RESULT_VARIABLE _rc)
-        if(NOT _rc EQUAL 0)
-            message(FATAL_ERROR "patches/sdk-lockstep-run-queue.patch failed (${_rc})")
-        endif()
-        message(STATUS "applied patches/sdk-lockstep-run-queue.patch")
     endif()
 endif()
