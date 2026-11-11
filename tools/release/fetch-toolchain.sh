@@ -418,6 +418,10 @@ install_llvm() {
             if [ ! -e "$DEST/lib" ]; then
                 ln -s llvm/lib "$DEST/lib"
             fi
+            # A GitHub release file must be under 2 GiB. The LLVM static
+            # archives and headers are not needed to run clang.
+            find "$DEST/llvm/lib" -name '*.a' -delete
+            rm -rf "$DEST/llvm/include" "$DEST/llvm/share"
             ;;
         windows)
             if [ ! -f "$DEST/llvm/bin/clang-cl.exe" ]; then
@@ -438,12 +442,11 @@ install_llvm() {
                     cp -f "$dll" "$DEST/bin/$(basename "$dll")"
                 fi
             done
-            if [ ! -e "$DEST/lib/clang" ]; then
-                mkdir -p "$DEST/lib"
-                if ! ln -s ../llvm/lib/clang "$DEST/lib/clang" 2>/dev/null; then
-                    cp -a "$DEST/llvm/lib/clang" "$DEST/lib/clang"
-                fi
-            fi
+            mkdir -p "$DEST/lib"
+            rm -rf "$DEST/lib/clang"
+            cp -a "$DEST/llvm/lib/clang" "$DEST/lib/clang"
+            # The copied tools do not need the rest of the LLVM tree.
+            rm -rf "$DEST/llvm"
             ;;
     esac
 }
