@@ -31,7 +31,7 @@ enum Pipeline {
             let blockers = PrereqScan.blockers(PrereqScan.scan())
             if !blockers.isEmpty {
                 let lines = blockers.map { "\($0.title): \($0.detail)" }.joined(separator: "\n")
-                emit(.failed("Missing tools.\n" + lines + "\n\n" + ArenaInstall))
+                emit(.failed("Missing tools.\n" + lines + "\n\n" + arenaInstallText()))
                 return "Missing tools"
             }
 
@@ -93,11 +93,24 @@ enum Pipeline {
                     try? fm.removeItem(at: src.appendingPathComponent("out"))
                 }
                 emit(.stage("Translating and compiling"))
-                emit(.log("First build downloads SDL and compiles the game from your disc. It takes a while."))
+                let toolchain = src.appendingPathComponent("toolchain", isDirectory: true)
+                let toolchainBin = toolchain.appendingPathComponent("bin", isDirectory: true)
+                var binIsDir: ObjCBool = false
+                var buildEnv: [String: String] = [:]
+                if fm.fileExists(atPath: toolchainBin.path, isDirectory: &binIsDir), binIsDir.boolValue {
+                    buildEnv["RINGHOST_TOOLCHAIN"] = toolchain.path
+                    buildEnv["PATH"] = toolchainBin.path + ":" + PrereqScan.buildPath
+                    emit(.log("This compile uses the tools in this copy and takes a while. It does not download SDL."))
+                } else {
+                    emit(.log("First build downloads SDL and compiles the game from your disc. It takes a while."))
+                }
                 emit(.progress(nil))
-                let code = shell(src.appendingPathComponent("build.sh").path, ["macos-release"], cwd: src, emit: emit)
+                let code = shell(src.appendingPathComponent("build.sh").path, ["macos-release"], cwd: src, emit: emit, extra: buildEnv)
                 if code != 0 || !fm.fileExists(atPath: binary.path) {
-                    emit(.failed("The compile stopped. The last lines above are the reason. A missing tool, or a failed download of SDL, is the usual cause."))
+                    let why = buildEnv["RINGHOST_TOOLCHAIN"] != nil
+                        ? "The compile stopped. The last lines above are the reason. A missing tool is the usual cause."
+                        : "The compile stopped. The last lines above are the reason. A missing tool, or a failed download of SDL, is the usual cause."
+                    emit(.failed(why))
                     return "build failed"
                 }
                 try job.version.write(to: builtStamp, atomically: true, encoding: .utf8)
@@ -141,6 +154,11 @@ enum Pipeline {
         if job.mute { env["XBE_MUTE"] = "1" } else { env.removeValue(forKey: "XBE_MUTE") }
         if job.autostart { env["FUZION_AUTOSTART"] = "1" } else { env.removeValue(forKey: "FUZION_AUTOSTART") }
         if job.perf { env["XBE_PERF"] = "1" }
+        let icd = support.appendingPathComponent("src/toolchain/prefix/etc/vulkan/icd.d/MoltenVK_icd.json")
+        if FileManager.default.fileExists(atPath: icd.path) {
+            env["VK_DRIVER_FILES"] = icd.path
+            env["VK_ICD_FILENAMES"] = icd.path
+        }
         // Same hints input.cpp sets before SDL_Init. A wired Xbox One pad is
         // opened by HIDAPI through libusb. MFI is left alone so Bluetooth
         // stays on GameController.
@@ -164,14 +182,17 @@ enum Pipeline {
     }
 
     @discardableResult
-    private static func shell(_ launch: String, _ args: [String], cwd: URL, emit: @escaping (JobEvent) -> Void) -> Int32 {
+    private static func shell(_ launch: String, _ args: [String], cwd: URL, emit: @escaping (JobEvent) -> Void, extra: [String: String] = [:]) -> Int32 {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: launch)
         process.arguments = args
         process.currentDirectoryURL = cwd
         var env = ProcessInfo.processInfo.environment
-        env["PATH"] = PrereqScan.buildPath
+        env["PATH"] = extra["PATH"] ?? PrereqScan.buildPath
         env["GIT_TERMINAL_PROMPT"] = "0"
+        for (key, value) in extra where key != "PATH" {
+            env[key] = value
+        }
         process.environment = env
         let pipe = Pipe()
         process.standardOutput = pipe
@@ -233,11 +254,13 @@ private enum Held {
     static var handles: [FileHandle] = []
 }
 
-private let ArenaInstall = """
-Install the missing pieces, then try again:
+private func arenaInstallText() -> String {
+    """
+    Install the missing pieces, then try again:
 
-\(Arena.installCommands)
-"""
+    \(Arena.installCommands)
+    """
+}
 
 private struct PipeError: LocalizedError {
     var message: String

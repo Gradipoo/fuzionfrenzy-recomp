@@ -17,6 +17,8 @@ set "OUT=%CD%\out\build\release"
 
 if not exist assets\%GAME_XBE% goto :nogame
 
+if defined RINGHOST_TOOLCHAIN goto :bundled
+
 rem toolchain
 echo [1/3] Toolchain
 for /f "usebackq tokens=*" %%i in (`"%VSWHERE%" -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath`) do set "VSDIR=%%i"
@@ -44,6 +46,60 @@ for /f "tokens=*" %%v in ('clang++ --version ^| findstr /i version') do echo    
 rem symbols
 echo [2/3] XDK symbols
 cmake --preset release >nul || goto :fail
+goto :afterconfig
+
+rem bundled clang-cl. The release preset wants Visual Studio's clang.
+:bundled
+echo [1/3] Toolchain
+set "TB=%RINGHOST_TOOLCHAIN%\bin"
+set MISSING=
+if not exist "%TB%\clang-cl.exe" set MISSING=%MISSING% clang-cl
+if not exist "%TB%\lld-link.exe" set MISSING=%MISSING% lld-link
+if not exist "%TB%\llvm-lib.exe" set MISSING=%MISSING% llvm-lib
+if not exist "%TB%\llvm-rc.exe" set MISSING=%MISSING% llvm-rc
+if not exist "%TB%\llvm-mt.exe" set MISSING=%MISSING% llvm-mt
+if not exist "%TB%\cmake.exe" set MISSING=%MISSING% cmake
+if not exist "%TB%\ninja.exe" set MISSING=%MISSING% ninja
+if defined MISSING (
+    echo       missing:%MISSING%
+    goto :fail
+)
+if not defined RINGHOST_WINSDK (
+    echo       RINGHOST_WINSDK is not set. The launcher must point it at the Windows SDK splat.
+    goto :fail
+)
+if not exist "%RINGHOST_WINSDK%\VC\Tools\MSVC" (
+    echo       RINGHOST_WINSDK is missing VC\Tools\MSVC.
+    goto :fail
+)
+if not exist "%RINGHOST_WINSDK%\Windows Kits\10\Lib" (
+    echo       RINGHOST_WINSDK is missing Windows Kits\10\Lib.
+    goto :fail
+)
+set "PATH=%TB%;%PATH%"
+for /f "tokens=*" %%v in ('clang-cl --version ^| findstr /i version') do echo       %%v
+
+echo [2/3] XDK symbols
+set PREFIX_ARG=
+if exist "%RINGHOST_TOOLCHAIN%\prefix\." set PREFIX_ARG=-DCMAKE_PREFIX_PATH="%RINGHOST_TOOLCHAIN%\prefix"
+"%TB%\cmake.exe" -S . -B out\build\release -G Ninja -DCMAKE_BUILD_TYPE=Release ^
+  -DCMAKE_C_COMPILER="%TB%\clang-cl.exe" ^
+  -DCMAKE_CXX_COMPILER="%TB%\clang-cl.exe" ^
+  -DCMAKE_LINKER="%TB%\lld-link.exe" ^
+  -DCMAKE_AR="%TB%\llvm-lib.exe" ^
+  -DCMAKE_RC_COMPILER="%TB%\llvm-rc.exe" ^
+  -DCMAKE_MT="%TB%\llvm-mt.exe" ^
+  -DCMAKE_C_FLAGS="/winsysroot \"%RINGHOST_WINSDK%\" -march=x86-64-v2" ^
+  -DCMAKE_CXX_FLAGS="/winsysroot \"%RINGHOST_WINSDK%\" -march=x86-64-v2" ^
+  -DCMAKE_EXE_LINKER_FLAGS="/winsysroot:\"%RINGHOST_WINSDK%\"" ^
+  -DFETCHCONTENT_FULLY_DISCONNECTED=ON ^
+  -DFETCHCONTENT_SOURCE_DIR_SDL3="%RINGHOST_TOOLCHAIN%\third_party\SDL" ^
+  -DFETCHCONTENT_SOURCE_DIR_IMGUI="%RINGHOST_TOOLCHAIN%\third_party\imgui" ^
+  -DFETCHCONTENT_SOURCE_DIR_ZYDIS="%RINGHOST_TOOLCHAIN%\third_party\zydis" ^
+  -DFETCHCONTENT_SOURCE_DIR_TOMLPLUSPLUS="%RINGHOST_TOOLCHAIN%\third_party\tomlplusplus" ^
+  %PREFIX_ARG% >nul || goto :fail
+
+:afterconfig
 findstr /b /l /c:"[symbols]" config\game.toml >nul 2>nul && echo       config\game.toml already written && goto :game
 cmake --build out\build\release --target xbe_symbols >nul || goto :fail
 rem the configure step wrote where the SDK is

@@ -95,9 +95,34 @@ void SetEnv(const char* name, const char* value) {
 }
 #endif
 
+bool IsFile(const fs::path& path) {
+    std::error_code ec;
+    return fs::is_regular_file(path, ec);
+}
+
+#ifdef _WIN32
+bool DirHasEntries(const fs::path& path) {
+    std::error_code ec;
+    if (!fs::is_directory(path, ec)) return false;
+    fs::directory_iterator it(path, fs::directory_options::skip_permission_denied, ec);
+    return !ec && it != fs::directory_iterator();
+}
+#endif
+
+bool BinHasCmake(const fs::path& bin) {
+    return IsFile(bin / "cmake") || IsFile(bin / "cmake.exe");
+}
+
+// Port sources ship beside the executable. A toolchain there is the player bundle.
+fs::path BundledToolchain() {
+    fs::path port = ExeDir() / "port";
+    if (!fs::exists(port / "build.sh") && !fs::exists(port / "build.bat")) return {};
+    fs::path tc = port / "toolchain";
+    if (!BinHasCmake(tc / "bin")) return {};
+    return tc;
+}
+
 fs::path WhichOnPath(const std::string& name) {
-    const char* path = std::getenv("PATH");
-    if (!path) return {};
 #ifdef _WIN32
     const char sep = ';';
     std::vector<std::string> names = {name};
@@ -110,13 +135,22 @@ fs::path WhichOnPath(const std::string& name) {
     const char sep = ':';
     std::vector<std::string> names = {name};
 #endif
+    auto search = [&](const fs::path& dir) -> fs::path {
+        if (dir.empty()) return {};
+        for (const std::string& candidate : names) {
+            fs::path full = dir / candidate;
+            if (IsFile(full)) return full;
+        }
+        return {};
+    };
+    if (fs::path tc = BundledToolchain(); !tc.empty()) {
+        if (fs::path found = search(tc / "bin"); !found.empty()) return found;
+    }
+    const char* path = std::getenv("PATH");
+    if (!path) return {};
     for (const std::string& dir : Split(path, sep)) {
         if (dir.empty()) continue;
-        for (const std::string& candidate : names) {
-            fs::path full = fs::path(dir) / candidate;
-            std::error_code ec;
-            if (fs::is_regular_file(full, ec)) return full;
-        }
+        if (fs::path found = search(fs::path(dir)); !found.empty()) return found;
     }
     return {};
 }
@@ -435,10 +469,41 @@ int RunProcess(const std::vector<std::string>& argv, const fs::path& cwd,
     si.hStdError = write_pipe;
     si.hStdInput = GetStdHandle(STD_INPUT_HANDLE);
     PROCESS_INFORMATION pi{};
-    for (const auto& e : env) SetEnv(e.first.c_str(), e.second.c_str());
+    // CreateProcess inherits this process. Put the caller's vars back afterwards
+    // so a build PATH does not stick to the launcher.
+    struct RestoreEnv {
+        struct Item {
+            std::wstring name;
+            std::wstring value;
+            bool present = false;
+        };
+        std::vector<Item> items;
+        void set(const std::string& name, const std::string& value) {
+            Item item;
+            item.name = Wide(name);
+            wchar_t buffer[32767];
+            DWORD n = GetEnvironmentVariableW(item.name.c_str(), buffer, 32767);
+            if (n == 0 && GetLastError() == ERROR_ENVVAR_NOT_FOUND) {
+                item.present = false;
+            } else if (n > 0 && n < 32767) {
+                item.present = true;
+                item.value.assign(buffer, n);
+            } else {
+                // Leave a value we could not read. Replacing it would wipe it on the way out.
+                return;
+            }
+            items.push_back(std::move(item));
+            SetEnvironmentVariableW(items.back().name.c_str(), Wide(value).c_str());
+        }
+        ~RestoreEnv() {
+            for (const Item& item : items) {
+                SetEnvironmentVariableW(item.name.c_str(), item.present ? item.value.c_str() : nullptr);
+            }
+        }
+    } saved;
+    for (const auto& e : env) saved.set(e.first, e.second);
     BOOL ok = CreateProcessW(nullptr, command.data(), nullptr, nullptr, TRUE, CREATE_NO_WINDOW,
                              nullptr, cwd.empty() ? nullptr : cwd.wstring().c_str(), &si, &pi);
-    for (const auto& e : env) SetEnv(e.first.c_str(), nullptr);
     CloseHandle(write_pipe);
     if (!ok) {
         CloseHandle(read_pipe);
@@ -524,7 +589,16 @@ std::string RunCapture(const std::vector<std::string>& argv) {
     return out;
 }
 
-std::vector<std::string> PythonCommand() {
+std::vector<std::string> PythonFromTree(const fs::path& root) {
+    if (root.empty()) return {};
+    if (IsFile(root / "python" / "python.exe")) return {Utf8(root / "python" / "python.exe")};
+    if (IsFile(root / "python" / "bin" / "python3")) return {Utf8(root / "python" / "bin" / "python3")};
+    return {};
+}
+
+std::vector<std::string> PythonCommand(const fs::path& prefer = {}) {
+    if (std::vector<std::string> cmd = PythonFromTree(prefer); !cmd.empty()) return cmd;
+    if (std::vector<std::string> cmd = PythonFromTree(BundledToolchain()); !cmd.empty()) return cmd;
     if (fs::path p = WhichOnPath("python3"); !p.empty()) return {Utf8(p)};
     if (fs::path p = WhichOnPath("python"); !p.empty()) return {Utf8(p)};
 #ifdef _WIN32
@@ -557,6 +631,10 @@ bool VersionAtLeast(const std::string& version, int major, int minor) {
 #ifdef _WIN32
 
 fs::path FindClang() {
+    if (fs::path tc = BundledToolchain(); !tc.empty()) {
+        fs::path cl = tc / "bin" / "clang-cl.exe";
+        if (IsFile(cl)) return cl;
+    }
     if (fs::path p = WhichOnPath("clang++"); !p.empty()) return p;
     const char* program_files = std::getenv("ProgramFiles");
     if (!program_files) program_files = "C:\\Program Files";
@@ -579,58 +657,72 @@ std::vector<Prereq> ScanPrereqs() {
     auto add = [&](std::string id, std::string title, bool ok, std::string detail, bool required = true) {
         out.push_back({std::move(id), std::move(title), std::move(detail), ok, required});
     };
+    const bool bundled = !BundledToolchain().empty();
 
 #ifdef _WIN32
-    fs::path clang = FindClang();
-    add("clang", "Visual Studio C++ Clang tools", !clang.empty(),
-        clang.empty() ? "Install Visual Studio 2022 with \"Desktop development with C++\" and the \"C++ Clang tools for Windows\" component." : Utf8(clang));
+    if (bundled) {
+        fs::path clang = BundledToolchain() / "bin" / "clang-cl.exe";
+        const bool ok = IsFile(clang);
+        add("clang", "clang-cl", ok, ok ? Utf8(clang) : "This copy is missing clang-cl.");
+    } else {
+        fs::path clang = FindClang();
+        add("clang", "Visual Studio C++ Clang tools", !clang.empty(),
+            clang.empty() ? "Install Visual Studio 2022 with \"Desktop development with C++\" and the \"C++ Clang tools for Windows\" component." : Utf8(clang));
+    }
 #else
     fs::path clang = WhichOnPath("clang");
     fs::path clangxx = WhichOnPath("clang++");
     add("clang", "clang and clang++", !clang.empty() && !clangxx.empty(),
-        clang.empty() || clangxx.empty() ? "Install clang with your package manager." : Utf8(clangxx));
+        clang.empty() || clangxx.empty() ? (bundled ? "This copy is missing clang." : "Install clang with your package manager.") : Utf8(clangxx));
 #endif
     fs::path cmake = WhichOnPath("cmake");
     std::string cmake_version = CmakeVersion();
     add("cmake", "cmake 3.25 or newer", !cmake.empty() && VersionAtLeast(cmake_version, 3, 25),
-        cmake.empty() ? "Install cmake." : Utf8(cmake) + " (" + cmake_version + ")");
+        cmake.empty() ? (bundled ? "This copy is missing cmake." : "Install cmake.") : Utf8(cmake) + " (" + cmake_version + ")");
     fs::path ninja = WhichOnPath("ninja");
-    add("ninja", "ninja", !ninja.empty(), ninja.empty() ? "Install ninja." : Utf8(ninja));
-    fs::path git = WhichOnPath("git");
-    add("git", "git", !git.empty(),
-        git.empty() ? "Install git. The build applies the port patches with it." : Utf8(git));
+    add("ninja", "ninja", !ninja.empty(), ninja.empty() ? (bundled ? "This copy is missing ninja." : "Install ninja.") : Utf8(ninja));
+
+    if (!bundled) {
+        fs::path git = WhichOnPath("git");
+        add("git", "git", !git.empty(),
+            git.empty() ? "Install git. The build applies the port patches with it." : Utf8(git));
 
 #ifndef _WIN32
-    bool vulkan = fs::exists("/usr/include/vulkan/vulkan.h");
-    if (!vulkan) {
-        if (fs::path p = WhichOnPath("pkg-config"); !p.empty()) vulkan = RunProcess({Utf8(p), "--exists", "vulkan"}, {}, {}, nullptr) == 0;
-    }
-    add("vulkan", "Vulkan headers and loader", vulkan,
-        "Install libvulkan-dev (Debian/Ubuntu), vulkan-loader-devel (Fedora), vulkan-headers and vulkan-icd-loader (Arch).");
-    bool glslang = fs::exists("/usr/include/glslang/Public/ShaderLang.h");
-    if (!glslang) {
-        if (fs::path p = WhichOnPath("pkg-config"); !p.empty()) glslang = RunProcess({Utf8(p), "--exists", "glslang"}, {}, {}, nullptr) == 0;
-    }
-    add("glslang", "glslang", glslang,
-        "Install glslang-dev (Debian/Ubuntu), glslang-devel (Fedora), glslang (Arch).");
-    add("zlib", "zlib headers", fs::exists("/usr/include/zlib.h"),
-        "Install zlib1g-dev (Debian/Ubuntu), zlib-devel (Fedora), zlib (Arch).");
+        bool vulkan = fs::exists("/usr/include/vulkan/vulkan.h");
+        if (!vulkan) {
+            if (fs::path p = WhichOnPath("pkg-config"); !p.empty()) vulkan = RunProcess({Utf8(p), "--exists", "vulkan"}, {}, {}, nullptr) == 0;
+        }
+        add("vulkan", "Vulkan headers and loader", vulkan,
+            "Install libvulkan-dev (Debian/Ubuntu), vulkan-loader-devel (Fedora), vulkan-headers and vulkan-icd-loader (Arch).");
+        bool glslang = fs::exists("/usr/include/glslang/Public/ShaderLang.h");
+        if (!glslang) {
+            if (fs::path p = WhichOnPath("pkg-config"); !p.empty()) glslang = RunProcess({Utf8(p), "--exists", "glslang"}, {}, {}, nullptr) == 0;
+        }
+        add("glslang", "glslang", glslang,
+            "Install glslang-dev (Debian/Ubuntu), glslang-devel (Fedora), glslang (Arch).");
+        add("zlib", "zlib headers", fs::exists("/usr/include/zlib.h"),
+            "Install zlib1g-dev (Debian/Ubuntu), zlib-devel (Fedora), zlib (Arch).");
 #endif
+
+#ifdef _WIN32
+        fs::path vswhere = fs::path(std::getenv("ProgramFiles(x86)") ? std::getenv("ProgramFiles(x86)") : "C:\\Program Files (x86)")
+            / "Microsoft Visual Studio/Installer/vswhere.exe";
+        add("vswhere", "Visual Studio with the C++ workload", fs::exists(vswhere),
+            "Install Visual Studio 2022 with \"Desktop development with C++\".");
+#endif
+    }
 
     std::vector<std::string> python = PythonCommand();
     add("python", "python3", !python.empty(),
-        python.empty() ? "Needed only to read a disc image (.iso). Install python3." : python[0], false);
-
-#ifdef _WIN32
-    fs::path vswhere = fs::path(std::getenv("ProgramFiles(x86)") ? std::getenv("ProgramFiles(x86)") : "C:\\Program Files (x86)")
-        / "Microsoft Visual Studio/Installer/vswhere.exe";
-    add("vswhere", "Visual Studio with the C++ workload", fs::exists(vswhere),
-        "Install Visual Studio 2022 with \"Desktop development with C++\".");
-#endif
+        python.empty() ? (bundled ? "This copy is missing python. It is needed only to read a disc image (.iso)."
+                                  : "Needed only to read a disc image (.iso). Install python3.")
+                       : python[0],
+        false);
     return out;
 }
 
 std::string InstallHint() {
+    if (!BundledToolchain().empty()) return {};
 #ifdef _WIN32
     return "Install Visual Studio 2022 with \"Desktop development with C++\", the \"C++ Clang tools for Windows\" and \"C++ CMake tools for Windows\" components, then install git. Reopen the launcher.";
 #else
@@ -888,9 +980,11 @@ void Pipeline::Run(Job job) {
             fs::path dest = job.support / "disc";
             fs::remove_all(dest, ec);
             fs::create_directories(dest, ec);
-            std::vector<std::string> python = PythonCommand();
+            std::vector<std::string> python = PythonCommand(src / "toolchain");
             if (python.empty()) {
-                Fail("Python 3 is needed to read a disc image. Install python3 and try again.");
+                const bool bundled = !BundledToolchain().empty() || BinHasCmake(src / "toolchain" / "bin");
+                Fail(bundled ? "This copy is missing python, which is needed to read a disc image."
+                             : "Python 3 is needed to read a disc image. Install python3 and try again.");
                 std::lock_guard<std::mutex> lock(mu_);
                 busy_ = false;
                 return;
@@ -942,7 +1036,13 @@ void Pipeline::Run(Job job) {
                 fs::remove_all(src / "out", ec);
             }
             SetStage(Stage::Building, "Translating and compiling");
-            Log("First build downloads SDL and compiles the game from your disc. It takes a while.");
+            fs::path copied_tc = src / "toolchain";
+            const bool bundled_build = BinHasCmake(copied_tc / "bin");
+            if (bundled_build) {
+                Log("This compile uses the tools in this copy and takes a while. It does not download SDL.");
+            } else {
+                Log("First build downloads SDL and compiles the game from your disc. It takes a while.");
+            }
             auto on_line = [this](const std::string& line) {
                 Log(line);
                 if (line.find("Recompiling") != std::string::npos) SetStage(Stage::Building, "Translating the executable");
@@ -957,18 +1057,75 @@ void Pipeline::Run(Job job) {
                     }
                 }
             };
+            std::vector<std::pair<std::string, std::string>> build_env;
+#ifdef _WIN32
+            build_env.push_back({"CI", "1"});
+#endif
+            if (bundled_build) {
+                std::error_code abs_ec;
+                fs::path tc_abs = fs::absolute(copied_tc, abs_ec);
+                if (abs_ec) tc_abs = copied_tc;
+                build_env.push_back({"RINGHOST_TOOLCHAIN", Utf8(tc_abs)});
+#ifdef _WIN32
+                std::wstring path_w = (tc_abs / "bin").wstring();
+                wchar_t path_buf[32767];
+                DWORD path_n = GetEnvironmentVariableW(L"PATH", path_buf, 32767);
+                if (path_n > 0 && path_n < 32767) {
+                    path_w.push_back(L';');
+                    path_w.append(path_buf, path_n);
+                }
+                build_env.push_back({"PATH", Utf8(fs::path(path_w))});
+#else
+                const char* old_path = std::getenv("PATH");
+                std::string bin = Utf8(tc_abs / "bin");
+                build_env.push_back({"PATH", old_path && *old_path ? bin + ":" + old_path : bin});
+#endif
+#ifdef _WIN32
+                fs::path base = DefaultSupportDir();
+                fs::path winsdk = base / "winsdk";
+                const bool have_sdk = DirHasEntries(winsdk / "VC" / "Tools" / "MSVC") &&
+                                      DirHasEntries(winsdk / "Windows Kits" / "10" / "Lib");
+                if (!have_sdk) {
+                    fs::path xwin = copied_tc / "xwin" / "xwin.exe";
+                    if (!IsFile(xwin)) {
+                        Fail("This copy is missing xwin.");
+                        std::lock_guard<std::mutex> lock(mu_);
+                        busy_ = false;
+                        return;
+                    }
+                    SetStage(Stage::Building, "Downloading the Windows SDK");
+                    Log("Downloading the Microsoft Windows SDK. This accepts that license. Later launches stay offline.");
+                    fs::path cache = base / "xwin-cache";
+                    int sdk = RunProcess({Utf8(xwin), "--accept-license", "--arch", "x86_64", "--cache-dir", Utf8(cache),
+                                           "splat", "--use-winsysroot-style", "--preserve-ms-arch-notation", "--output",
+                                           Utf8(winsdk)},
+                                          src, {}, on_line);
+                    if (sdk != 0) {
+                        Fail("The Windows SDK download failed.");
+                        std::lock_guard<std::mutex> lock(mu_);
+                        busy_ = false;
+                        return;
+                    }
+                    SetStage(Stage::Building, "Translating and compiling");
+                }
+                fs::path sdk_abs = fs::absolute(winsdk, abs_ec);
+                if (abs_ec) sdk_abs = winsdk;
+                build_env.push_back({"RINGHOST_WINSDK", Utf8(sdk_abs)});
+#endif
+            }
             int code = 0;
 #ifdef _WIN32
-            code = RunProcess({"cmd.exe", "/c", "build.bat"}, src, {{"CI", "1"}}, on_line);
+            code = RunProcess({"cmd.exe", "/c", "build.bat"}, src, build_env, on_line);
 #else
 #ifdef __APPLE__
-            code = RunProcess({"bash", "build.sh", "macos-release"}, src, {}, on_line);
+            code = RunProcess({"bash", "build.sh", "macos-release"}, src, build_env, on_line);
 #else
-            code = RunProcess({"bash", "build.sh", "linux-release"}, src, {}, on_line);
+            code = RunProcess({"bash", "build.sh", "linux-release"}, src, build_env, on_line);
 #endif
 #endif
             if (code != 0 || !fs::exists(binary)) {
-                Fail("The compile stopped. The last lines above are the reason. A missing tool, or a failed download of SDL, is the usual cause.");
+                Fail(bundled_build ? "The compile stopped. The last lines above are the reason. A missing tool is the usual cause."
+                                   : "The compile stopped. The last lines above are the reason. A missing tool, or a failed download of SDL, is the usual cause.");
                 std::lock_guard<std::mutex> lock(mu_);
                 busy_ = false;
                 return;
