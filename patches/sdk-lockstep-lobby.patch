@@ -1,0 +1,136 @@
+--- a/runtime/core/determinism.cpp
++++ b/runtime/core/determinism.cpp
+@@ -86,6 +86,7 @@
+ namespace d3d {
+ void VolatileSpans(void (*fn)(uint32_t va, uint32_t size, const char* name, void* user), void* user);
+ void BumpVblank();
++void LobbyPresent();  // XBE_LOCKSTEP_LOBBY
+ }  // namespace d3d
+ 
+ namespace xapi {
+@@ -2299,7 +2300,8 @@
+                 r.why = "hello timeout";
+                 LockstepStop(r, 0);
+             }
+-            if (seat == 1 || seat == 2) cfg.seat = seat;
++            if (seat >= 1 && seat <= 4) cfg.seat = seat;
++            cfg.mask = uint8_t(net::RelayMask() & 0x0F);
+         }
+         s = new net::Session(cfg);
+         if (relay) s->SetPipe(std::unique_ptr<net::Datagram>(relay.release()));
+@@ -2307,8 +2309,30 @@
+     return *s;
+ }
+ 
++bool RelayMatch() {
++    return C().lockstep && !(C().lock_peer && C().lock_peer[0]);
++}
++
++// The game has already been presenting. The match's frame 0 is the present
++// where the host's start notice is first seen, so we do not wait for inputs
++// from before that.
++uint64_t SessionFrame(uint64_t frame) {
++    if (!RelayMatch()) return frame;
++    static uint64_t origin = ~uint64_t{0};
++    if (origin == ~uint64_t{0}) origin = frame;
++    return frame >= origin ? frame - origin : 0;
++}
++
+ void LockstepStop(const net::Result& r, uint64_t frame) {
+     if (r.fail == net::Fail::None) return;
++    if (r.fail == net::Fail::Desync && RelayMatch()) {
++        static bool logged = false;
++        if (!logged) {
++            logged = true;
++            LOGE("det: lockstep hash mismatch at frame %llu", (unsigned long long)r.frame);
++        }
++        return;
++    }
+     if (r.fail == net::Fail::Desync) {
+         std::vector<Exc> none;
+         ReportDesync(r.frame, "total", r.local_hash, r.remote_hash, none);
+@@ -2318,22 +2342,32 @@
+     kernel::Shutdown(2);
+ }
+ 
+-void LockstepNote(uint64_t frame, uint64_t total) { LockstepStop(LockstepSession().NoteHash(frame, total), frame); }
++void LockstepNote(uint64_t frame, uint64_t total) {
++    // XBE_LOCKSTEP_LOBBY. A relay match does not enter lockstep until the host starts.
++    if (RelayMatch() && !net::RelayReady()) return;
++    LockstepStop(LockstepSession().NoteHash(SessionFrame(frame), total), SessionFrame(frame));
++}
+ 
+-void LockstepFinish(uint64_t frame) { LockstepStop(LockstepSession().Drain(frame), frame); }
++void LockstepFinish(uint64_t frame) {
++    if (RelayMatch() && !net::RelayReady()) return;
++    LockstepStop(LockstepSession().Drain(SessionFrame(frame)), SessionFrame(frame));
++}
+ 
+ uint64_t g_agreed_frame = ~uint64_t{0};
+ net::Report g_agreed[4];
+ 
+ void LockstepApply(int port, input::Pad& pad) {
++    // XBE_LOCKSTEP_LOBBY. A pad read before the host starts must not block.
++    if (RelayMatch() && !net::RelayReady()) return;
+     uint64_t frame = g_frame.load(std::memory_order_relaxed);
+     if (g_agreed_frame != frame) {
+         net::Report local;
+         if (C().lock_seat == 2 && C().port2_mash) local = ReportOf(MashPort2(frame));
+         else if (C().replay) local = ReportOf(ReplayAt(frame, 0));
+         else if (port == 0) local = ReportOf(Sample(pad));
+-        net::Result agreed = LockstepSession().Agree(frame, local);
+-        LockstepStop(agreed, frame);
++        uint64_t sample = SessionFrame(frame);
++        net::Result agreed = LockstepSession().Agree(sample, local);
++        LockstepStop(agreed, sample);
+         for (int i = 0; i < 4; i++) g_agreed[i] = agreed.pad[i];
+         g_agreed_frame = frame;
+     }
+--- a/runtime/xdk/d3d8.h
++++ b/runtime/xdk/d3d8.h
+@@ -12,5 +12,7 @@
+ void VolatileSpans(void (*fn)(uint32_t va, uint32_t size, const char* name, void* user), void* user);
+ // One vertical blank, used when the frame clock advances instead of the 60 Hz thread.
+ void BumpVblank();
++// Draw the frame already on screen. Does not call the present hook.
++void LobbyPresent();
+ 
+ }  // namespace d3d
+--- a/runtime/xdk/d3d8.cpp
++++ b/runtime/xdk/d3d8.cpp
+@@ -240,6 +240,8 @@
+ }
+ 
+ std::unique_ptr<gpu::Backend> g_backend;
++gpu::Surface g_lobby_front{};
++bool g_lobby_have = false;
+ bool g_frame_widened = true;  // gpu::Backend::WidensFrame of the backend CreateBackend made, before any wrapper
+ std::recursive_mutex g_lock;
+ 
+@@ -580,6 +582,13 @@
+ const gpu::State& State() { return g_state; }
+ std::recursive_mutex& Lock() { return g_lock; }
+ 
++// XBE_LOCKSTEP_LOBBY. The title thread calls this while it waits for the relay.
++void LobbyPresent() {
++    if (!g_lobby_have || !g_backend) return;
++    g_backend->Present(g_lobby_front);
++    app::Pace();
++}
++
+ void BumpVblank() {
+     if (!kVBlank) return;
+     uint32_t count = Dev(XDK_CDevice_VBlankCount) + 1;
+@@ -978,7 +987,11 @@
+             }
+         }
+     }
+-    if (g_backend) g_backend->Present(SurfaceOf(g_buffers[1]));
++    if (g_backend) {
++        g_lobby_front = SurfaceOf(g_buffers[1]);
++        g_lobby_have = true;
++        g_backend->Present(g_lobby_front);
++    }
+     // Guest clocks stay virtual under fixed step. The picture still waits out
+     // the fps cap, so a full-speed run is 60 Hz and the in-game timer matches
+     // the wall. Vsync, when it is on, waits as well; Pace is what holds 60

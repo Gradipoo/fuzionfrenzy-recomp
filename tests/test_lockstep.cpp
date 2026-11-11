@@ -77,7 +77,9 @@ static net::Report Local(int seat, uint64_t frame) {
     net::Report r;
     r.connected = 1;
     if (seat == 1) r.buttons = uint16_t(frame + 1);
-    else r.analog[0] = uint8_t(frame);
+    else if (seat == 2) r.analog[0] = uint8_t(frame);
+    else if (seat == 3) r.lx = int16_t(frame + 3);
+    else r.ly = int16_t(100 + frame);
     return r;
 }
 
@@ -195,6 +197,114 @@ static void TestHelloMismatch() {
     Expect(hello.load() == 2, "different seeds reject the hello");
 }
 
+struct Fan {
+    std::mutex mu[4];
+    std::vector<std::vector<uint8_t>> box[4];
+};
+
+struct FanPipe : net::Datagram {
+    Fan* fan = nullptr;
+    int me = 0;
+    bool Send(const uint8_t* data, int n) override {
+        if (!data || n <= 0 || !fan) return false;
+        for (int i = 0; i < 4; i++) {
+            if (i == me) continue;
+            std::lock_guard<std::mutex> lock(fan->mu[i]);
+            fan->box[i].emplace_back(data, data + n);
+        }
+        return true;
+    }
+    bool Recv(std::vector<std::vector<uint8_t>>& out) override {
+        if (!fan) return false;
+        std::lock_guard<std::mutex> lock(fan->mu[me]);
+        if (fan->box[me].empty()) return true;
+        out.insert(out.end(), fan->box[me].begin(), fan->box[me].end());
+        fan->box[me].clear();
+        return true;
+    }
+};
+
+static void TestFour() {
+    Fan fan;
+    std::unique_ptr<net::Session> seat[4];
+    for (int i = 0; i < 4; i++) {
+        net::Config c = Base(i + 1);
+        c.peers = 4;
+        seat[i] = std::make_unique<net::Session>(c);
+        auto pipe = std::make_unique<FanPipe>();
+        pipe->fan = &fan;
+        pipe->me = i;
+        seat[i]->SetPipe(std::move(pipe));
+    }
+    std::atomic<int> bad{0};
+    std::vector<net::Report> pads[4];
+    for (int i = 0; i < 4; i++) pads[i].resize(12 * 4);
+    std::thread threads[4];
+    for (int i = 0; i < 4; i++) {
+        threads[i] = std::thread([&, i] {
+            for (uint64_t f = 0; f < 12; f++) {
+                net::Result r = seat[i]->Agree(f, Local(i + 1, f));
+                if (r.fail != net::Fail::None) bad++;
+                else
+                    for (int p = 0; p < 4; p++) pads[i][size_t(f) * 4 + p] = r.pad[p];
+                if (seat[i]->NoteHash(f, 0x4000 + f).fail != net::Fail::None) bad++;
+            }
+            if (seat[i]->Drain(11).fail != net::Fail::None) bad++;
+        });
+    }
+    for (int i = 0; i < 4; i++) threads[i].join();
+    Expect(bad.load() == 0, "four seats agree");
+    int pad_bad = 0;
+    net::Report empty;
+    for (uint64_t f = 0; f < 12; f++) {
+        for (int p = 0; p < 4; p++) {
+            for (int s = 1; s < 4; s++)
+                if (!Same(pads[0][size_t(f) * 4 + p], pads[s][size_t(f) * 4 + p])) pad_bad++;
+            if (f < 2) {
+                if (!Same(pads[0][size_t(f) * 4 + p], empty)) pad_bad++;
+            } else if (!Same(pads[0][size_t(f) * 4 + p], Local(p + 1, f - 2))) {
+                pad_bad++;
+            }
+        }
+    }
+    Expect(pad_bad == 0, "four seat pads");
+}
+
+static void TestMaskPair() {
+    Link link;
+    net::Config ca = Base(1);
+    net::Config cb = Base(2);
+    ca.peers = 4;
+    cb.peers = 4;
+    ca.mask = 0x03;
+    cb.mask = 0x03;
+    ca.timeout_ms = 400;
+    cb.timeout_ms = 400;
+    ca.hello_ms = 400;
+    cb.hello_ms = 400;
+    net::Session a(ca);
+    net::Session b(cb);
+    Wire(link, a, b);
+    std::atomic<int> bad{0};
+    std::thread ta([&] {
+        for (uint64_t f = 0; f < 4; f++) {
+            net::Result r = a.Agree(f, Local(1, f));
+            if (r.fail != net::Fail::None) bad++;
+            else if (f >= 2 && (!Same(r.pad[0], Local(1, f - 2)) || !Same(r.pad[1], Local(2, f - 2)) ||
+                                r.pad[2].connected || r.pad[3].connected))
+                bad++;
+        }
+    });
+    std::thread tb([&] {
+        for (uint64_t f = 0; f < 4; f++) {
+            if (b.Agree(f, Local(2, f)).fail != net::Fail::None) bad++;
+        }
+    });
+    ta.join();
+    tb.join();
+    Expect(bad.load() == 0, "mask of seats 1 and 2");
+}
+
 static void TestUdpTimeout() {
     net::Config c = Base(1);
     c.bind = "127.0.0.1:0";
@@ -239,6 +349,8 @@ int main() {
     TestMatch(1);
     TestDesync();
     TestHelloMismatch();
+    TestFour();
+    TestMaskPair();
     TestUdpTimeout();
     TestUdpPair();
     if (g_fails) {
