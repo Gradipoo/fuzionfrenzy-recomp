@@ -36,14 +36,19 @@ fi
 
 # toolchain
 echo "[1/3] Toolchain"
-MISSING=""
-for tool in clang clang++ cmake ninja; do
-    command -v "$tool" >/dev/null 2>&1 || MISSING="${MISSING} ${tool}"
-done
-if [ -n "$MISSING" ]; then
-    echo "  missing:${MISSING}" >&2
-    echo "  Install clang, cmake and ninja, then run this again." >&2
-    exit 1
+if [ -n "${RINGHOST_TOOLCHAIN:-}" ]; then
+    PATH="${RINGHOST_TOOLCHAIN}/bin:${PATH}"
+    export PATH
+else
+    MISSING=""
+    for tool in clang clang++ cmake ninja; do
+        command -v "$tool" >/dev/null 2>&1 || MISSING="${MISSING} ${tool}"
+    done
+    if [ -n "$MISSING" ]; then
+        echo "  missing:${MISSING}" >&2
+        echo "  Install clang, cmake and ninja, then run this again." >&2
+        exit 1
+    fi
 fi
 clang++ --version | head -n 1
 if [ "$(uname -s)" = "Darwin" ]; then
@@ -51,17 +56,41 @@ if [ "$(uname -s)" = "Darwin" ]; then
         echo "  macOS build is native arm64. This machine is $(uname -m)." >&2
         exit 1
     fi
-    if [ ! -e /opt/homebrew/lib/libusb-1.0.dylib ] && [ ! -e /usr/local/lib/libusb-1.0.dylib ]; then
-        echo "  libusb is missing. A wired Xbox pad needs it (userspace, no kernel extension)." >&2
-        echo "  brew install libusb" >&2
-        exit 1
+    if [ -z "${RINGHOST_TOOLCHAIN:-}" ]; then
+        if [ ! -e /opt/homebrew/lib/libusb-1.0.dylib ] && [ ! -e /usr/local/lib/libusb-1.0.dylib ]; then
+            echo "  libusb is missing. A wired Xbox pad needs it (userspace, no kernel extension)." >&2
+            echo "  brew install libusb" >&2
+            exit 1
+        fi
     fi
     ./tools/apply-macos-sdk.sh
 fi
 
 # symbols
 echo "[2/3] XDK symbols"
-cmake --preset "${PRESET}" > /dev/null
+if [ -n "${RINGHOST_TOOLCHAIN:-}" ]; then
+    CONFIGURE_ARGS=(
+        -DFETCHCONTENT_FULLY_DISCONNECTED=ON
+        -DFETCHCONTENT_SOURCE_DIR_SDL3="${RINGHOST_TOOLCHAIN}/third_party/SDL"
+        -DFETCHCONTENT_SOURCE_DIR_IMGUI="${RINGHOST_TOOLCHAIN}/third_party/imgui"
+        -DFETCHCONTENT_SOURCE_DIR_ZYDIS="${RINGHOST_TOOLCHAIN}/third_party/zydis"
+        -DFETCHCONTENT_SOURCE_DIR_TOMLPLUSPLUS="${RINGHOST_TOOLCHAIN}/third_party/tomlplusplus"
+        -DCMAKE_PREFIX_PATH="${RINGHOST_TOOLCHAIN}/prefix"
+    )
+    if [ "$(uname -s)" = "Linux" ]; then
+        CONFIGURE_ARGS+=(
+            -DCMAKE_EXE_LINKER_FLAGS="-static-libstdc++ -static-libgcc"
+            -DCMAKE_BUILD_RPATH="${RINGHOST_TOOLCHAIN}/prefix/lib"
+        )
+    elif [ "$(uname -s)" = "Darwin" ]; then
+        CONFIGURE_ARGS+=(
+            -DCMAKE_BUILD_RPATH="${RINGHOST_TOOLCHAIN}/prefix/lib"
+        )
+    fi
+    cmake --preset "${PRESET}" "${CONFIGURE_ARGS[@]}" > /dev/null
+else
+    cmake --preset "${PRESET}" > /dev/null
+fi
 if [ -f config/game.toml ]; then
     echo "      config/game.toml already present"
 else

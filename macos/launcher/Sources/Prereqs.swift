@@ -8,10 +8,35 @@ struct Prereq: Identifiable, Equatable {
 }
 
 enum PrereqScan {
+    /// Bundled player tools, before the port is copied out of the app.
+    static var bundleToolchain: URL? {
+        guard let root = Bundle.main.resourceURL?.appendingPathComponent("port/toolchain", isDirectory: true) else {
+            return nil
+        }
+        var isDir: ObjCBool = false
+        if FileManager.default.fileExists(atPath: root.path, isDirectory: &isDir), isDir.boolValue {
+            return root
+        }
+        return nil
+    }
+
+    static var toolchainBin: String? {
+        guard let bin = bundleToolchain?.appendingPathComponent("bin", isDirectory: true) else { return nil }
+        var isDir: ObjCBool = false
+        if FileManager.default.fileExists(atPath: bin.path, isDirectory: &isDir), isDir.boolValue {
+            return bin.path
+        }
+        return nil
+    }
+
     static var buildPath: String {
         let prefix = "/opt/homebrew/bin:/usr/local/bin"
         let current = ProcessInfo.processInfo.environment["PATH"] ?? "/usr/bin:/bin:/usr/sbin:/sbin"
-        return prefix + ":" + current
+        let base = prefix + ":" + current
+        if let bin = toolchainBin {
+            return bin + ":" + base
+        }
+        return base
     }
 
     static func scan() -> [Prereq] {
@@ -32,10 +57,21 @@ enum PrereqScan {
             detail: clang ?? "Run xcode-select --install, then open this again."
         ))
 
-        items.append(tool("git", title: "git", hint: "Comes with the Command Line Tools. The port patch and the SDL download both use it."))
+        if toolchainBin != nil {
+            let git = which("git")
+            items.append(Prereq(id: "git", title: "git", ok: true, detail: git ?? "Included with this copy."))
+        } else {
+            items.append(tool("git", title: "git", hint: "Comes with the Command Line Tools. The port patch and the SDL download both use it."))
+        }
         items.append(cmake())
-        items.append(tool("ninja", title: "ninja", hint: "brew install ninja"))
-        items.append(tool("python3", title: "python3", hint: "Used to read an Xbox disc image. macOS or Homebrew both work."))
+        items.append(tool("ninja", title: "ninja", hint: toolchainBin != nil ? "This copy is missing ninja." : "brew install ninja"))
+        items.append(tool(
+            "python3",
+            title: "python3",
+            hint: toolchainBin != nil
+                ? "Used to read an Xbox disc image. It comes with the Command Line Tools."
+                : "Used to read an Xbox disc image. macOS or Homebrew both work."
+        ))
         items.append(vulkan())
         items.append(glslang())
         items.append(libusb())
@@ -55,7 +91,8 @@ enum PrereqScan {
 
     private static func cmake() -> Prereq {
         guard let path = which("cmake") else {
-            return Prereq(id: "cmake", title: "cmake 3.25 or newer", ok: false, detail: "brew install cmake")
+            let hint = toolchainBin != nil ? "This copy is missing cmake." : "brew install cmake"
+            return Prereq(id: "cmake", title: "cmake 3.25 or newer", ok: false, detail: hint)
         }
         let text = run(path, ["--version"])
         let version = text.split(separator: "\n").first.flatMap { line -> String? in
@@ -72,10 +109,12 @@ enum PrereqScan {
     }
 
     private static func vulkan() -> Prereq {
-        var candidates = [
-            "/opt/homebrew/etc/vulkan/icd.d/MoltenVK_icd.json",
-            "/usr/local/etc/vulkan/icd.d/MoltenVK_icd.json",
-        ]
+        var candidates: [String] = []
+        if let root = bundleToolchain?.path {
+            candidates.append(root + "/prefix/etc/vulkan/icd.d/MoltenVK_icd.json")
+        }
+        candidates.append("/opt/homebrew/etc/vulkan/icd.d/MoltenVK_icd.json")
+        candidates.append("/usr/local/etc/vulkan/icd.d/MoltenVK_icd.json")
         if let sdk = ProcessInfo.processInfo.environment["VULKAN_SDK"], !sdk.isEmpty {
             candidates.append(sdk + "/share/vulkan/icd.d/MoltenVK_icd.json")
             candidates.append(sdk + "/etc/vulkan/icd.d/MoltenVK_icd.json")
@@ -87,15 +126,19 @@ enum PrereqScan {
             id: "vulkan",
             title: "MoltenVK",
             ok: false,
-            detail: "brew install molten-vk vulkan-loader vulkan-headers. A LunarG Vulkan SDK works too, with VULKAN_SDK set."
+            detail: toolchainBin != nil
+                ? "This copy is missing MoltenVK."
+                : "brew install molten-vk vulkan-loader vulkan-headers. A LunarG Vulkan SDK works too, with VULKAN_SDK set."
         )
     }
 
     private static func libusb() -> Prereq {
-        let candidates = [
-            "/opt/homebrew/lib/libusb-1.0.dylib",
-            "/usr/local/lib/libusb-1.0.dylib",
-        ]
+        var candidates: [String] = []
+        if let root = bundleToolchain?.path {
+            candidates.append(root + "/prefix/lib/libusb-1.0.a")
+        }
+        candidates.append("/opt/homebrew/lib/libusb-1.0.dylib")
+        candidates.append("/usr/local/lib/libusb-1.0.dylib")
         if let found = candidates.first(where: { FileManager.default.fileExists(atPath: $0) }) {
             return Prereq(id: "libusb", title: "libusb", ok: true, detail: found)
         }
@@ -103,25 +146,37 @@ enum PrereqScan {
             id: "libusb",
             title: "libusb",
             ok: false,
-            detail: "brew install libusb. A wired Xbox pad is opened through it. No kernel extension."
+            detail: toolchainBin != nil
+                ? "This copy is missing libusb."
+                : "brew install libusb. A wired Xbox pad is opened through it. No kernel extension."
         )
     }
 
+    private static func glslangLibs(at prefix: String) -> Bool {
+        let header = prefix + "/include/glslang/Public/ShaderLang.h"
+        guard FileManager.default.fileExists(atPath: header) else { return false }
+        let names = ["libglslang", "libSPIRV", "libglslang-default-resource-limits"]
+        return names.allSatisfy { name in
+            let lib = prefix + "/lib/" + name
+            return FileManager.default.fileExists(atPath: lib + ".a")
+                || FileManager.default.fileExists(atPath: lib + ".dylib")
+        }
+    }
+
     private static func glslang() -> Prereq {
-        let prefixes = ["/opt/homebrew", "/usr/local"]
-        for prefix in prefixes {
-            let header = prefix + "/include/glslang/Public/ShaderLang.h"
-            let libs = ["libglslang.dylib", "libSPIRV.dylib", "libglslang-default-resource-limits.dylib"]
-            let libsOK = libs.allSatisfy { FileManager.default.fileExists(atPath: prefix + "/lib/" + $0) }
-            if FileManager.default.fileExists(atPath: header), libsOK {
-                return Prereq(id: "glslang", title: "glslang", ok: true, detail: prefix)
-            }
+        if let prefix = bundleToolchain?.appendingPathComponent("prefix").path, glslangLibs(at: prefix) {
+            return Prereq(id: "glslang", title: "glslang", ok: true, detail: prefix)
+        }
+        for prefix in ["/opt/homebrew", "/usr/local"] where glslangLibs(at: prefix) {
+            return Prereq(id: "glslang", title: "glslang", ok: true, detail: prefix)
         }
         return Prereq(
             id: "glslang",
             title: "glslang",
             ok: false,
-            detail: "brew install glslang. Shaders compile with it. DXC from a Vulkan SDK is optional."
+            detail: toolchainBin != nil
+                ? "This copy is missing glslang."
+                : "brew install glslang. Shaders compile with it. DXC from a Vulkan SDK is optional."
         )
     }
 

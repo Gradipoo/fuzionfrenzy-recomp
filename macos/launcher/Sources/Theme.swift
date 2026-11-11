@@ -9,10 +9,15 @@ enum Arena {
     static let ghost = Color(red: 0.55, green: 0.64, blue: 0.78)
     static let hud = Color(red: 0.28, green: 0.45, blue: 0.82)
 
-    static let installCommands = """
-    xcode-select --install
-    brew install cmake ninja glslang libusb molten-vk vulkan-loader vulkan-headers
-    """
+    static var installCommands: String {
+        if PrereqScan.toolchainBin != nil {
+            return "xcode-select --install"
+        }
+        return """
+        xcode-select --install
+        brew install cmake ninja glslang libusb molten-vk vulkan-loader vulkan-headers
+        """
+    }
 }
 
 extension Font {
