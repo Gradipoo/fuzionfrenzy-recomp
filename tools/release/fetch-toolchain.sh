@@ -350,12 +350,19 @@ install_prefix() {
         if [ ! -f "$PREFIX/lib/libusb-1.0.a" ] || [ ! -f "$PREFIX/include/libusb-1.0/libusb.h" ]; then
             fetch_extract "$LIBUSB_URL"
             one_top "$LIBUSB_URL"
+            # libtool splits an install prefix on spaces. Ring Host.app has one,
+            # so install into a temporary prefix and copy the static library.
+            usb_stage=$(mktemp -d)
             (
                 cd "$ONE_TOP"
-                CFLAGS="-fPIC" ./configure --prefix="$PREFIX" --enable-static --disable-shared
+                CFLAGS="-fPIC" ./configure --prefix="$usb_stage" --enable-static --disable-shared
                 make -j"$JOBS"
                 make install
             )
+            mkdir -p "$PREFIX/lib" "$PREFIX/include"
+            cp -a "$usb_stage/lib/libusb-1.0.a" "$PREFIX/lib/"
+            cp -a "$usb_stage/include/libusb-1.0" "$PREFIX/include/"
+            rm -rf "$usb_stage"
             rm -f "$PREFIX/lib/libusb-1.0.dylib"
         fi
         if [ ! -f "$PREFIX/lib/libusb-1.0.a" ] || [ ! -f "$PREFIX/include/libusb-1.0/libusb.h" ]; then
