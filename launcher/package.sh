@@ -131,6 +131,11 @@ if [ "$NAME" = "RingHost-linux-x64" ]; then
         echo "tar --zstd failed. Install zstd." >&2
         exit 1
     fi
+    archive_bytes=$(wc -c < "$ARCHIVE" | tr -d ' ')
+    if [ "$archive_bytes" -ge 2147483648 ]; then
+        echo "archive is $archive_bytes bytes. GitHub's limit is 2147483648." >&2
+        exit 1
+    fi
 else
     py=python3
     if ! command -v python3 >/dev/null 2>&1; then
