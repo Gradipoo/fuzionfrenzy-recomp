@@ -44,6 +44,7 @@ its own native binary and compares that hash to the same file.
 (`macos/launcher/package-dmg.sh`), the Linux launcher, and the Windows
 launcher (`launcher/package.sh`). The GitHub Release gets
 `RingHost-macos.dmg`, `RingHost-macos.zip`, `RingHost-linux-x64.tar.zst`,
-and `RingHost-win64.zip`. Each archive is the launcher plus the port
-sources. The package scripts refuse a disc image, an xbe, recompiled guest
-sources, or a game binary.
+and `RingHost-win64.zip`. The packs include the toolchain from
+`tools/release/fetch-toolchain.sh`, with the launcher and the port sources.
+The package scripts refuse a disc image, an xbe, recompiled guest sources,
+or a game binary.

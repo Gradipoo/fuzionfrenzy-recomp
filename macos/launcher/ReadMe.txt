@@ -14,15 +14,17 @@ your Mac. The built game stays in:
 An older build under Application Support/FuzionFrenzy is left where it is.
 Point Ring Host at the same disc folder and it compiles again.
 
-You need an Apple Silicon Mac, Xcode Command Line Tools, and git, cmake,
-ninja, python3, MoltenVK, and glslang. Homebrew is the straightforward way
-to get the libraries:
+You need an Apple Silicon Mac and Xcode Command Line Tools:
 
   xcode-select --install
-  brew install cmake ninja glslang libusb molten-vk vulkan-loader vulkan-headers
 
-The first compile also downloads SDL and needs a network connection. Later
-launches reuse the build until this app's version changes.
+That dialog also provides git and python3. Apple's clang and SDK cannot be
+redistributed. This image includes CMake, Ninja, MoltenVK, the Vulkan loader
+and headers, glslang, libusb, and the SDL, imgui, zydis, and tomlplusplus
+sources. No Homebrew.
+
+The first compile is local. It does not clone SDL. Later launches reuse the
+build until this app's version changes.
 
 The app is ad-hoc signed. Notarization is future work, so a copy that
 arrived from the internet may need a right-click Open the first time.

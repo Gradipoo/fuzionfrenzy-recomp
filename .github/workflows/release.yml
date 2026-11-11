@@ -50,7 +50,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            clang g++ cmake ninja-build python3 git pkg-config zstd \
+            clang g++ cmake ninja-build python3 git unzip pkg-config zstd \
             libx11-dev libxext-dev libxrandr-dev libxcursor-dev libxi-dev libxfixes-dev \
             libwayland-dev libwayland-bin wayland-protocols libxkbcommon-dev libdecor-0-dev
 
@@ -119,17 +119,13 @@ jobs:
           cat > notes.md <<'EOF'
           These files are launchers for Linux, Windows, and Apple Silicon. They do not contain the game. You supply your own USA disc, and the launcher compiles it on your machine.
           .
-          RingHost-macos.dmg and RingHost-macos.zip are the Mac app. The signature is ad-hoc, so a copy from a browser may need a right-click Open the first time. You need Xcode Command Line Tools and:
+          RingHost-macos.dmg and RingHost-macos.zip are the Mac app. The signature is ad-hoc, so a copy from a browser may need a right-click Open the first time. You need Xcode Command Line Tools (xcode-select --install). The compiler libraries and CMake are in the app. No Homebrew.
           .
-            brew install cmake ninja glslang libusb molten-vk vulkan-loader vulkan-headers
+          RingHost-linux-x64.tar.zst is the Linux launcher. It includes the compiler and libraries. You need a Vulkan graphics driver. No other packages.
           .
-          RingHost-linux-x64.tar.zst is the Linux launcher. On Debian or Ubuntu:
+          RingHost-win64.zip is the Windows launcher. It includes the compiler. The first launch downloads the Microsoft Windows SDK into %LOCALAPPDATA%\RingHost\winsdk and accepts that SDK license. Later launches stay offline. No Visual Studio install.
           .
-            sudo apt install clang cmake ninja-build git python3 libvulkan-dev glslang-dev zlib1g-dev
-          .
-          RingHost-win64.zip is the Windows launcher. Install Visual Studio 2022 with Desktop development with C++, C++ Clang tools for Windows, and C++ CMake tools for Windows, plus git.
-          .
-          The first compile downloads SDL and needs a network connection.
+          The first compile is local and takes a while. Later launches reuse the build until this copy's version changes.
           EOF
           sed -i 's/^\.$//' notes.md
           files=$(find dist -type f | sort)

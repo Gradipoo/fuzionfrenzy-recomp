@@ -78,6 +78,8 @@ if [ ! -f "$PORT/build.sh" ] || [ ! -f "$PORT/sdk/runtime/kernel/memory.cpp" ] |
     exit 1
 fi
 
+sh "$ROOT/tools/release/fetch-toolchain.sh" "$PORT/toolchain"
+
 echo "ad-hoc signing"
 codesign --force --sign - "$APP/Contents/MacOS/RingHostLauncher"
 codesign --force --sign - "$APP"
