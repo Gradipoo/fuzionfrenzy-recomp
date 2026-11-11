@@ -1,37 +1,67 @@
 # Fuzion Frenzy - Static Recompilation
 
-An unofficial native PC port of the original Xbox release of *Fuzion Frenzy* (USA), produced by
-statically recompiling the game's x86 XBE with the
+This is a fork of the [unofficial native PC port](https://github.com/abilliontokens/fuzionfrenzy-recomp)
+of the original Xbox release of *Fuzion Frenzy* (USA). It uses the same USA XBE, SHA-1
+`c6fb6082900532cde5fa8dbb7de8dfa202f0fdad`. This repository still contains no game code and no game
+assets. You supply your own legally acquired disc.
+
+The port statically recompiles that XBE with the
 [XboxXBERecomp SDK](https://github.com/abilliontokens/XboxXBERecomp) fork (vendored in `sdk/` as a
-submodule on branch `fuzion-frenzy-port`). Windows uses Direct3D 12 and XAudio2; Linux and macOS
-are native Vulkan and SDL3 builds - no Wine, and the Mac build is arm64, not Rosetta. macOS draws
-through MoltenVK.
+submodule on branch `fuzion-frenzy-port`). Windows uses Direct3D 12 and XAudio2. Linux and macOS are
+native Vulkan and SDL3 builds. The Mac build is arm64, through MoltenVK.
 
-**Status: playable on Linux.** Both binaries build from this repository on Linux (`FuzionFrenzy`
-for Linux, `FuzionFrenzy.exe` cross-compiled for Windows). The Linux build boots, plays the intro
-movie, runs the menus and character select, and reaches the minigames and plays them, at a mean of
-59.9 fps over 199 s of driven play (worst second 29.9). Characters render skinned and textured, and
-the in-game clock runs at real time.
+## What this fork adds
 
-The Windows exe is cross-compiled here and has **never been run on Windows**; under Wine 11.20 it
-reaches a minigame in play with zero shader failures. Audio has never been verified. One arena's
-floor shades flat white - a known, unfixed defect recorded in `docs/render-defect.md`.
+### Apple Silicon and Ring Host
 
-On Apple Silicon the same tree builds natively (arm64, MoltenVK, no Rosetta). It boots, opens a
-borderless window, and draws past the point where MoltenVK used to lose the device (about 53
-seconds, one command buffer holding ~8500 draws). Draws flush every 4096, and that submit waits.
-A scripted run stayed up through 190 seconds. From 75 seconds the heavy scene averaged 58 fps
-(median about 59) at up to about 12800 draws, with a few seconds near 48 when host draw passed
-the vsync budget. Swapchain pictures, deleted after they were looked at, showed character
-select, the main menu, a get-ready screen, a minigame in progress, and a round-over results
-screen. The window blit is a single texture. `HANDOFF.md` has the run notes, the power numbers,
-and the ports that were read for the fault.
+The Mac build is native arm64 and draws through MoltenVK. The SwiftUI launcher in `macos/launcher`
+checks the disc SHA-1 and builds RingHost on the player's machine.
 
-The exact state, with evidence, is in `docs/status.md`; the first boot and what it proved is in
+![Play](docs/readme/ringhost-play.png)
+
+Play. The disc check names the USA release.
+
+![Picture](docs/readme/ringhost-picture.png)
+
+Picture. Window mode and size. More settings sit further down the page.
+
+![Controls](docs/readme/ringhost-controls.png)
+
+Controls. The keyboard map is fixed.
+
+![Disc](docs/readme/ringhost-disc.png)
+
+Disc. This Mac already has a folder selected. The label is that folder, with the home directory shortened.
+
+### Menus and a minigame
+
+Upstream still lists the picture as not reached. On this fork a Mac replay gets through the menus
+and into a minigame. These frames are output of this port from a legally owned USA disc. They are
+not files taken from the disc.
+
+![Character select](docs/readme/game-character-select.png)
+
+Character select.
+
+![Twisted System](docs/readme/game-minigame.png)
+
+Twisted System, in play.
+
+### One simulation, then lockstep
+
+Fixed step and openlibm keep one simulation. The gameplay2 hash matches across Mac and Linux: 7766
+frames, frame 7765 total `6a609a6637cce6ba`, exit sim tick 25350. Delay lockstep and a local UDP
+relay sit on that match. The flags and the relay are in
+[docs/netplay-determinism.md](docs/netplay-determinism.md) and
+[docs/internet-relay.md](docs/internet-relay.md).
+
+Windows has been run in a Parallels ARM VM, as the x64 `FuzionFrenzy.exe`. Flags-off gameplay2
+matches through frame 162 and diverges in `.data` at frame 163 (Mac qpc 2479, Windows qpc 2478).
+That run is not a playable Windows build. Audio on Windows is still unverified.
+
+The Linux build still plays the menus and the minigames. One arena floor shades flat white. That
+defect is in `docs/render-defect.md`. Broader evidence is in `docs/status.md`. The first boot is in
 `docs/boot-crash.md`.
-
-This repository contains **no game code and no game assets**. It holds tooling, configuration and
-host-side glue only. You must supply your own legally acquired copy of the disc.
 
 ## The game
 
@@ -83,17 +113,18 @@ two real XDK builds (`ret` identical in 171/171 names, `regs` in 175/175, byte l
 | Recompilation | done - 10,587 functions, 633,913 instructions, 2,165,441 of 2,368,328 code bytes (91.4%) |
 | Kernel import coverage (`tools/kernel_coverage.py`) | done - 111 of 111 (`docs/kernel-coverage.md`) |
 | Native Linux build (Vulkan + SDL3) | done - builds, links, boots |
-| Native macOS arm64 build (Vulkan via MoltenVK + SDL3) | boots, menus, and a minigame; heavy scenes ~58 fps. A local launcher builds the game from the player's disc (`HANDOFF.md`) |
-| Windows build (D3D12 + XAudio2), cross-compiled on Linux | done - builds and links; **never run on Windows** |
-| Picture on screen | **not reached** |
-| Audio | **not reached** |
-| F1 / F2 panels in play | **not verified** - the code is carried over whole but has never been seen running |
+| Native macOS arm64 build (Vulkan via MoltenVK + SDL3) | menus and a minigame. The launcher in `macos/launcher` builds RingHost from the player's disc |
+| Windows build (D3D12 + XAudio2), cross-compiled on Linux | builds and links. An x64 exe has been run in a Parallels ARM VM. Flags-off gameplay2 diverges at frame 163. Audio unverified |
+| Picture on screen | reached on Mac (menus and Twisted System, above). The Linux build reaches the menus and the minigames |
+| Audio | Windows still unverified. The Mac frames above were captured with sound muted |
+| F1 / F2 panels in play | F1 is the settings panel, and relay Host and Join live there. F2 is the frame-time graph. Neither panel was opened for the frames above |
 
 ## Controls
 
 The game only ever reads an Xbox pad, so the host translates keyboard and mouse into one on port 0,
 and controllers are picked up in the order they are plugged in. This is the host layer's mapping as
-`src/common/input_kbm.cpp` implements it. **None of it has been exercised in this game yet.**
+`src/common/input_kbm.cpp` implements it. Recorded play on this fork uses it, including the replay
+behind the frames above.
 
 | Keyboard / mouse | Pad |
 | --- | --- |
@@ -118,8 +149,8 @@ keyboard and the mouse and the game sees neither.
 ## Settings, F1 / F2 overlay
 
 **F1** opens the host settings panel (display mode, resolution, aspect ratio, ultrawide, vsync, frame
-cap, render scale, anisotropic filtering, HDR on Windows, and a Cheats section) and **F2** the
-frame-time graph. **F3** captures a frame when `XBE_CAPTURE_DIR` is set. In the F1 panel the
+cap, render scale, anisotropic filtering, HDR on Windows, relay Host and Join, and a Cheats section)
+and **F2** the frame-time graph. **F3** captures a frame when `XBE_CAPTURE_DIR` is set. In the F1 panel the
 **Resolution** control is greyed out in borderless mode - borderless always follows the display it is
 on - and is editable in windowed and fullscreen, with the stored value surviving a mode switch.
 
@@ -255,40 +286,22 @@ You supply the game: the USA Xbox release, as either
    Mac process is named Ring Host so the dock and the window are not the game's title.
    The log prefix on Mac is `ringhost`.
 
-   A release run is quiet unless something fails. `XBE_PERF=1` prints a `perf:` line once a
-   second (the macOS patch logs those at report level, so they show up in a Release build).
-   `XBE_MUTE=1` silences SDL audio. How far a run gets, and what is still open, is in
-   `HANDOFF.md`.
+   `XBE_PERF=1` prints a `perf:` line once a second. `XBE_MUTE=1` silences SDL audio.
 
-   `macos/launcher/package-dmg.sh` builds a player app and a compressed disk image at
-   `macos/launcher/dist/` (gitignored): `Ring Host.app` and `RingHost-macos.dmg`. The
-   image holds the SwiftUI launcher and this port's sources. The player points it at
-   their own USA disc image or extracted folder. The launcher checks the `default.xbe`
-   SHA-1, copies the port into `~/Library/Application Support/RingHost`, applies the
-   Darwin patch, and runs `./build.sh macos-release` there. The game binary
-   (`RingHost`) and `settings.toml` stay in that folder and are rebuilt when the port
-   version inside the app changes. An older `Application Support/FuzionFrenzy` folder
-   is not reused. MoltenVK, cmake, and ninja are detected, with the Homebrew line above
-   when one is missing. The first compile downloads SDL. The app is ad-hoc signed.
-   Notarization is future work. The icon is drawn by the package script: a black
-   field, a yellow rule, and a yellow ring.
+   `macos/launcher/package-dmg.sh` builds the player app and a compressed disk image in
+   `macos/launcher/dist/` (gitignored): `Ring Host.app` and `RingHost-macos.dmg`. The image
+   holds the launcher and this port's sources. It does not hold a game binary. What the
+   launcher shows is under "What this fork adds" above. The app is ad-hoc signed.
 
-   The window is black. The wordmark is RING / HOST in Helvetica Neue Condensed Black,
-   with a yellow rule that ends in a plain ring. Menu type is Helvetica Neue with a
-   short same-color shadow, about one old 480p pixel, so it is slightly soft and still
-   readable. The current row is white and the others are a dusty blue, with faint blue
-   digits along the right edge. The drawing is original. The pages are play, picture,
-   sound, controls, and disc.
+   The same `settings.toml`, `logs/`, and `hdd/` as on Linux are created beside the executable.
+   HDR settings are ignored.
 
-   Picture writes `display_mode`, size, `fps_cap` (30 is the low-power cap, 60 is the
-   default), `vsync`, `render_percent`, `aspect_ratio`, the ultrawide flag (extra-wide
-   drawing still waits on `SIMSBO_HORPLUS`), and `anisotropic_filtering`. Sound off sets
-   `XBE_MUTE=1`. The scripted pad is off unless chosen, and then sets `FUZION_AUTOSTART=1`
-   without touching `FUZION_AUTOSTART_PLAY_MS`. System link writes `join_ip`. The keyboard
-   map is the table above and is shown as fixed. HDR stays off. Disc movies stay 640×480.
+## Releases
 
-   The same `settings.toml`, `logs/` and `hdd/` as on Linux are created beside the executable.
-   HDR settings are ignored. Keyboard and pad mapping is the table above.
+The initial release, [v0.1.0](https://github.com/Gradipoo/fuzionfrenzy-recomp/releases/tag/v0.1.0),
+carries `RingHost-macos.zip`: the ad-hoc-signed Ring Host launcher and this port's sources, with no
+game binary and no game data. Linux and Windows have no launcher in this repository, so those builds
+stay source-only.
 
 ## Working on the port
 

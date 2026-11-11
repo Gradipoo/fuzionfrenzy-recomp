@@ -1,0 +1,46 @@
+--- a/runtime/core/determinism.cpp
++++ b/runtime/core/determinism.cpp
+@@ -12,6 +12,7 @@
+ #include "det/run_queue.h"
+ #include "app/app.h"
+ #include "net/lockstep.h"
++#include "net/relay_client.h"
+ #include "core/log.h"
+ #include "kernel/kernel.h"
+ #include "kernel/memory.h"
+@@ -2265,6 +2266,13 @@
+ }
+ }  // namespace
+ 
++// XBE_LOCKSTEP_RELAY
++bool LockstepEnabled() { return C().lockstep; }
++
++bool LockstepPeerSet() { return C().lock_peer && C().lock_peer[0]; }
++
++void LockstepStop(const net::Result& r, uint64_t frame);
++
+ net::Session& LockstepSession() {
+     static net::Session* s = nullptr;
+     if (!s) {
+@@ -2280,7 +2288,21 @@
+         cfg.width = st.width;
+         cfg.height = st.height;
+         cfg.ultrawide = st.ultrawide ? 1 : 0;
++        // XBE_LOCKSTEP_RELAY. A direct peer keeps the UDP socket.
++        std::unique_ptr<net::RelayClient> relay;
++        if (C().lockstep && !(C().lock_peer && C().lock_peer[0])) {
++            int seat = 0;
++            LOGR("det: lockstep waiting for the relay lobby");
++            if (!net::WaitRelay(&seat, &relay, C().lock_hello_ms) || !relay) {
++                net::Result r;
++                r.fail = net::Fail::Hello;
++                r.why = "hello timeout";
++                LockstepStop(r, 0);
++            }
++            if (seat == 1 || seat == 2) cfg.seat = seat;
++        }
+         s = new net::Session(cfg);
++        if (relay) s->SetPipe(std::unique_ptr<net::Datagram>(relay.release()));
+     }
+     return *s;
+ }
