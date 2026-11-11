@@ -264,7 +264,7 @@ other hooks. `tools/hooks/forbid-game-paths.sh --self-test` checks the list.
 
 The hook refuses `sdk` and `sdk/*`; `assets`, `generated`, `out`, `build`,
 `logs`, `hdd`, `CrashDumps`, `shadercache`, `tools/bin`, `.toolchain`,
-`macos/launcher/dist`; `*.xbe`, `*.iso`, `*.xiso`, `*.dmp`, `*.d3dcap`,
+`macos/launcher/dist`, `launcher/dist`; `*.xbe`, `*.iso`, `*.xiso`, `*.dmp`, `*.d3dcap`,
 `*.pdb`, `*.exe`, `*.dmg`; `det-logs`, `det-desync`, `*.pads`, `*.detlog`,
 `desync_*.txt`, `frame_*_*.bin`; `re/`, `*.gpr`, `*.rep`, `*.gzf`,
 `time-rng-map.txt`; and any path containing `x86_recomp`,

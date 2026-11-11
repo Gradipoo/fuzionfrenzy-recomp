@@ -1,0 +1,137 @@
+name: release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Prerelease tag, for example v0.0.0-test
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  macos:
+    name: macos
+    runs-on: macos-26
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+          fetch-depth: 0
+
+      - name: Package
+        run: |
+          sh macos/launcher/package-dmg.sh
+          ditto -c -k --keepParent "macos/launcher/dist/Ring Host.app" macos/launcher/dist/RingHost-macos.zip
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos
+          if-no-files-found: error
+          path: |
+            macos/launcher/dist/RingHost-macos.dmg
+            macos/launcher/dist/RingHost-macos.zip
+
+  linux:
+    name: linux
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+          fetch-depth: 0
+
+      - name: Packages
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            clang g++ cmake ninja-build python3 git pkg-config zstd \
+            libx11-dev libxext-dev libxrandr-dev libxcursor-dev libxi-dev libxfixes-dev \
+            libwayland-dev libwayland-bin wayland-protocols libxkbcommon-dev libdecor-0-dev
+
+      - name: Package
+        run: sh launcher/package.sh
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux
+          if-no-files-found: error
+          path: launcher/dist/RingHost-linux-x64.tar.zst
+
+  windows:
+    name: windows
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+          fetch-depth: 0
+
+      - name: MSVC environment
+        uses: ilammy/msvc-dev-cmd@v1
+
+      - name: Package
+        shell: bash
+        run: sh launcher/package.sh
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows
+          if-no-files-found: error
+          path: launcher/dist/RingHost-win64.zip
+
+  publish:
+    name: publish
+    needs: [macos, linux, windows]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -eu
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            tag="${{ inputs.tag }}"
+            extra="--prerelease --target ${{ github.sha }}"
+          else
+            tag="${{ github.ref_name }}"
+            extra=""
+          fi
+          if [ -z "$tag" ]; then
+            echo "release tag is empty" >&2
+            exit 1
+          fi
+          find dist -type f | sort
+          cat > notes.md <<'EOF'
+          These files are launchers for Linux, Windows, and Apple Silicon. They do not contain the game. You supply your own USA disc, and the launcher compiles it on your machine.
+          .
+          RingHost-macos.dmg and RingHost-macos.zip are the Mac app. The signature is ad-hoc, so a copy from a browser may need a right-click Open the first time. You need Xcode Command Line Tools and:
+          .
+            brew install cmake ninja glslang libusb molten-vk vulkan-loader vulkan-headers
+          .
+          RingHost-linux-x64.tar.zst is the Linux launcher. On Debian or Ubuntu:
+          .
+            sudo apt install clang cmake ninja-build git python3 libvulkan-dev glslang-dev zlib1g-dev
+          .
+          RingHost-win64.zip is the Windows launcher. Install Visual Studio 2022 with Desktop development with C++, C++ Clang tools for Windows, and C++ CMake tools for Windows, plus git.
+          .
+          The first compile downloads SDL and needs a network connection.
+          EOF
+          sed -i 's/^\.$//' notes.md
+          files=$(find dist -type f | sort)
+          if [ -z "$files" ]; then
+            echo "no release files" >&2
+            exit 1
+          fi
+          # shellcheck disable=SC2086
+          gh release create "$tag" $extra --title "$tag" --notes-file notes.md $files

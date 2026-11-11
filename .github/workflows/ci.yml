@@ -59,8 +59,10 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            clang cmake ninja-build python3 valgrind ccache \
-            libvulkan-dev glslang-dev zlib1g-dev pkg-config
+            clang g++ cmake ninja-build python3 valgrind ccache \
+            libvulkan-dev glslang-dev zlib1g-dev pkg-config \
+            libx11-dev libxext-dev libxrandr-dev libxcursor-dev libxi-dev libxfixes-dev \
+            libwayland-dev libwayland-bin wayland-protocols libxkbcommon-dev libdecor-0-dev
 
       - name: macOS packages
         if: runner.os == 'macOS'
@@ -96,6 +98,14 @@ jobs:
           grep 'CMAKE_CXX_COMPILER_LAUNCHER:.*ccache' "$RUNNER_TEMP/sdk-runtime/CMakeCache.txt"
           cmake --build "$RUNNER_TEMP/sdk-runtime" --parallel
           ctest --test-dir "$RUNNER_TEMP/sdk-runtime" --output-on-failure -L fast
+
+      - name: Linux launcher
+        if: runner.os == 'Linux'
+        run: |
+          export CC=clang CXX=clang++
+          cmake -S launcher -B "$RUNNER_TEMP/ringhost-launcher" -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release
+          cmake --build "$RUNNER_TEMP/ringhost-launcher" --parallel
 
       - name: Launcher
         if: matrix.launcher == '1'
@@ -189,4 +199,13 @@ jobs:
           cmake --build "$env:RUNNER_TEMP/sdk-runtime" --parallel
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           ctest --test-dir "$env:RUNNER_TEMP/sdk-runtime" --output-on-failure -L fast
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Launcher
+        shell: pwsh
+        run: |
+          cmake -S launcher -B "$env:RUNNER_TEMP/ringhost-launcher" -G Ninja `
+            -DCMAKE_BUILD_TYPE=Release
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cmake --build "$env:RUNNER_TEMP/ringhost-launcher" --parallel
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }

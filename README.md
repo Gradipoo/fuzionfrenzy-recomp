@@ -294,8 +294,17 @@ You supply the game: the USA Xbox release, as either
 
 The initial release, [v0.1.0](https://github.com/Gradipoo/fuzionfrenzy-recomp/releases/tag/v0.1.0),
 carries `RingHost-macos.zip`: the ad-hoc-signed Ring Host launcher and this port's sources, with no
-game binary and no game data. Linux and Windows have no launcher in this repository, so those builds
-stay source-only.
+game binary and no game data.
+
+A `v*` tag builds the three launchers in `.github/workflows/release.yml` and attaches:
+
+| File | What it is |
+| --- | --- |
+| `RingHost-macos.dmg`, `RingHost-macos.zip` | Apple Silicon app. Ad-hoc signed. |
+| `RingHost-linux-x64.tar.zst` | Linux launcher from `launcher/package.sh` |
+| `RingHost-win64.zip` | Windows launcher from the same script |
+
+None of those files contain a recompiled game binary. The player supplies a USA disc, and the launcher compiles it locally. `launcher/package.sh` is the Linux and Windows pack. `macos/launcher/package-dmg.sh` is the Mac pack.
 
 ## Working on the port
 
@@ -319,7 +328,7 @@ git config core.hooksPath tools/hooks
 ```
 
 or `ln -sfn ../../tools/hooks/pre-commit .git/hooks/pre-commit`. The hook refuses `assets/`,
-`generated/`, build output, recompiled guest sources, `macos/launcher/dist/`, and
+`generated/`, build output, recompiled guest sources, `macos/launcher/dist/`, `launcher/dist/`, and
 `*.xbe` / `*.iso` / `*.xiso` / dumps / `*.dmg`.
 `core.hooksPath` replaces any other hooks in `.git/hooks`. This repository ships no other hooks.
 

@@ -76,4 +76,5 @@ __pycache__/
 # must not be committed: a shipped game binary would be game-derived, and the
 # launcher is supposed to compile that binary on the player's Mac.
 /macos/launcher/dist/
+/launcher/dist/
 *.dmg

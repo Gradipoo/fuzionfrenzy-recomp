@@ -20,13 +20,15 @@ What each runner builds:
 | `scripts/det-diff.py --self-check` | No. Synthetic logs. |
 | `XBE_HOST_TOOLS_ONLY` | No. `xbe_recomp` and `xbe_symbols`. |
 | `XBE_CI_RUNTIME` | No. The runtime is compiled against a synthetic symbol header written in the build directory by `tools/ci/stub_symbols.py`. Those tokens are not guest addresses. On Linux the job sets `SDL_UNIX_CONSOLE_BUILD` so SDL3 configures with X11 and Wayland off. On macOS 14, `patches/sdk-macos-pipe.patch` replaces `pipe2` (the 14 SDK does not declare it) with `pipe` and `FD_CLOEXEC` for the relaunch handover. |
-| Launcher `swiftc` | No, and only on macOS. The disk-image pack stays a local script. |
+| Launcher `swiftc` | No, and only on macOS. The disk-image pack stays on the release workflow. |
+| Linux and Windows `RingHostLauncher` | No. `launcher/` is the SDL window. It is not the recompiled game. The Mac job does not build this target. |
 | `ctest -L fast` | No. `det_clock`, `run_queue`, `xinput_packet`, `arena`, `lockstep`, `fp_digest`, and `det_diff`. The scene resume test is label `scenes` and is not in this job. |
 
-Windows runs the runtime, the math digest, `det-diff.py --self-check`, and
-`ctest -L fast`. It does not build the host tools or the launcher. The
-runtime links the Windows SDK libraries (`d3d12`, `xaudio2`, and the rest)
-instead of SDL and Vulkan.
+Windows runs the runtime, the math digest, `det-diff.py --self-check`,
+`ctest -L fast`, and `RingHostLauncher`. It does not build the host tools.
+The runtime links the Windows SDK libraries (`d3d12`, `xaudio2`, and the rest)
+instead of SDL and Vulkan. The launcher is a separate CMake project and links
+SDL.
 
 Ubuntu also runs the digest under valgrind (`FP_VALGRIND=1`). That is the
 uninitialized-use check. MemorySanitizer is not used: it needs an
@@ -36,3 +38,12 @@ see uninitialized reads either (`docs/sanitizers.md`).
 `scripts/fp-cross.sh` is the local cross-arch check (arm64, x86_64 under
 Rosetta, gcc when it is installed). CI does not run it. Each runner hashes
 its own native binary and compares that hash to the same file.
+
+`.github/workflows/release.yml` runs on a `v*` tag, and on
+`workflow_dispatch` as a prerelease. It packs the Mac app
+(`macos/launcher/package-dmg.sh`), the Linux launcher, and the Windows
+launcher (`launcher/package.sh`). The GitHub Release gets
+`RingHost-macos.dmg`, `RingHost-macos.zip`, `RingHost-linux-x64.tar.zst`,
+and `RingHost-win64.zip`. Each archive is the launcher plus the port
+sources. The package scripts refuse a disc image, an xbe, recompiled guest
+sources, or a game binary.
