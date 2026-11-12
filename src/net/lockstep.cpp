@@ -281,6 +281,7 @@ Result Session::FailNow(Fail f, uint64_t frame, uint64_t local, uint64_t remote)
     r.remote_hash = remote;
     if (f == Fail::Desync) r.why = "hash mismatch";
     else if (f == Fail::Timeout) r.why = "timeout";
+    else if (sticky_why_) r.why = sticky_why_;
     else r.why = "hello rejected";
     return r;
 }
@@ -354,9 +355,10 @@ void Session::Ingest(const uint8_t* p, int n) {
         uint32_t width = rd.U32();
         uint32_t height = rd.U32();
         uint8_t wide = rd.U8();
-        if (seed != cfg_.seed || int(delay) != cfg_.delay || width != cfg_.width || height != cfg_.height ||
-            wide != (cfg_.ultrawide ? 1 : 0) || !OtherSeat(int(seat))) {
+        const bool video = width != cfg_.width || height != cfg_.height || wide != (cfg_.ultrawide ? 1 : 0);
+        if (seed != cfg_.seed || int(delay) != cfg_.delay || video || !OtherSeat(int(seat))) {
             sticky_ = Fail::Hello;
+            sticky_why_ = video ? "video settings do not match" : "hello rejected";
             return;
         }
         seen_[seat - 1] = true;

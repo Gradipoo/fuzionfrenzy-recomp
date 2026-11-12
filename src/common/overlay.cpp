@@ -20,6 +20,7 @@
 #include <cstring>
 #include <exception>
 #include <iterator>
+#include <chrono>
 #include <thread>
 #include <utility>
 
@@ -545,39 +546,84 @@ void DrawCheats(bool ingame) {
 constexpr int kRelayAddr = 64;
 constexpr int kRelayLink = 128;
 constexpr int kRelayStatus = 160;
+constexpr int kGameCap = 32;
 char g_relay_addr[kRelayAddr] = "127.0.0.1:9999";
 char g_link_edit[kRelayLink] = "";
+char g_name_edit[net::RelayClient::kNameLen + 1] = "Game";
+bool g_link_only = false;
 char g_relay_seen[kRelayLink] = "";
 char g_relay_link[kRelayLink] = "";
+char g_relay_code[net::RelayClient::kCodeLen + 1] = "";
 char g_relay_status[kRelayStatus] = "";
 std::atomic<uint32_t> g_relay_seq{0};
 std::atomic<int> g_relay_busy{0};
 std::atomic<int> g_relay_seat{0};
+std::atomic<int> g_beat{0};
+std::atomic<int> g_fault_panel{0};
+net::RelayClient::Game g_games[kGameCap];
+int g_game_n = 0;
+std::atomic<uint32_t> g_list_seq{0};
+std::atomic<int> g_list_known{0};
 
-void PublishRelay(const char* status, const char* link) {
+void PublishRelay(const char* status, const char* link, const char* code = nullptr) {
     uint32_t s = g_relay_seq.load(std::memory_order_relaxed);
     g_relay_seq.store(s + 1, std::memory_order_relaxed);
     if (status) std::snprintf(g_relay_status, sizeof g_relay_status, "%s", status);
     if (link) std::snprintf(g_relay_link, sizeof g_relay_link, "%s", link);
+    if (code) std::snprintf(g_relay_code, sizeof g_relay_code, "%s", code);
     g_relay_seq.store(s + 2, std::memory_order_release);
 }
 
-void ReadRelay(char* status, int status_n, char* link, int link_n) {
+void ReadRelay(char* status, int status_n, char* link, int link_n, char* code, int code_n) {
     for (;;) {
         uint32_t a = g_relay_seq.load(std::memory_order_acquire);
         if (a & 1u) continue;
         char st[kRelayStatus];
         char lk[kRelayLink];
+        char cd[sizeof g_relay_code];
         std::memcpy(st, g_relay_status, sizeof st);
         std::memcpy(lk, g_relay_link, sizeof lk);
+        std::memcpy(cd, g_relay_code, sizeof cd);
         st[sizeof st - 1] = '\0';
         lk[sizeof lk - 1] = '\0';
+        cd[sizeof cd - 1] = '\0';
         uint32_t b = g_relay_seq.load(std::memory_order_acquire);
         if (a != b) continue;
         std::snprintf(status, size_t(status_n), "%s", st);
         std::snprintf(link, size_t(link_n), "%s", lk);
+        if (code && code_n > 0) std::snprintf(code, size_t(code_n), "%s", cd);
         return;
     }
+}
+
+void PublishGames(const net::RelayClient::Game* rows, int n) {
+    if (n < 0) n = 0;
+    if (n > kGameCap) n = kGameCap;
+    uint32_t s = g_list_seq.load(std::memory_order_relaxed);
+    g_list_seq.store(s + 1, std::memory_order_relaxed);
+    if (n > 0 && rows) std::memcpy(g_games, rows, size_t(n) * sizeof(net::RelayClient::Game));
+    g_game_n = n;
+    g_list_seq.store(s + 2, std::memory_order_release);
+    g_list_known.store(1, std::memory_order_release);
+}
+
+int ReadGames(net::RelayClient::Game* out, int cap) {
+    if (!out || cap <= 0) return 0;
+    for (;;) {
+        uint32_t a = g_list_seq.load(std::memory_order_acquire);
+        if (a & 1u) continue;
+        int n = g_game_n;
+        if (n > cap) n = cap;
+        if (n > 0) std::memcpy(out, g_games, size_t(n) * sizeof(net::RelayClient::Game));
+        uint32_t b = g_list_seq.load(std::memory_order_acquire);
+        if (a != b) continue;
+        return n;
+    }
+}
+
+void ShowFault(const char* status) {
+    PublishRelay(status ? status : "The match stopped.", nullptr, nullptr);
+    g_fault_panel.store(1, std::memory_order_release);
 }
 
 int HexNibble(char c) {
@@ -637,26 +683,71 @@ void FormatLink(char* out, int out_n, const char* host, uint16_t port, const uin
     std::snprintf(out, size_t(out_n), "ff1:%s:%u:%s", host, unsigned(port), hex);
 }
 
+bool CodeChar(char c) {
+    for (const char* p = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"; *p; p++)
+        if (*p == c) return true;
+    return false;
+}
+
+bool ParseCode(const char* text, char code[net::RelayClient::kCodeLen + 1]) {
+    if (!text || !code) return false;
+    if (std::strncmp(text, "ff1:", 4) == 0) text += 4;
+    if (std::strchr(text, ':')) return false;
+    if (std::strlen(text) != net::RelayClient::kCodeLen) return false;
+    for (int i = 0; i < net::RelayClient::kCodeLen; i++) {
+        char c = text[i];
+        if (c >= 'a' && c <= 'z') c = char(c - 'a' + 'A');
+        if (!CodeChar(c)) return false;
+        code[i] = c;
+    }
+    code[net::RelayClient::kCodeLen] = '\0';
+    return true;
+}
+
+void StartBeat() {
+    int gen = g_beat.fetch_add(1, std::memory_order_acq_rel) + 1;
+    std::thread([gen] {
+        while (g_beat.load(std::memory_order_acquire) == gen) {
+            std::this_thread::sleep_for(std::chrono::seconds(5));
+            if (g_beat.load(std::memory_order_acquire) != gen) return;
+            if (net::RelayStarted()) return;
+            net::RelayHeartbeat();
+        }
+    }).detach();
+}
+
 struct RelayJob {
     int seat = 0;
+    bool listed = true;
     std::array<char, kRelayAddr> addr{};
     std::array<char, kRelayLink> link{};
+    std::array<char, net::RelayClient::kNameLen + 1> name{};
 };
 
+bool Endpoint(const char* text, char* host, int host_n, uint16_t* port) {
+    if (text && text[0] && ParseAddr(text, host, host_n, port)) return true;
+    return net::RelayClient::DefaultRelay(host, host_n, port);
+}
+
 void RunRelay(RelayJob job) {
+    g_beat.fetch_add(1, std::memory_order_acq_rel);
     char host[kRelayAddr];
     uint16_t port = 0;
     uint8_t token[net::RelayClient::kTokenLen];
     if (job.seat == 1) {
-        if (!ParseAddr(job.addr.data(), host, int(sizeof host), &port)) {
-            PublishRelay("Relay address must be host:port.", nullptr);
+        if (!Endpoint(job.addr.data(), host, int(sizeof host), &port)) {
+            PublishRelay("Set the relay address.", nullptr);
             return;
         }
         net::RelayClient::Config cfg;
         cfg.relay_host = host;
         cfg.relay_port = port;
         auto client = std::make_unique<net::RelayClient>(cfg);
-        if (!client->Open(token)) {
+        net::RelayClient::OpenInfo info;
+        info.listed = job.listed;
+        std::snprintf(info.name, sizeof info.name, "%s", job.name[0] ? job.name.data() : "Game");
+        char code[net::RelayClient::kCodeLen + 1];
+        if (!client->OpenMatch(info, token, code)) {
             if (client->LastFail() == 2) PublishRelay("Relay already has a match.", nullptr);
             else {
                 char missing[160];
@@ -667,27 +758,44 @@ void RunRelay(RelayJob job) {
             return;
         }
         char link[kRelayLink];
-        FormatLink(link, int(sizeof link), host, port, token);
+        if (job.addr[0] == '\0') std::snprintf(link, sizeof link, "ff1:%s", code);
+        else FormatLink(link, int(sizeof link), host, port, token);
+        const char* status = "Hosting. Share the code, or wait for someone to join from the list.";
         if (!det::LockstepEnabled())
-            PublishRelay("Hosting. The match will not start until the game is launched with --lockstep.", link);
+            status = "Hosting. The match will not start until the game is launched with --lockstep.";
         else if (det::LockstepPeerSet())
-            PublishRelay("Hosting. A direct peer is set, so lockstep will not use this relay.", link);
-        else
-            PublishRelay("Hosting. The host has not started yet.", link);
+            status = "Hosting. A direct peer is set, so lockstep will not use this relay.";
+        PublishRelay(status, link, code);
         net::ArmRelay(1, std::move(client));
         g_relay_seat.store(1, std::memory_order_release);
+        if (det::LockstepEnabled() && !det::LockstepPeerSet()) StartBeat();
         return;
     }
-    if (!ParseLink(job.link.data(), host, int(sizeof host), &port, token)) {
-        PublishRelay("Link must be ff1:host:port and 32 hex characters.", nullptr);
+    char code[net::RelayClient::kCodeLen + 1];
+    bool by_code = ParseCode(job.link.data(), code);
+    if (by_code) {
+        if (!Endpoint(job.addr.data(), host, int(sizeof host), &port)) {
+            PublishRelay("Set the relay address.", nullptr);
+            return;
+        }
+    } else if (!ParseLink(job.link.data(), host, int(sizeof host), &port, token)) {
+        PublishRelay("Paste a 6 character code, or ff1:host:port and 32 hex characters.", nullptr);
         return;
     }
     net::RelayClient::Config cfg;
     cfg.relay_host = host;
     cfg.relay_port = port;
     auto client = std::make_unique<net::RelayClient>(cfg);
+    int prefer = 0;
+    if (by_code) {
+        if (const char* seat_env = std::getenv("FUZION_RELAY_SEAT")) prefer = std::atoi(seat_env);
+    }
+    if (by_code && !client->Resolve(code, token)) {
+        PublishRelay("That code is not an open game.", nullptr);
+        return;
+    }
     int seat = 0;
-    if (!client->Join(token, &seat)) {
+    if (!client->Join(token, &seat, prefer)) {
         PublishRelay("Relay refused the join.", nullptr);
         return;
     }
@@ -703,14 +811,30 @@ void RunRelay(RelayJob job) {
     g_relay_seat.store(seat, std::memory_order_release);
 }
 
+void RunList(std::array<char, kRelayAddr> addr) {
+    char host[kRelayAddr];
+    uint16_t port = 0;
+    if (!Endpoint(addr.data(), host, int(sizeof host), &port)) {
+        PublishRelay("Set the relay address.", nullptr);
+        return;
+    }
+    net::RelayClient::Game rows[kGameCap];
+    int n = net::RelayClient::List(host, port, rows, kGameCap);
+    if (n < 0) {
+        PublishRelay("The relay did not answer the list.", nullptr);
+        return;
+    }
+    PublishGames(rows, n);
+}
+
 void StartMatch() {
     int idle = 0;
     if (!g_relay_busy.compare_exchange_strong(idle, 1, std::memory_order_acq_rel)) return;
     PublishRelay("Starting the match.", nullptr);
     std::thread([] {
         try {
-            if (!net::RelayRequestStart()) PublishRelay("Start failed.", nullptr);
-            else PublishRelay("The match is starting.", nullptr);
+            if (!net::RelayRequestRestart()) PublishRelay("Start failed.", nullptr);
+            else PublishRelay("Restarting both games.", nullptr);
         } catch (const std::exception& e) {
             LOGE("relay: start %s", e.what());
             PublishRelay("Start failed.", nullptr);
@@ -722,13 +846,15 @@ void StartMatch() {
     }).detach();
 }
 
-void StartRelay(int seat, const char* addr, const char* link) {
+void StartRelay(int seat, const char* addr, const char* link, bool listed, const char* name) {
     int idle = 0;
     if (!g_relay_busy.compare_exchange_strong(idle, 1, std::memory_order_acq_rel)) return;
     RelayJob job;
     job.seat = seat;
+    job.listed = listed;
     std::snprintf(job.addr.data(), job.addr.size(), "%s", addr ? addr : "");
     std::snprintf(job.link.data(), job.link.size(), "%s", link ? link : "");
+    std::snprintf(job.name.data(), job.name.size(), "%s", name ? name : "");
     PublishRelay(seat == 1 ? "Opening relay." : "Joining relay.", nullptr);
     std::thread([job] {
         try {
@@ -744,45 +870,116 @@ void StartRelay(int seat, const char* addr, const char* link) {
     }).detach();
 }
 
+void StartList(const char* addr) {
+    int idle = 0;
+    if (!g_relay_busy.compare_exchange_strong(idle, 1, std::memory_order_acq_rel)) return;
+    std::array<char, kRelayAddr> copy{};
+    std::snprintf(copy.data(), copy.size(), "%s", addr ? addr : "");
+    std::thread([copy] {
+        try {
+            RunList(copy);
+        } catch (const std::exception& e) {
+            LOGE("relay: list %s", e.what());
+            PublishRelay("Could not reach the relay.", nullptr);
+        } catch (...) {
+            LOGE("relay: list failed");
+            PublishRelay("Could not reach the relay.", nullptr);
+        }
+        g_relay_busy.store(0, std::memory_order_release);
+    }).detach();
+}
+
+bool KnownRelay() {
+    char host[kRelayAddr];
+    uint16_t port = 0;
+    return net::RelayClient::DefaultRelay(host, int(sizeof host), &port);
+}
+
+const char* RelayField() { return KnownRelay() ? "" : g_relay_addr; }
+
 void DrawInternet() {
     char status[kRelayStatus];
     char link[kRelayLink];
-    ReadRelay(status, int(sizeof status), link, int(sizeof link));
+    char code[net::RelayClient::kCodeLen + 1];
+    ReadRelay(status, int(sizeof status), link, int(sizeof link), code, int(sizeof code));
     if (link[0] && std::strcmp(link, g_relay_seen) != 0) {
         std::snprintf(g_relay_seen, sizeof g_relay_seen, "%s", link);
         std::snprintf(g_link_edit, sizeof g_link_edit, "%s", link);
     }
-    Row("Relay");
-    ImGui::InputText("##relay", g_relay_addr, sizeof g_relay_addr);
-    Note("host:port of the local relay.");
-    Row("Link");
+    if (!KnownRelay()) {
+        Row("Relay");
+        ImGui::InputText("##relay", g_relay_addr, sizeof g_relay_addr);
+        Note("host:port of the relay. Set FUZION_RELAY to hide this.");
+    }
+    const bool online = det::LockstepEnabled() && !det::LockstepPeerSet();
+    if (online) {
+        Row("Name");
+        ImGui::InputText("##name", g_name_edit, sizeof g_name_edit);
+        Row("Private");
+        ImGui::Checkbox("Only people with the code", &g_link_only);
+    }
+    Row("Code");
     ImGui::InputText("##link", g_link_edit, sizeof g_link_edit);
+    if (code[0]) {
+        ImGui::SetWindowFontScale(1.6f);
+        ImGui::TextUnformatted(code);
+        ImGui::SetWindowFontScale(1.0f);
+    }
     Row("Lobby");
     const bool busy = g_relay_busy.load(std::memory_order_relaxed) != 0;
+    const char* field = RelayField();
     ImGui::BeginDisabled(busy);
-    if (ImGui::Button("Host")) app::PostRelay(1, g_relay_addr, g_link_edit);
-    ImGui::SameLine();
-    if (ImGui::Button("Join")) app::PostRelay(2, g_relay_addr, g_link_edit);
-    if (g_relay_seat.load(std::memory_order_relaxed) == 1) {
-        ImGui::SameLine();
-        if (ImGui::Button("Start")) app::PostRelay(3, nullptr, nullptr);
-    }
-    ImGui::SameLine();
-    ImGui::BeginDisabled(g_link_edit[0] == '\0');
-    if (ImGui::Button("Copy")) app::PostRelay(4, nullptr, g_link_edit);
-    ImGui::EndDisabled();
-    ImGui::EndDisabled();
-    if (!det::LockstepEnabled())
-        Note("The match will not start until the game is launched with --lockstep.");
-    else if (det::LockstepPeerSet())
+    if (!det::LockstepEnabled()) {
+        if (ImGui::Button("Play online")) app::PostRelay(6, nullptr, g_link_edit);
+        Note("Restarts the game so both machines share one simulation. Paste a code first to join that game.");
+    } else if (det::LockstepPeerSet()) {
         Note("A direct peer is set. Lockstep keeps using UDP.");
-    else {
+    } else {
+        char packed[kRelayAddr + 2];
+        std::snprintf(packed, sizeof packed, "%c%s", g_link_only ? 'P' : 'H', field);
+        if (ImGui::Button("Host")) app::PostRelay(1, packed, g_name_edit);
+        ImGui::SameLine();
+        if (ImGui::Button("Join")) app::PostRelay(2, field, g_link_edit);
+        if (g_relay_seat.load(std::memory_order_relaxed) == 1) {
+            ImGui::SameLine();
+            if (ImGui::Button("Start")) app::PostRelay(3, nullptr, nullptr);
+        }
+        ImGui::SameLine();
+        ImGui::BeginDisabled(link[0] == '\0');
+        if (ImGui::Button("Copy")) app::PostRelay(4, nullptr, link);
+        ImGui::EndDisabled();
+        ImGui::SameLine();
+        if (ImGui::Button("Refresh")) app::PostRelay(5, field, nullptr);
         char players[32];
         std::snprintf(players, sizeof players, "Players %d of 4.", net::RelayCount());
         Note(players);
         Note(net::RelayStarted() ? "The match is starting." : "The host has not started yet.");
+        net::RelayClient::Game rows[kGameCap];
+        int n = ReadGames(rows, kGameCap);
+        if (g_list_known.load(std::memory_order_acquire) != 0 && n == 0) Note("No open games.");
+        for (int i = 0; i < n; i++) {
+            ImGui::PushID(i);
+            char label[48];
+            const char* name = rows[i].name[0] ? rows[i].name : "Game";
+            std::snprintf(label, sizeof label, "%s  %d/4", name, rows[i].seats);
+            Row(label);
+            if (ImGui::Button("Join")) app::PostRelay(2, field, rows[i].code);
+            ImGui::PopID();
+        }
     }
+    ImGui::EndDisabled();
     if (status[0]) Note(status);
+}
+
+void MaybeJoinCode() {
+    static bool once = false;
+    if (once) return;
+    once = true;
+    const char* code = std::getenv("FUZION_RELAY_CODE");
+    if (!code || !code[0]) return;
+    std::snprintf(g_link_edit, sizeof g_link_edit, "%s", code);
+    if (!det::LockstepEnabled() || det::LockstepPeerSet()) return;
+    app::PostRelay(2, RelayField(), g_link_edit);
 }
 
 void DrawSettings() {
@@ -865,15 +1062,48 @@ void DrawSettings() {
 
 }  // namespace
 
+void RelayFault(const char* status) { ShowFault(status); }
+
+void RelaunchMatch() {
+#if !defined(_WIN32)
+    char code[8];
+    char relay[80];
+    char seat[8];
+    if (!net::RelayRejoinInfo(code, int(sizeof code), relay, int(sizeof relay))) return;
+    std::snprintf(seat, sizeof seat, "%d", net::RelaySeat());
+    setenv("FUZION_RELAY_SEAT", seat, 1);
+    setenv("FUZION_RELAY_REJOIN", "1", 1);
+    app::RestartOnline(code, relay[0] ? relay : nullptr);
+#else
+    PublishRelay("Could not restart the match.", nullptr);
+#endif
+}
+
 void RelayAction(int action, const char* addr, const char* link) {
     if (action == 3) StartMatch();
-    else if (action == 1 || action == 2) StartRelay(action, addr, link);
+    else if (action == 5) StartList(addr);
+    else if (action == 6) {
+        if (!app::RestartOnline(link, nullptr)) PublishRelay("Could not restart the game.", nullptr);
+    } else if (action == 1) {
+        bool listed = true;
+        if (addr && (addr[0] == 'H' || addr[0] == 'P')) {
+            listed = addr[0] == 'H';
+            addr++;
+        }
+        StartRelay(1, addr, nullptr, listed, link);
+    } else if (action == 2) StartRelay(2, addr, link, true, nullptr);
 }
 
 void Draw(double fps) {
     // the renderer calls this inside its frame, but a hook that cannot be reached by a broken
     // context is worth the two compares: this runs on the render thread
     if (!ImGui::GetCurrentContext()) return;
+    if (g_fault_panel.exchange(0, std::memory_order_acq_rel) != 0) {
+        g_settings_open = true;
+        g_settings_up.store(true, std::memory_order_relaxed);
+    }
+    MaybeJoinCode();
+    if (net::RelayWantsRestart()) RelaunchMatch();
     ImGuiIO& io = ImGui::GetIO();
 
     // the pad belongs to the game alone: no overlay window can ever act on a button the player

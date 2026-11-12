@@ -305,6 +305,21 @@ if(EXISTS "${SDK}/runtime/app/app.h" AND EXISTS "${_relay_ui}")
     endif()
 endif()
 
+# Start relaunches both games. The new process holds its first present.
+set(_relaunch "${REPO}/patches/sdk-lockstep-relaunch.patch")
+if(EXISTS "${SDK}/runtime/app/app.h" AND EXISTS "${_relaunch}")
+    file(READ "${SDK}/runtime/app/app.h" _relaunch_src)
+    if(NOT _relaunch_src MATCHES "RestartOnline")
+        xbe_ensure_git()
+        execute_process(COMMAND "${GIT_EXE}" -C "${SDK}" apply --whitespace=nowarn "${_relaunch}"
+                        RESULT_VARIABLE _rc)
+        if(NOT _rc EQUAL 0)
+            message(FATAL_ERROR "patches/sdk-lockstep-relaunch.patch failed (${_rc})")
+        endif()
+        message(STATUS "applied patches/sdk-lockstep-relaunch.patch")
+    endif()
+endif()
+
 # Twisted System stage-1 skip and the MODULATE2X bias. The Apple patch
 # already contains this. Windows and Linux archives start from the pin.
 set(_stage "${REPO}/patches/sdk-ff-stage.patch")
