@@ -125,6 +125,10 @@ The first compile is local and takes a while. Later launches reuse the
 build until this copy's version changes.
 EOF
 
+# The archive records this clock as local time. A UTC runner is hours ahead
+# of a US Windows clock, and Ninja then reconfigures forever.
+find "$STAGE" -exec touch -d '2020-01-01 00:00:00' {} +
+
 rm -f "$ARCHIVE"
 if [ "$NAME" = "RingHost-linux-x64" ]; then
     if ! tar --zstd -C "$DIST" -cf "$ARCHIVE" "$NAME"; then

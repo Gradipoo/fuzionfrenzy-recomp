@@ -79,6 +79,9 @@ if not exist "%RINGHOST_WINSDK%\Windows Kits\10\Lib" (
 set "PATH=%TB%;%PATH%"
 for /f "tokens=*" %%v in ('clang-cl --version ^| findstr /i version') do echo       %%v
 
+rem The zip stores UTC as a local time. On this clock those sources are hours
+rem ahead of build.ninja, so Ninja re-runs CMake forever and never compiles.
+powershell -NoProfile -Command "$now=Get-Date; function Walk([string]$d){ Get-ChildItem -LiteralPath $d -Force -ErrorAction SilentlyContinue | ForEach-Object { if ($_.Attributes -band [IO.FileAttributes]::ReparsePoint) { return }; if ($_.PSIsContainer) { Walk $_.FullName } elseif ($_.LastWriteTime -gt $now) { $_.LastWriteTime = $now } } }; Walk '%CD%'"
 echo [2/3] XDK symbols
 rem Forward slashes. CMake parses \U in a quoted string as an escape.
 set "TC=%RINGHOST_TOOLCHAIN:\=/%"

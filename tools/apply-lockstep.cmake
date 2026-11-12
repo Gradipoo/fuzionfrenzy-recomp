@@ -262,3 +262,18 @@ if(EXISTS "${SDK}/runtime/app/app.h" AND EXISTS "${_relay_ui}")
         message(STATUS "applied patches/sdk-lockstep-relay-ui.patch")
     endif()
 endif()
+
+# Twisted System stage-1 skip and the MODULATE2X bias. The Apple patch
+# already contains this. Windows and Linux archives start from the pin.
+set(_stage "${REPO}/patches/sdk-ff-stage.patch")
+if(EXISTS "${SDK}/runtime/gpu/shaders.cpp" AND EXISTS "${_stage}")
+    file(READ "${SDK}/runtime/gpu/shaders.cpp" _stage_src)
+    if(NOT _stage_src MATCHES "Skip the stage")
+        execute_process(COMMAND "${GIT_EXE}" -C "${SDK}" apply --whitespace=nowarn "${_stage}"
+                        RESULT_VARIABLE _rc)
+        if(NOT _rc EQUAL 0)
+            message(FATAL_ERROR "patches/sdk-ff-stage.patch failed (${_rc})")
+        endif()
+        message(STATUS "applied patches/sdk-ff-stage.patch")
+    endif()
+endif()

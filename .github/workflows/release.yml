@@ -32,6 +32,7 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: macos
+          retention-days: 1
           if-no-files-found: error
           path: |
             macos/launcher/dist/RingHost-macos.dmg
@@ -60,6 +61,7 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: linux
+          retention-days: 1
           if-no-files-found: error
           path: launcher/dist/RingHost-linux-x64.tar.zst
 
@@ -82,6 +84,7 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: windows
+          retention-days: 1
           if-no-files-found: error
           path: launcher/dist/RingHost-win64.zip
 
