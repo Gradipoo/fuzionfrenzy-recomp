@@ -76,6 +76,9 @@ rm -rf "$STAGE/port/sdk" "$STAGE/port/out" "$STAGE/port/generated" "$STAGE/port/
 mkdir -p "$STAGE/port/sdk"
 git -C "$ROOT/sdk" archive --format=tar HEAD | tar -C "$STAGE/port/sdk" -xf -
 chmod +x "$STAGE/port/build.sh" "$STAGE/port/tools/apply-macos-sdk.sh" 2>/dev/null || true
+# The pin archive has no .git. Apply lockstep here, while this machine has
+# git and cmake. The script's REPO is the staged port, not this checkout.
+cmake -P "$STAGE/port/tools/apply-lockstep.cmake"
 
 if find "$STAGE/port" \( \
         -name '*.xbe' -o -name '*.iso' -o -name '*.xiso' -o \
