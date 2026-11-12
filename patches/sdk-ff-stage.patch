@@ -2,15 +2,7 @@ diff --git a/runtime/gpu/shaders.cpp b/runtime/gpu/shaders.cpp
 index 274ab60..968e538 100644
 --- a/runtime/gpu/shaders.cpp
 +++ b/runtime/gpu/shaders.cpp
-@@ -205,6 +205,7 @@ std::string VsInputs(uint16_t regs, uint64_t decode) {
-             case kDecodeIntW1: body += F("    i.v%d = float4(float3(ri.v%d.xyz), 1);\n", r, r); break;
-             case kDecodePacked: body += F("    i.v%d = UnpackNp3(ri.v%d);\n", r, r); break;
-             case kDecodeFloat2H: body += F("    i.v%d = float4(ri.v%d.xy, 0, ri.v%d.z);\n", r, r, r); break;
-+            case kDecodeFloat2: body += F("    i.v%d = float4(ri.v%d.xy, 0, 1);\n", r, r); break;
-             default: body += F("    i.v%d = ri.v%d;\n", r, r); break;
-         }
-     }
-@@ -420,8 +421,8 @@ std::string TexFetch(const PixelKey& k, int i) {
+@@ -420,8 +420,8 @@ std::string TexFetch(const PixelKey& k, int i) {
      switch (mode) {
          // PS_TEXTUREMODES: 1 project2d, 2 project3d, 3 cubemap, 4 passthru, 5 clipplane, 6 and 7 bumpenvmap, 9 dot_st, 0xA dot_zw, 0xD dot_str_3d, 0xE dot_str_cube, 0xF dpndnt_ar, 0x10 dpndnt_gb, 0x11 dotproduct
          case 0: return put("float4(0,0,0,1)");
@@ -21,7 +13,7 @@ index 274ab60..968e538 100644
          case 3: return put(sample3(tc + ".xyz"));
          case 4: return put(tc);
          case 5:  // clip plane: a set compare_mode bit kills at >= 0, a clear one below 0
-@@ -472,6 +473,10 @@ const char* kPsTail = R"(float4 spreadtap(Texture2D t, SamplerState s, float2 uv
+@@ -472,6 +472,10 @@ const char* kPsTail = R"(float4 spreadtap(Texture2D t, SamplerState s, float2 uv
  // sprite would otherwise blend the texels past its rect (the neighbouring glyph in a font atlas),
  // which the console never sees because its edge pixels sample the rect's edge texel centres exactly
  float2 uvclamp(float2 uv, float4 r) { return r.z > r.x && r.w > r.y ? clamp(uv, r.xy, r.zw) : uv; }
@@ -32,7 +24,7 @@ index 274ab60..968e538 100644
  void alphatest(float a) {
      int f = (int)misc.y;
      int v = (int)round(a * 255), r = (int)misc.x;
-@@ -858,8 +863,15 @@ std::string PixelHlsl(const PixelKey& k) {
+@@ -858,8 +862,15 @@ std::string PixelHlsl(const PixelKey& k) {
              const uint32_t* f = k.ff[i];
              if (f[0] <= 1) break;
              const TexInfo& t = k.tex[i];
@@ -49,7 +41,7 @@ index 274ab60..968e538 100644
              std::string cube;
              if (t.shadow)
                  body += F("float4 t%d = shadow(tex%d, smp%d, (tc%d.xy / tc%d.w)%s, tc%d.z / tc%d.w, %d, i.pos.xy, texsize[%d].xy);\n", i, i,
-@@ -873,8 +885,23 @@ std::string PixelHlsl(const PixelKey& k) {
+@@ -873,8 +884,23 @@ std::string PixelHlsl(const PixelKey& k) {
              body += Hooks().Fetched(t, i);
              if ((k.alphakill >> i) & 1) body += F("if (t%d.a == 0) discard;\n", i);
              const char* dst = f[8] == 5 ? "tmp" : "cur";
