@@ -18,7 +18,22 @@ set(CMAKE_CXX_COMPILER "${_tc}/bin/clang-cl.exe")
 set(CMAKE_LINKER "${_tc}/bin/lld-link.exe")
 set(CMAKE_AR "${_tc}/bin/llvm-lib.exe")
 set(CMAKE_RC_COMPILER "${_tc}/bin/llvm-rc.exe")
+# Windows-Clang searches for rc, then llvm-rc, unless this is already set.
+# That search is not cached, so every compiler test walked Program Files.
+set(CMAKE_RC_COMPILER_INIT "${_tc}/bin/llvm-rc.exe")
 set(CMAKE_MT "${_tc}/bin/llvm-mt.exe")
+# This toolchain has no clang-scan-deps. Leave the result unset and CMake
+# searches the whole PATH on every try_compile.
+set(CMAKE_C_COMPILER_CLANG_SCAN_DEPS "CMAKE_C_COMPILER_CLANG_SCAN_DEPS-NOTFOUND" CACHE FILEPATH "" FORCE)
+set(CMAKE_CXX_COMPILER_CLANG_SCAN_DEPS "CMAKE_CXX_COMPILER_CLANG_SCAN_DEPS-NOTFOUND" CACHE FILEPATH "" FORCE)
+# #region agent log
+set(_rh_dbg "C:/Mac/Home/Documents/projects/fuzionfrenzy-recomp/.cursor")
+if(IS_DIRECTORY "${_rh_dbg}")
+    string(TIMESTAMP _rh_ts "%s")
+    file(APPEND "${_rh_dbg}/debug-871d62.log"
+        "{\"sessionId\":\"871d62\",\"runId\":\"post-fix\",\"hypothesisId\":\"A\",\"location\":\"cmake/windows-player.cmake\",\"message\":\"toolchain tools pinned\",\"data\":{\"rcInit\":\"${CMAKE_RC_COMPILER_INIT}\",\"scanDeps\":\"${CMAKE_C_COMPILER_CLANG_SCAN_DEPS}\"},\"timestamp\":${_rh_ts}}\n")
+endif()
+# #endregion
 
 # FLAGS_INIT is appended to CMake's MSVC defaults. Setting CMAKE_C_FLAGS from
 # the command line would replace those defaults.
