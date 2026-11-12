@@ -797,14 +797,35 @@ bool CopyTree(const fs::path& from, const fs::path& to, std::string& error) {
     return true;
 }
 
-bool LinkAssets(const fs::path& link, const fs::path& target) {
+bool LinkAssets(const fs::path& link, const fs::path& target,
+                const std::function<void(const std::string&)>& on_line) {
     std::error_code ec;
+#ifdef _WIN32
+    const DWORD attr = GetFileAttributesW(link.wstring().c_str());
+    const bool reparse = attr != INVALID_FILE_ATTRIBUTES && (attr & FILE_ATTRIBUTE_REPARSE_POINT) != 0;
+    const fs::file_status st = fs::symlink_status(link, ec);
+    if (reparse || (!ec && fs::is_symlink(st))) {
+        const std::wstring wide = link.wstring();
+        RemoveDirectoryW(wide.c_str());
+        const bool file_symlink = !ec && fs::is_symlink(st) &&
+                                  (attr == INVALID_FILE_ATTRIBUTES || (attr & FILE_ATTRIBUTE_DIRECTORY) == 0);
+        if (file_symlink) DeleteFileW(wide.c_str());
+    } else {
+        fs::remove_all(link, ec);
+        fs::remove(link, ec);
+    }
+    std::vector<std::string> lines;
+    const int code = RunProcess({"cmd.exe", "/c", "mklink", "/J", Utf8(link), Utf8(target)}, {}, {},
+                                [&](const std::string& line) { lines.push_back(line); });
+    if (code == 0 && fs::is_regular_file(link / "default.xbe", ec)) return true;
+    if (on_line) {
+        for (const std::string& line : lines) on_line(line);
+    }
+    return false;
+#else
+    (void)on_line;
     fs::remove_all(link, ec);
     fs::remove(link, ec);
-#ifdef _WIN32
-    std::string command = "mklink /J \"" + Utf8(link) + "\" \"" + Utf8(target) + "\"";
-    return RunProcess({"cmd.exe", "/c", command}, {}, {}, nullptr) == 0;
-#else
     fs::create_symlink(target, link, ec);
     return !ec;
 #endif
@@ -1019,7 +1040,7 @@ void Pipeline::Run(Job job) {
             folder = verdict.folder;
         }
 
-        if (!LinkAssets(src / "assets", folder)) {
+        if (!LinkAssets(src / "assets", folder, [this](const std::string& line) { Log(line); })) {
             Fail("Could not link the disc into the build folder.");
             std::lock_guard<std::mutex> lock(mu_);
             busy_ = false;
