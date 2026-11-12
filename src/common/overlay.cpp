@@ -6,6 +6,7 @@
 
 #include "common/cheats.h"
 #include "common/input_kbm.h"
+#include "net/port_map.h"
 #include "net/relay_client.h"
 #include "core/log.h"
 
@@ -846,6 +847,65 @@ void StartMatch() {
     }).detach();
 }
 
+#if !defined(_WIN32)
+void RunHostOnline(RelayJob job) {
+    char dir[1024];
+    std::snprintf(dir, sizeof dir, "%s", app::ExeDir().string().c_str());
+    net::HostedRelay hosted;
+    char err[160];
+    err[0] = '\0';
+    if (!net::StartHostedRelay(dir, &hosted, err, int(sizeof err))) {
+        PublishRelay(err[0] ? err : "The router did not open the port.", nullptr);
+        return;
+    }
+    net::RelayClient::Config cfg;
+    cfg.relay_host = "127.0.0.1";
+    cfg.relay_port = hosted.local_port;
+    auto client = std::make_unique<net::RelayClient>(cfg);
+    net::RelayClient::OpenInfo info;
+    info.listed = job.listed;
+    std::snprintf(info.name, sizeof info.name, "%s", job.name[0] ? job.name.data() : "Game");
+    uint8_t token[net::RelayClient::kTokenLen];
+    char code[net::RelayClient::kCodeLen + 1];
+    if (!client->OpenMatch(info, token, code)) {
+        net::StopHostedRelay();
+        if (client->LastFail() == 2) PublishRelay("Relay already has a match.", nullptr);
+        else PublishRelay("Could not start the relay.", nullptr);
+        return;
+    }
+    char link[kRelayLink];
+    FormatLink(link, int(sizeof link), hosted.public_ip, hosted.public_port, token);
+    PublishRelay("Hosting. Share the link. The other player pastes the whole ff1 line.", link, code);
+    net::ArmRelay(1, std::move(client));
+    g_relay_seat.store(1, std::memory_order_release);
+    if (det::LockstepEnabled() && !det::LockstepPeerSet()) StartBeat();
+}
+
+void StartHostOnline(bool listed, const char* name) {
+    int idle = 0;
+    if (!g_relay_busy.compare_exchange_strong(idle, 1, std::memory_order_acq_rel)) return;
+    RelayJob job;
+    job.seat = 1;
+    job.listed = listed;
+    std::snprintf(job.name.data(), job.name.size(), "%s", name ? name : "");
+    PublishRelay("Opening a port on this network.", nullptr);
+    std::thread([job] {
+        try {
+            RunHostOnline(job);
+        } catch (const std::exception& e) {
+            LOGE("relay: %s", e.what());
+            net::StopHostedRelay();
+            PublishRelay("The router did not open the port.", nullptr);
+        } catch (...) {
+            LOGE("relay: host online failed");
+            net::StopHostedRelay();
+            PublishRelay("The router did not open the port.", nullptr);
+        }
+        g_relay_busy.store(0, std::memory_order_release);
+    }).detach();
+}
+#endif
+
 void StartRelay(int seat, const char* addr, const char* link, bool listed, const char* name) {
     int idle = 0;
     if (!g_relay_busy.compare_exchange_strong(idle, 1, std::memory_order_acq_rel)) return;
@@ -938,6 +998,10 @@ void DrawInternet() {
         char packed[kRelayAddr + 2];
         std::snprintf(packed, sizeof packed, "%c%s", g_link_only ? 'P' : 'H', field);
         if (ImGui::Button("Host")) app::PostRelay(1, packed, g_name_edit);
+#if !defined(_WIN32)
+        ImGui::SameLine();
+        if (ImGui::Button("Host online")) app::PostRelay(7, packed, g_name_edit);
+#endif
         ImGui::SameLine();
         if (ImGui::Button("Join")) app::PostRelay(2, field, g_link_edit);
         if (g_relay_seat.load(std::memory_order_relaxed) == 1) {
@@ -950,6 +1014,9 @@ void DrawInternet() {
         ImGui::EndDisabled();
         ImGui::SameLine();
         if (ImGui::Button("Refresh")) app::PostRelay(5, field, nullptr);
+#if !defined(_WIN32)
+        Note("Host online starts a relay on this machine. The other player pastes the full link.");
+#endif
         char players[32];
         std::snprintf(players, sizeof players, "Players %d of 4.", net::RelayCount());
         Note(players);
@@ -1084,6 +1151,14 @@ void RelayAction(int action, const char* addr, const char* link) {
     else if (action == 5) StartList(addr);
     else if (action == 6) {
         if (!app::RestartOnline(link, nullptr)) PublishRelay("Could not restart the game.", nullptr);
+    } else if (action == 7) {
+#if defined(_WIN32)
+        PublishRelay("Internet play is not available.", nullptr);
+#else
+        bool listed = true;
+        if (addr && (addr[0] == 'H' || addr[0] == 'P')) listed = addr[0] == 'H';
+        StartHostOnline(listed, link);
+#endif
     } else if (action == 1) {
         bool listed = true;
         if (addr && (addr[0] == 'H' || addr[0] == 'P')) {

@@ -8,6 +8,7 @@
 #include "app/app.h"
 #include "common/input_kbm.h"
 #include "common/overlay.h"
+#include "net/port_map.h"
 #include "core/determinism.h"
 #include "core/input.h"
 #include "core/log.h"
@@ -176,6 +177,9 @@ void PadHook(int port, input::Pad& pad) {
 // Inlined MSVC rand: imul 343FDh, add 269EC3h, store the seed back. This .data dword is that global.
 void Loaded() { det::WatchRng(0x285630); }
 
+// The hosted relay survives execv. This image has to refresh it and drop it on exit.
+void HostedRelayInit() { net::InstallHostedRelay(); }
+
 }  // namespace
 
 // what the runtime asks of the game; strings must be set, hooks may stay null
@@ -202,7 +206,7 @@ const app::GameInfo app::kGame = {
     .options = {},                                 // no game-specific settings yet
     .load = nullptr,                         // reads more from the settings file's toml::table
     .save = nullptr,                         // writes more into it
-    .init = nullptr,                         // after the settings load, before the window and boot
+    .init = &HostedRelayInit,                // hosted relay: refresh the lease, drop it on exit
     .loaded = &Loaded,                      // image in memory, before its entry point runs
     .window = nullptr,                       // the game window is up
 #if defined(_WIN32)
