@@ -2,8 +2,10 @@
 
 #include <atomic>
 #include <cerrno>
+#include <cstdio>
 #include <chrono>
 #include <condition_variable>
+#include <cstdlib>
 #include <cstring>
 #include <mutex>
 #include <utility>
@@ -19,6 +21,12 @@ std::unique_ptr<RelayClient> g_client;
 bool g_armed = false;
 bool g_started = false;
 std::atomic<int> g_started_ui{0};
+std::atomic<int> g_restart_ui{0};
+char g_saved_code[8]{};
+char g_saved_relay[80]{};
+constexpr char kAlphabet[] = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+// Empty until a public relay hostname is chosen. FUZION_RELAY=host:port overrides it.
+constexpr const char* kDefaultRelay = "";
 
 void NoteStartLocked() {
     if (g_started || !g_client || !g_client->Started()) return;
@@ -39,7 +47,12 @@ namespace net {
 RelayClient::RelayClient(Config) {}
 RelayClient::~RelayClient() {}
 bool RelayClient::Open(uint8_t*) { return false; }
-bool RelayClient::Join(const uint8_t*, int*) { return false; }
+bool RelayClient::OpenMatch(const OpenInfo&, uint8_t*, char*) { return false; }
+bool RelayClient::Join(const uint8_t*, int*, int) { return false; }
+bool RelayClient::SendRestart() { return false; }
+bool RelayClient::Resolve(const char*, uint8_t*) { return false; }
+bool RelayClient::Heartbeat() { return false; }
+int RelayClient::List(const char*, uint16_t, Game*, int) { return -1; }
 bool RelayClient::SendStart() { return false; }
 void RelayClient::Collect() {}
 bool RelayClient::Send(const uint8_t*, int) { return false; }
@@ -51,10 +64,13 @@ bool RelayClient::Recv(std::vector<std::vector<uint8_t>>&) { return false; }
 
 #include <arpa/inet.h>
 #include <fcntl.h>
+#include <netdb.h>
 #include <netinet/in.h>
 #include <poll.h>
 #include <sys/socket.h>
 #include <unistd.h>
+
+#include <cstdio>
 
 namespace net {
 
@@ -67,13 +83,31 @@ constexpr uint8_t kReject = 5;
 constexpr uint8_t kJoined = 6;
 constexpr uint8_t kRoster = 7;
 constexpr uint8_t kStart = 8;
+constexpr uint8_t kResolve = 9;
+constexpr uint8_t kList = 10;
+constexpr uint8_t kHeartbeat = 11;
+constexpr uint8_t kRestart = 12;
 constexpr int kBudgetMs = 2000;
+
+bool FillAddr(const std::string& host, uint16_t port, sockaddr_in* out) {
+    if (!out || port == 0 || host.empty()) return false;
+    addrinfo hints{};
+    hints.ai_family = AF_INET;
+    hints.ai_socktype = SOCK_DGRAM;
+    char port_buf[8];
+    std::snprintf(port_buf, sizeof port_buf, "%u", unsigned(port));
+    addrinfo* res = nullptr;
+    if (getaddrinfo(host.c_str(), port_buf, &hints, &res) != 0 || !res) return false;
+    std::memcpy(out, res->ai_addr, sizeof *out);
+    freeaddrinfo(res);
+    return out->sin_port != 0;
+}
 }  // namespace
 
-RelayClient::RelayClient(Config cfg) {
+RelayClient::RelayClient(Config cfg) : port_(cfg.relay_port), host_(std::move(cfg.relay_host)) {
     sock_ = socket(AF_INET, SOCK_DGRAM, 0);
     if (sock_ < 0) return;
-    if (!SetSockAddr(cfg.relay_host, cfg.relay_port)) {
+    if (!SetSockAddr(host_, port_)) {
         close(sock_);
         sock_ = -1;
         return;
@@ -88,9 +122,7 @@ RelayClient::~RelayClient() {
 
 bool RelayClient::SetSockAddr(const std::string& host, uint16_t port) {
     std::memset(&relay_addr_, 0, sizeof relay_addr_);
-    relay_addr_.sin_family = AF_INET;
-    relay_addr_.sin_port = htons(port);
-    return inet_pton(AF_INET, host.c_str(), &relay_addr_.sin_addr) == 1;
+    return FillAddr(host, port, &relay_addr_);
 }
 
 bool RelayClient::RoundTrip(const uint8_t* pkt, int n, uint8_t expect, uint8_t* extra, int extra_n) {
@@ -129,6 +161,10 @@ bool RelayClient::RoundTrip(const uint8_t* pkt, int n, uint8_t expect, uint8_t* 
             TakeStart(buf, int(got));
             continue;
         }
+        if (buf[0] == kRestart) {
+            TakeRestart();
+            continue;
+        }
         if (buf[0] == kReject) {
             fail_ = 2;
             return false;
@@ -148,11 +184,90 @@ bool RelayClient::RoundTrip(const uint8_t* pkt, int n, uint8_t expect, uint8_t* 
 }
 
 bool RelayClient::Open(uint8_t token_out[kTokenLen]) {
-    uint8_t pkt = kOpen;
-    if (!RoundTrip(&pkt, 1, kAccept, token_, kTokenLen)) return false;
+    OpenInfo info;
+    info.listed = false;
+    char code[kCodeLen + 1];
+    return OpenMatch(info, token_out, code);
+}
+
+bool RelayClient::OpenMatch(const OpenInfo& info, uint8_t token_out[kTokenLen], char code_out[kCodeLen + 1]) {
+    int name_n = 0;
+    while (name_n < kNameLen && info.name[name_n]) name_n++;
+    uint8_t pkt[1 + 1 + 1 + kNameLen];
+    pkt[0] = kOpen;
+    pkt[1] = info.listed ? 1 : 0;
+    pkt[2] = uint8_t(name_n);
+    if (name_n > 0) std::memcpy(pkt + 3, info.name, size_t(name_n));
+    if (!RoundTrip(pkt, 3 + name_n, kAccept, token_, kTokenLen)) return false;
     if (token_out) std::memcpy(token_out, token_, kTokenLen);
+    CodeOf(token_, code_);
+    if (code_out) std::snprintf(code_out, kCodeLen + 1, "%s", code_);
     ready_ = true;
     return true;
+}
+
+bool RelayClient::Resolve(const char code[kCodeLen], uint8_t token_out[kTokenLen]) {
+    if (!code || !token_out) return false;
+    uint8_t pkt[1 + kCodeLen];
+    pkt[0] = kResolve;
+    std::memcpy(pkt + 1, code, kCodeLen);
+    return RoundTrip(pkt, int(sizeof pkt), kAccept, token_out, kTokenLen);
+}
+
+bool RelayClient::Heartbeat() {
+    if (!ready_ || sock_ < 0) return false;
+    uint8_t pkt[1 + kTokenLen];
+    pkt[0] = kHeartbeat;
+    std::memcpy(pkt + 1, token_, kTokenLen);
+    ssize_t sent = sendto(sock_, pkt, sizeof pkt, 0, reinterpret_cast<sockaddr*>(&relay_addr_), sizeof relay_addr_);
+    return sent == ssize_t(sizeof pkt);
+}
+
+int RelayClient::List(const char* host, uint16_t port, Game* out, int cap) {
+    if (!host || !host[0] || !out || cap <= 0 || port == 0) return -1;
+    int sock = socket(AF_INET, SOCK_DGRAM, 0);
+    if (sock < 0) return -1;
+    sockaddr_in dest{};
+    if (!FillAddr(host, port, &dest)) {
+        close(sock);
+        return -1;
+    }
+    uint8_t pkt = kList;
+    if (sendto(sock, &pkt, 1, 0, reinterpret_cast<sockaddr*>(&dest), sizeof dest) != 1) {
+        close(sock);
+        return -1;
+    }
+    pollfd pfd{};
+    pfd.fd = sock;
+    pfd.events = POLLIN;
+    int rc = poll(&pfd, 1, kBudgetMs);
+    if (rc <= 0) {
+        close(sock);
+        return -1;
+    }
+    uint8_t buf[1200];
+    sockaddr_in from{};
+    socklen_t flen = sizeof from;
+    ssize_t got = recvfrom(sock, buf, sizeof buf, 0, reinterpret_cast<sockaddr*>(&from), &flen);
+    close(sock);
+    if (got < 2 || buf[0] != kList) return -1;
+    int count = buf[1];
+    int off = 2;
+    int n = 0;
+    for (int i = 0; i < count && n < cap; i++) {
+        if (off + kCodeLen + 1 > int(got)) break;
+        int name_n = buf[off + kCodeLen];
+        if (name_n > kNameLen || off + kCodeLen + 1 + name_n + 1 > int(got)) break;
+        std::memcpy(out[n].code, buf + off, kCodeLen);
+        out[n].code[kCodeLen] = '\0';
+        off += kCodeLen + 1;
+        if (name_n > 0) std::memcpy(out[n].name, buf + off, size_t(name_n));
+        out[n].name[name_n] = '\0';
+        off += name_n;
+        out[n].seats = buf[off++];
+        n++;
+    }
+    return n;
 }
 
 void RelayClient::TakeRoster(const uint8_t* buf, int n) {
@@ -179,18 +294,35 @@ bool RelayClient::SendStart() {
     return sent == ssize_t(sizeof pkt);
 }
 
-bool RelayClient::Join(const uint8_t token[kTokenLen], int* seat) {
+bool RelayClient::Join(const uint8_t token[kTokenLen], int* seat, int prefer) {
     if (!token || !seat) return false;
-    uint8_t pkt[1 + kTokenLen];
+    uint8_t pkt[1 + kTokenLen + 1];
     pkt[0] = kJoin;
     std::memcpy(pkt + 1, token, kTokenLen);
+    int n = 1 + kTokenLen;
+    if (prefer >= 1 && prefer <= 4) pkt[n++] = uint8_t(prefer);
     uint8_t got_seat = 0;
-    if (!RoundTrip(pkt, int(sizeof pkt), kJoined, &got_seat, 1)) return false;
-    if (got_seat < 2 || got_seat > 4) return false;
+    if (!RoundTrip(pkt, n, kJoined, &got_seat, 1)) return false;
+    if (got_seat < 1 || got_seat > 4) return false;
     *seat = int(got_seat);
     std::memcpy(token_, token, kTokenLen);
+    CodeOf(token_, code_);
     ready_ = true;
     return true;
+}
+
+void RelayClient::TakeRestart() {
+    restart_ = true;
+    g_restart_ui.store(1, std::memory_order_release);
+}
+
+bool RelayClient::SendRestart() {
+    if (!ready_ || sock_ < 0) return false;
+    uint8_t pkt[1 + kTokenLen];
+    pkt[0] = kRestart;
+    std::memcpy(pkt + 1, token_, kTokenLen);
+    ssize_t sent = sendto(sock_, pkt, sizeof pkt, 0, reinterpret_cast<sockaddr*>(&relay_addr_), sizeof relay_addr_);
+    return sent == ssize_t(sizeof pkt);
 }
 
 void RelayClient::Collect() {
@@ -208,6 +340,10 @@ void RelayClient::Collect() {
         }
         if (buf[0] == kStart) {
             TakeStart(buf, int(n));
+            continue;
+        }
+        if (buf[0] == kRestart) {
+            TakeRestart();
             continue;
         }
         held_.emplace_back(buf, buf + n);
@@ -244,6 +380,11 @@ void ArmRelay(int seat, std::unique_ptr<RelayClient> client) {
     {
         std::lock_guard<std::mutex> lock(g_mu);
         g_seat = seat;
+        if (client) {
+            std::snprintf(g_saved_code, sizeof g_saved_code, "%s", client->Code());
+            std::snprintf(g_saved_relay, sizeof g_saved_relay, "%s:%u", client->Host().c_str(),
+                          unsigned(client->Port()));
+        }
         g_client = std::move(client);
         g_armed = g_client != nullptr;
         g_started = false;
@@ -296,6 +437,73 @@ bool RelayRequestStart() {
     std::lock_guard<std::mutex> lock(g_mu);
     if (g_seat != 1 || !g_client) return false;
     return g_client->SendStart();
+}
+
+bool RelayHeartbeat() {
+    std::lock_guard<std::mutex> lock(g_mu);
+    if (g_seat != 1 || !g_client) return false;
+    return g_client->Heartbeat();
+}
+
+bool RelayWantsRestart() {
+    std::lock_guard<std::mutex> lock(g_mu);
+    if (g_client) {
+        g_client->Collect();
+        if (g_client->Restart()) g_restart_ui.store(1, std::memory_order_release);
+    }
+    return g_restart_ui.load(std::memory_order_acquire) != 0;
+}
+
+bool RelayRejoinInfo(char* code, int code_n, char* relay, int relay_n) {
+    if (!code || code_n < 2 || !relay || relay_n < 2) return false;
+    std::lock_guard<std::mutex> lock(g_mu);
+    if (!g_saved_code[0]) return false;
+    std::snprintf(code, size_t(code_n), "%s", g_saved_code);
+    std::snprintf(relay, size_t(relay_n), "%s", g_saved_relay);
+    return true;
+}
+
+int RelaySeat() {
+    std::lock_guard<std::mutex> lock(g_mu);
+    return g_seat;
+}
+
+bool RelayRequestRestart() {
+    std::lock_guard<std::mutex> lock(g_mu);
+    if (g_seat != 1 || !g_client) return false;
+    return g_client->SendRestart();
+}
+
+void RelayClient::CodeOf(const uint8_t token[kTokenLen], char out[kCodeLen + 1]) {
+    if (!out) return;
+    if (!token) {
+        out[0] = '\0';
+        return;
+    }
+    uint32_t v = (uint32_t(token[0]) << 24) | (uint32_t(token[1]) << 16) | (uint32_t(token[2]) << 8) | uint32_t(token[3]);
+    v >>= 2;
+    for (int i = 0; i < kCodeLen; i++) {
+        out[i] = kAlphabet[v & 31];
+        v >>= 5;
+    }
+    out[kCodeLen] = '\0';
+}
+
+bool RelayClient::DefaultRelay(char* host, int host_n, uint16_t* port) {
+    if (!host || host_n < 2 || !port) return false;
+    const char* env = std::getenv("FUZION_RELAY");
+    const char* text = (env && env[0]) ? env : kDefaultRelay;
+    if (!text || !text[0]) return false;
+    const char* colon = std::strrchr(text, ':');
+    if (!colon || colon == text) return false;
+    int n = int(colon - text);
+    if (n <= 0 || n >= host_n) return false;
+    std::memcpy(host, text, size_t(n));
+    host[n] = '\0';
+    int p = std::atoi(colon + 1);
+    if (p <= 0 || p > 65535) return false;
+    *port = uint16_t(p);
+    return true;
 }
 
 }  // namespace net

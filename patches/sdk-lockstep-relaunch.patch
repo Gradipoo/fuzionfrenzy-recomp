@@ -1,0 +1,105 @@
+diff --git a/runtime/app/app.h	2026-11-12 09:37:05 b/runtime/app/app.h	2026-11-12 09:37:05
+--- a/runtime/app/app.h	2026-11-12 09:37:05
++++ b/runtime/app/app.h	2026-11-12 09:40:09
+@@ -40,6 +40,9 @@
+ void ApplyDisplay();  // any thread
+ // The window thread runs these. The render thread must not call SDL itself.
+ void PostRelay(int action, const char* addr, const char* link);
++// Replaces this process with --lockstep. code and relay (host:port) are optional.
++// A null relay leaves FUZION_RELAY alone. False when the restart did not happen.
++bool RestartOnline(const char* code, const char* relay);
+ struct Mode {
+     uint32_t width, height;
+ };
+diff --git a/runtime/app/main.cpp	2026-11-12 09:37:05 b/runtime/app/main.cpp	2026-11-12 09:37:05
+--- a/runtime/app/main.cpp	2026-11-12 09:37:05
++++ b/runtime/app/main.cpp	2026-11-12 09:40:09
+@@ -209,6 +209,8 @@
+     }
+     overlay::RelayAction(action, addr ? addr : "", link ? link : "");
+ }
++
++bool RestartOnline(const char*, const char*) { return false; }
+ void OpenGameWindow(bool apply) { SendMessageW(g_hwnd, kOpenWindow, apply, 0); }
+ 
+ void Pace() {
+diff --git a/runtime/app/main_sdl.cpp	2026-11-12 09:37:05 b/runtime/app/main_sdl.cpp	2026-11-12 09:37:05
+--- a/runtime/app/main_sdl.cpp	2026-11-12 09:37:05
++++ b/runtime/app/main_sdl.cpp	2026-11-12 09:40:09
+@@ -21,6 +21,7 @@
+ #include <cstring>
+ #include <string>
+ #include <thread>
++#include <vector>
+ 
+ #include <dlfcn.h>
+ #include <execinfo.h>
+@@ -355,6 +356,31 @@
+         g_ime.Want(data->WantVisible, static_cast<int>(data->InputPos.x), static_cast<int>(data->InputPos.y),
+                    static_cast<int>(data->InputLineHeight));
+     };
++}
++
++bool RestartOnline(const char* code, const char* relay) {
++    if (code && code[0]) setenv("FUZION_RELAY_CODE", code, 1);
++    else unsetenv("FUZION_RELAY_CODE");
++    if (relay && relay[0]) setenv("FUZION_RELAY", relay, 1);
++    static char flag[] = "--lockstep";
++    std::vector<char*> args;
++    args.reserve(size_t(g_argc) + 2);
++    bool has = false;
++    for (int i = 0; i < g_argc; i++) {
++        if (g_argv[i] && std::strcmp(g_argv[i], "--lockstep") == 0) has = true;
++        args.push_back(g_argv[i]);
++    }
++    if (!has) args.push_back(flag);
++    args.push_back(nullptr);
++    char path[4096];
++#if defined(__APPLE__)
++    uint32_t sz = sizeof path;
++    if (_NSGetExecutablePath(path, &sz) != 0) return false;
++    execv(path, args.data());
++#else
++    execv("/proc/self/exe", args.data());
++#endif
++    return false;
+ }
+ 
+ void PostRelay(int action, const char* addr, const char* link) {
+diff --git a/runtime/core/determinism.cpp	2026-11-12 09:37:05 b/runtime/core/determinism.cpp	2026-11-12 09:37:05
+--- a/runtime/core/determinism.cpp	2026-11-12 09:37:05
++++ b/runtime/core/determinism.cpp	2026-11-12 09:40:09
+@@ -9,6 +9,7 @@
+ #include "core/input.h"
+ #include "det/run_queue.h"
+ #include "app/app.h"
++#include "common/overlay.h"
+ #include "net/lockstep.h"
+ #include "net/relay_client.h"
+ #include "core/log.h"
+@@ -2338,6 +2339,10 @@
+     if (r.fail == net::Fail::Desync) {
+         std::vector<Exc> none;
+         ReportDesync(r.frame, "total", r.local_hash, r.remote_hash, none);
++    }
++    if (r.fail == net::Fail::Hello && r.why && std::strstr(r.why, "video settings")) {
++        overlay::RelayFault(r.why);
++        std::this_thread::sleep_for(std::chrono::seconds(1));
+     }
+     LOGE("det: lockstep %s at frame %llu", r.why ? r.why : "failed",
+          (unsigned long long)(r.frame ? r.frame : frame));
+@@ -2443,6 +2448,14 @@
+         }
+         YieldGuest();
+     }
++    if (net::RelayWantsRestart()) overlay::RelaunchMatch();
++    else if (c.lockstep && RelayMatch() && std::getenv("FUZION_RELAY_REJOIN")) {
++        while (!net::RelayReady() && !net::RelayWantsRestart()) {
++            d3d::LobbyPresent();
++            std::this_thread::sleep_for(std::chrono::milliseconds(10));
++        }
++        if (net::RelayWantsRestart()) overlay::RelaunchMatch();
++    }
+     g_in_present = false;
+     if (c.frames && next >= c.frames) {
+         if (c.lockstep) LockstepFinish(frame);  // XBE_LOCKSTEP_NET

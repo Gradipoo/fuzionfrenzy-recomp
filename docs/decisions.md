@@ -440,3 +440,29 @@ Developer builds are unchanged when RINGHOST_TOOLCHAIN is unset.
 
 Reopen this if a release must ship a prebuilt game binary, or if the
 Windows SDK download is replaced.
+
+## 2026-11-12: Short code and a list of open games
+
+The 2026-11-11 relay stays the meeting point. Both games send outbound
+UDP, so neither player forwards a port. The relay host is the reachable
+address, from `FUZION_RELAY` or the empty built-in constant.
+
+A one-byte Open stays a private unnamed session. A longer Open carries a
+public flag and a name. The server derives a 6 character code from the
+token. Resolve returns that token. List returns public games that have
+not started and were heard from in the last 20 seconds. The host
+heartbeats every 5 seconds. The F1 panel hosts, joins by code or from
+the list, and Play online restarts with `--lockstep`. No accounts.
+Plaintext. Steam stays out. The Windows relay client stays a stub.
+
+Reopen when the built-in host is set, or when outbound UDP is not enough.
+
+## 2026-11-12: Restart both games when the host starts
+
+The lobby was already simulating, so Start compared two different RAMs.
+The host's Start now sends Restart. The relay drops the seats and, when
+the same number have rejoined, sends the real Start. Each game relaunches
+and holds its first present until that notice. Save folders still have to
+match. `--instance 2` uses `hdd2`.
+
+Reopen if a restart leaves the two first presents on different frames.

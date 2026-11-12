@@ -1,13 +1,22 @@
-// Local UDP relay. The client cannot pick the session.
+// UDP relay. The client cannot pick the session.
 // One session holds four seats. The default cap is one session.
-// Type byte, then a 16 byte token where the packet has one:
-//   1 Open (empty) -> 4 Accept + token, or 5 Reject
+// Type byte, then a body:
+//   1 Open. Empty body: private, no name. Or flags, name length, name
+//        (16 bytes max). Flag bit 0 lists the game.
+//        -> 4 Accept + token, or 5 Reject
 //   2 Join + token -> 6 Joined + seat, or 5 Reject
 //   3 Data + token + payload -> payload only, to every other bound seat
 //   7 Roster + count + seat bytes, sent to every bound seat
 //   8 Start + token, host only -> 8 Start + mask, to every bound seat, or 5 Reject
+//   9 Resolve + 6 char code -> 4 Accept + token, or 5 Reject
+//  10 List -> 10 List + count + rows. A row is the code, the name length,
+//        the name, and the seat count.
+//  11 Heartbeat + token, host only. Refreshes the list time.
+//  12 Restart + token, host only. Seats drop and rejoin. The same count
+//      starts the match. Join may add a preferred seat byte.
 // The mask bit 0 is seat 1. After Start, Join is Reject.
 // A second endpoint for a seat is dropped.
+// CodeOf matches src/net/relay_client.cpp.
 #include <array>
 #include <chrono>
 #include <cstdint>
@@ -31,8 +40,16 @@ constexpr uint8_t kReject = 5;
 constexpr uint8_t kJoined = 6;
 constexpr uint8_t kRoster = 7;
 constexpr uint8_t kStart = 8;
+constexpr uint8_t kResolve = 9;
+constexpr uint8_t kList = 10;
+constexpr uint8_t kHeartbeat = 11;
+constexpr uint8_t kRestart = 12;
 constexpr int kToken = 16;
 constexpr int kSeats = 4;
+constexpr int kCodeLen = 6;
+constexpr int kNameLen = 16;
+constexpr int kPerAddr = 4;
+constexpr char kAlphabet[] = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
 
 using Token = std::array<uint8_t, kToken>;
 using Clock = std::chrono::steady_clock;
@@ -42,7 +59,12 @@ struct Session {
     bool have[kSeats]{};
     int count = 0;
     bool started = false;
+    bool listed = false;
+    bool restarting = false;
+    int expect = 0;
     uint8_t start_mask = 0;
+    char code[kCodeLen + 1]{};
+    char name[kNameLen + 1]{};
     Clock::time_point opened{};
     Clock::time_point last{};
 };
@@ -88,6 +110,40 @@ void Mint(Token& out) {
     }
 }
 
+void CodeOf(const Token& token, char out[kCodeLen + 1]) {
+    uint32_t v = (uint32_t(token[0]) << 24) | (uint32_t(token[1]) << 16) | (uint32_t(token[2]) << 8) | uint32_t(token[3]);
+    v >>= 2;
+    for (int i = 0; i < kCodeLen; i++) {
+        out[i] = kAlphabet[v & 31];
+        v >>= 5;
+    }
+    out[kCodeLen] = '\0';
+}
+
+bool CodeUsed(const std::map<Token, Session>& sessions, const char* code) {
+    for (const auto& it : sessions) {
+        if (std::memcmp(it.second.code, code, kCodeLen) == 0) return true;
+    }
+    return false;
+}
+
+int CountAddr(const std::map<Token, Session>& sessions, const sockaddr_in& who) {
+    int n = 0;
+    for (const auto& it : sessions) {
+        if (it.second.have[0] && it.second.seat[0].sin_addr.s_addr == who.sin_addr.s_addr) n++;
+    }
+    return n;
+}
+
+const Session* FindCode(const std::map<Token, Session>& sessions, const char* code, Token* token) {
+    for (const auto& it : sessions) {
+        if (std::memcmp(it.second.code, code, kCodeLen) != 0) continue;
+        if (token) *token = it.first;
+        return &it.second;
+    }
+    return nullptr;
+}
+
 void Sweep(std::map<Token, Session>& sessions, Clock::time_point now, std::chrono::seconds idle,
            std::chrono::seconds life) {
     for (auto it = sessions.begin(); it != sessions.end();) {
@@ -95,6 +151,48 @@ void Sweep(std::map<Token, Session>& sessions, Clock::time_point now, std::chron
         if (now - s.last >= idle || now - s.opened >= life) it = sessions.erase(it);
         else ++it;
     }
+}
+
+void SendList(int sock, const sockaddr_in& to, const std::map<Token, Session>& sessions, Clock::time_point now) {
+    uint8_t buf[1200];
+    buf[0] = kList;
+    int n = 2;
+    int count = 0;
+    const auto fresh = std::chrono::seconds(20);
+    for (const auto& it : sessions) {
+        const Session& s = it.second;
+        if (!s.listed || s.started || now - s.last >= fresh) continue;
+        int name_n = int(std::strlen(s.name));
+        int row = kCodeLen + 1 + name_n + 1;
+        if (n + row > int(sizeof buf) || count >= 32) break;
+        std::memcpy(buf + n, s.code, kCodeLen);
+        n += kCodeLen;
+        buf[n++] = uint8_t(name_n);
+        if (name_n > 0) std::memcpy(buf + n, s.name, size_t(name_n));
+        n += name_n;
+        buf[n++] = uint8_t(s.count);
+        count++;
+    }
+    buf[1] = uint8_t(count);
+    sendto(sock, buf, size_t(n), 0, reinterpret_cast<const sockaddr*>(&to), sizeof to);
+}
+
+bool TakeName(const uint8_t* buffer, int len, Session& session) {
+    if (len == 1) {
+        session.listed = false;
+        session.name[0] = '\0';
+        return true;
+    }
+    if (len < 3) return false;
+    int name_n = buffer[2];
+    if (name_n < 0 || name_n > kNameLen || len < 3 + name_n) return false;
+    session.listed = (buffer[1] & 1) != 0;
+    for (int i = 0; i < name_n; i++) {
+        unsigned char c = buffer[3 + i];
+        session.name[i] = (c >= 32 && c < 127) ? char(c) : '?';
+    }
+    session.name[name_n] = '\0';
+    return true;
 }
 
 }  // namespace
@@ -130,6 +228,21 @@ int main(int argc, char* argv[]) {
         return 1;
     }
 
+    // Port 0 asks the stack for a free port. Any other argument stays what the caller passed.
+    if (port == 0) {
+        sockaddr_in bound{};
+        socklen_t bound_len = sizeof bound;
+        if (getsockname(sock, reinterpret_cast<sockaddr*>(&bound), &bound_len) != 0) {
+            perror("getsockname");
+            return 1;
+        }
+        port = ntohs(bound.sin_port);
+        if (port <= 0 || port > 65535) {
+            std::cerr << "relay: bound port is not usable\n";
+            return 1;
+        }
+    }
+
     std::cout << "Relay listening on port " << port << " cap " << max_sessions << " idle " << idle_sec
               << "s life " << abs_sec << "s" << std::endl;
 
@@ -144,8 +257,18 @@ int main(int argc, char* argv[]) {
         Sweep(sessions, now, idle, life);
         const uint8_t type = buffer[0];
 
+        if (type == kList) {
+            SendList(sock, client, sessions, now);
+            continue;
+        }
+
         if (type == kOpen) {
-            if (int(sessions.size()) >= max_sessions) {
+            if (int(sessions.size()) >= max_sessions || CountAddr(sessions, client) >= kPerAddr) {
+                Reply(sock, client, kReject, nullptr, 0);
+                continue;
+            }
+            Session session;
+            if (!TakeName(buffer, int(len), session)) {
                 Reply(sock, client, kReject, nullptr, 0);
                 continue;
             }
@@ -153,7 +276,8 @@ int main(int argc, char* argv[]) {
             bool minted = false;
             for (int n = 0; n < 8; n++) {
                 Mint(token);
-                if (sessions.find(token) == sessions.end()) {
+                CodeOf(token, session.code);
+                if (sessions.find(token) == sessions.end() && !CodeUsed(sessions, session.code)) {
                     minted = true;
                     break;
                 }
@@ -162,7 +286,6 @@ int main(int argc, char* argv[]) {
                 Reply(sock, client, kReject, nullptr, 0);
                 continue;
             }
-            Session session;
             session.seat[0] = client;
             session.have[0] = true;
             session.count = 1;
@@ -174,6 +297,23 @@ int main(int argc, char* argv[]) {
             continue;
         }
 
+        if (type == kResolve) {
+            if (len != 1 + kCodeLen) {
+                Reply(sock, client, kReject, nullptr, 0);
+                continue;
+            }
+            char code[kCodeLen + 1];
+            std::memcpy(code, buffer + 1, kCodeLen);
+            code[kCodeLen] = '\0';
+            Token token{};
+            if (!FindCode(sessions, code, &token)) {
+                Reply(sock, client, kReject, nullptr, 0);
+                continue;
+            }
+            Reply(sock, client, kAccept, token.data(), kToken);
+            continue;
+        }
+
         if (len < 1 + kToken) {
             Reply(sock, client, kReject, nullptr, 0);
             continue;
@@ -182,17 +322,58 @@ int main(int argc, char* argv[]) {
         std::memcpy(token.data(), buffer + 1, kToken);
         auto it = sessions.find(token);
 
+        if (type == kHeartbeat) {
+            if (it == sessions.end() || FindSeat(it->second, client) != 0) continue;
+            it->second.last = now;
+            continue;
+        }
+
+        if (type == kRestart) {
+            if (it == sessions.end() || FindSeat(it->second, client) != 0 || it->second.started ||
+                it->second.restarting) {
+                Reply(sock, client, kReject, nullptr, 0);
+                continue;
+            }
+            sockaddr_in held[kSeats];
+            int held_n = 0;
+            int expect = it->second.count;
+            for (int i = 0; i < kSeats; i++) {
+                if (!it->second.have[i]) continue;
+                held[held_n++] = it->second.seat[i];
+                it->second.have[i] = false;
+            }
+            it->second.count = 0;
+            it->second.expect = expect;
+            it->second.restarting = true;
+            it->second.last = now;
+            uint8_t note = kRestart;
+            for (int i = 0; i < held_n; i++)
+                sendto(sock, &note, 1, 0, reinterpret_cast<sockaddr*>(&held[i]), sizeof held[i]);
+            continue;
+        }
+
         if (type == kJoin) {
             if (it == sessions.end() || it->second.started || it->second.count >= kSeats ||
                 FindSeat(it->second, client) >= 0) {
                 Reply(sock, client, kReject, nullptr, 0);
                 continue;
             }
+            if (it->second.restarting && it->second.count >= it->second.expect) {
+                Reply(sock, client, kReject, nullptr, 0);
+                continue;
+            }
             int slot = -1;
-            for (int i = 1; i < kSeats; i++) {
-                if (!it->second.have[i]) {
-                    slot = i;
-                    break;
+            if (it->second.restarting && len >= 1 + kToken + 1) {
+                int prefer = buffer[1 + kToken];
+                if (prefer >= 1 && prefer <= kSeats && !it->second.have[prefer - 1]) slot = prefer - 1;
+            }
+            int begin = it->second.restarting ? 0 : 1;
+            if (slot < 0) {
+                for (int i = begin; i < kSeats; i++) {
+                    if (!it->second.have[i]) {
+                        slot = i;
+                        break;
+                    }
                 }
             }
             if (slot < 0) {
@@ -206,6 +387,20 @@ int main(int argc, char* argv[]) {
             uint8_t seat = uint8_t(slot + 1);
             Reply(sock, client, kJoined, &seat, 1);
             SendRoster(sock, it->second);
+            if (it->second.restarting && it->second.count >= it->second.expect) {
+                uint8_t mask = 0;
+                for (int i = 0; i < kSeats; i++)
+                    if (it->second.have[i]) mask = uint8_t(mask | (1u << i));
+                it->second.started = true;
+                it->second.restarting = false;
+                it->second.start_mask = mask;
+                uint8_t buf[2] = {kStart, mask};
+                for (int i = 0; i < kSeats; i++) {
+                    if (!it->second.have[i]) continue;
+                    sendto(sock, buf, sizeof buf, 0, reinterpret_cast<sockaddr*>(&it->second.seat[i]),
+                           sizeof it->second.seat[i]);
+                }
+            }
             continue;
         }
 

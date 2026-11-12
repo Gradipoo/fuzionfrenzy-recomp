@@ -15,19 +15,45 @@ namespace net {
 class RelayClient final : public Datagram {
 public:
     static constexpr int kTokenLen = 16;
+    static constexpr int kCodeLen = 6;
+    static constexpr int kNameLen = 16;
     struct Config {
         std::string relay_host;
         uint16_t relay_port = 0;
+    };
+    struct OpenInfo {
+        bool listed = true;
+        char name[kNameLen + 1]{};
+    };
+    struct Game {
+        char code[kCodeLen + 1]{};
+        char name[kNameLen + 1]{};
+        int seats = 0;
     };
     explicit RelayClient(Config cfg);
     ~RelayClient() override;
     RelayClient(const RelayClient&) = delete;
     RelayClient& operator=(const RelayClient&) = delete;
+    // Private, no name. The code is derived from the token.
     bool Open(uint8_t token_out[kTokenLen]);
+    bool OpenMatch(const OpenInfo& info, uint8_t token_out[kTokenLen], char code_out[kCodeLen + 1]);
     // 1 nothing answered. 2 the relay said no. 0 after a success.
     int LastFail() const { return fail_; }
-    // Seat is 2, 3, or 4. The server assigns it.
-    bool Join(const uint8_t token[kTokenLen], int* seat);
+    // Seat is 1 through 4. prefer 0 lets the server choose. 1 through 4 asks for that seat.
+    bool Join(const uint8_t token[kTokenLen], int* seat, int prefer = 0);
+    bool SendRestart();
+    const char* Code() const { return code_; }
+    const std::string& Host() const { return host_; }
+    uint16_t Port() const { return port_; }
+    bool Restart() const { return restart_; }
+    bool Resolve(const char code[kCodeLen], uint8_t token_out[kTokenLen]);
+    bool Heartbeat();
+    // Own socket. -1 when nothing answered. 0 when the list is empty.
+    static int List(const char* host, uint16_t port, Game* out, int cap);
+    // FUZION_RELAY=host:port, otherwise the built-in host. False when neither is set.
+    static bool DefaultRelay(char* host, int host_n, uint16_t* port);
+    // Same six characters the relay mints. CodeOf in tools/relay_server.cpp matches this.
+    static void CodeOf(const uint8_t token[kTokenLen], char out[kCodeLen + 1]);
     // Host only. One datagram. The notice comes back through Collect.
     bool SendStart();
     // Read the socket. Roster and start notices update the getters. Lockstep payloads are kept.
@@ -45,6 +71,7 @@ private:
     bool RoundTrip(const uint8_t* pkt, int n, uint8_t expect, uint8_t* extra, int extra_n);
     void TakeRoster(const uint8_t* buf, int n);
     void TakeStart(const uint8_t* buf, int n);
+    void TakeRestart();
     int sock_ = -1;
     sockaddr_in relay_addr_{};
     uint8_t token_[kTokenLen]{};
@@ -55,6 +82,10 @@ private:
     int fail_ = 1;
     int start_mask_ = 0;
     bool started_ = false;
+    bool restart_ = false;
+    uint16_t port_ = 0;
+    std::string host_;
+    char code_[kCodeLen + 1]{};
 };
 
 // Host is seat 1. Join uses the seat the server assigned. The caller must not use the socket after this.
@@ -71,6 +102,15 @@ int RelayMask();
 bool RelayStarted();
 // Host only. Sends Start on the armed client. False when this process is not seat 1.
 bool RelayRequestStart();
+// Host only. Refreshes the list time on the armed client.
+bool RelayHeartbeat();
+// Host asked every seat to relaunch. The notice stays set.
+bool RelayWantsRestart();
+// Code and host:port saved when the seat was armed. False before that.
+bool RelayRejoinInfo(char* code, int code_n, char* relay, int relay_n);
+int RelaySeat();
+// Host only. Asks the relay to drop the seats and start again when they rejoin.
+bool RelayRequestRestart();
 
 }  // namespace net
 

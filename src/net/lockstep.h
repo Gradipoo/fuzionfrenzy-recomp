@@ -105,6 +105,7 @@ private:
     bool seen_[4] = {};
     bool opened_ = false;
     Fail sticky_ = Fail::None;
+    const char* sticky_why_ = nullptr;
     uint64_t sticky_frame_ = 0;
     uint64_t sticky_local_ = 0;
     uint64_t sticky_remote_ = 0;
