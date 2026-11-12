@@ -11,15 +11,129 @@ diff --git a/runtime/app/app.h	2026-11-12 09:37:05 b/runtime/app/app.h	2026-11-1
  struct Mode {
      uint32_t width, height;
  };
-diff --git a/runtime/app/main.cpp	2026-11-12 09:37:05 b/runtime/app/main.cpp	2026-11-12 09:37:05
---- a/runtime/app/main.cpp	2026-11-12 09:37:05
-+++ b/runtime/app/main.cpp	2026-11-12 09:40:09
-@@ -209,6 +209,8 @@
+diff --git a/runtime/app/main.cpp b/runtime/app/main.cpp
+index cd35475..f7d9502 100644
+--- a/runtime/app/main.cpp
++++ b/runtime/app/main.cpp
+@@ -9,6 +9,7 @@
+ #endif
+ #include <windows.h>
+ #include <dbghelp.h>
++#include <shellapi.h>
+ #include <timeapi.h>
+ 
+ #include <algorithm>
+@@ -17,13 +18,16 @@
+ #include <cstdlib>
+ #include <cstring>
+ #include <cwchar>
++#include <string>
+ #include <thread>
++#include <vector>
+ 
+ #include <imgui.h>
+ #include <backends/imgui_impl_win32.h>
+ 
+ #include "app/app.h"
+ #include "common/overlay.h"
++#include "common/play_online.h"
+ #include "det/clock.h"
+ #include "core/input.h"
+ #include "core/log.h"
+@@ -209,6 +213,96 @@ void PostRelay(int action, const char* addr, const char* link) {
      }
      overlay::RelayAction(action, addr ? addr : "", link ? link : "");
  }
 +
-+bool RestartOnline(const char*, const char*) { return false; }
++namespace {
++
++std::string WideToUtf8(const wchar_t* w) {
++    if (!w || !w[0]) return {};
++    int n = WideCharToMultiByte(CP_UTF8, 0, w, -1, nullptr, 0, nullptr, nullptr);
++    if (n <= 1) return {};
++    std::string s(static_cast<size_t>(n - 1), '\0');
++    if (WideCharToMultiByte(CP_UTF8, 0, w, -1, s.data(), n, nullptr, nullptr) <= 0) return {};
++    return s;
++}
++
++std::wstring Utf8ToWide(const char* s) {
++    if (!s || !s[0]) return {};
++    int n = MultiByteToWideChar(CP_UTF8, 0, s, -1, nullptr, 0);
++    if (n <= 1) return {};
++    std::wstring w(static_cast<size_t>(n - 1), L'\0');
++    if (MultiByteToWideChar(CP_UTF8, 0, s, -1, w.data(), n) <= 0) return {};
++    return w;
++}
++
++// CreateProcess parses the command line with the CommandLineToArgvW rules.
++std::wstring QuoteArg(const std::wstring& arg) {
++    if (!arg.empty() && arg.find_first_of(L" \t\n\v\"") == std::wstring::npos) return arg;
++    std::wstring out = L"\"";
++    size_t bs = 0;
++    for (size_t i = 0;; i++) {
++        if (i == arg.size()) {
++            out.append(bs * 2, L'\\');
++            break;
++        }
++        wchar_t c = arg[i];
++        if (c == L'\\') {
++            bs++;
++            continue;
++        }
++        out.append(c == L'"' ? bs * 2 + 1 : bs, L'\\');
++        bs = 0;
++        out.push_back(c);
++    }
++    out.push_back(L'"');
++    return out;
++}
++
++bool SpawnReplaced(const char* exe, char* const* argv, void*) {
++    std::wstring app = Utf8ToWide(exe);
++    if (app.empty() || !argv) return false;
++    std::wstring cmd;
++    for (int i = 0; argv[i]; i++) {
++        if (i) cmd.push_back(L' ');
++        cmd += QuoteArg(Utf8ToWide(argv[i]));
++    }
++    std::vector<wchar_t> buf(cmd.begin(), cmd.end());
++    buf.push_back(L'\0');
++    STARTUPINFOW si{};
++    si.cb = sizeof si;
++    PROCESS_INFORMATION pi{};
++    // NULL environment inherits this process, including FUZION_RELAY_CODE / FUZION_RELAY.
++    if (!CreateProcessW(app.c_str(), buf.data(), nullptr, nullptr, FALSE, 0, nullptr, nullptr, &si, &pi))
++        return false;
++    CloseHandle(pi.hThread);
++    CloseHandle(pi.hProcess);
++    ExitProcess(0);
++    return true;
++}
++
++}  // namespace
++
++bool RestartOnline(const char* code, const char* relay) {
++    std::wstring exe(32768, L'\0');
++    DWORD n = GetModuleFileNameW(nullptr, exe.data(), static_cast<DWORD>(exe.size()));
++    if (n == 0 || n >= exe.size()) return false;
++    exe.resize(n);
++    int argc = 0;
++    LPWSTR* wargv = CommandLineToArgvW(GetCommandLineW(), &argc);
++    if (!wargv || argc < 1) {
++        if (wargv) LocalFree(wargv);
++        return false;
++    }
++    std::string exe_utf8 = WideToUtf8(exe.c_str());
++    std::vector<std::string> owned;
++    owned.reserve(static_cast<size_t>(argc));
++    for (int i = 0; i < argc; i++) owned.push_back(WideToUtf8(wargv[i]));
++    LocalFree(wargv);
++    if (exe_utf8.empty()) return false;
++    std::vector<char*> argv;
++    argv.reserve(owned.size());
++    for (std::string& s : owned) argv.push_back(s.data());
++    return play::RestartOnline(code, relay, argc, argv.data(), exe_utf8.c_str(), SpawnReplaced, nullptr);
++}
  void OpenGameWindow(bool apply) { SendMessageW(g_hwnd, kOpenWindow, apply, 0); }
  
  void Pace() {
@@ -103,3 +217,16 @@ diff --git a/runtime/core/determinism.cpp	2026-11-12 09:37:05 b/runtime/core/det
      g_in_present = false;
      if (c.frames && next >= c.frames) {
          if (c.lockstep) LockstepFinish(frame);  // XBE_LOCKSTEP_NET
+diff --git a/cmake/XbeRecomp.cmake b/cmake/XbeRecomp.cmake
+index 43074e3..00f8d94 100644
+--- a/cmake/XbeRecomp.cmake
++++ b/cmake/XbeRecomp.cmake
+@@ -218,7 +218,7 @@ function(add_xbe_image target xbe config partitions game_dir)
+     target_compile_options(${target} PRIVATE -fno-strict-aliasing)
+     target_compile_definitions(${target} PRIVATE UNICODE _UNICODE _CRT_SECURE_NO_WARNINGS)
+     if(WIN32)
+-    target_link_libraries(${target} PRIVATE tomlplusplus::tomlplusplus $<LINK_ONLY:SDL3::SDL3-static> d3d12 dxgi dxguid d3dcompiler xaudio2 ole32 windowscodecs dbghelp winmm dwmapi ws2_32)
++    target_link_libraries(${target} PRIVATE tomlplusplus::tomlplusplus $<LINK_ONLY:SDL3::SDL3-static> d3d12 dxgi dxguid d3dcompiler xaudio2 ole32 shell32 windowscodecs dbghelp winmm dwmapi ws2_32)
+     else()
+     # SDL3 plain, not LINK_ONLY: the app layer (main_sdl, vulkan surface) needs its headers too.
+     # DXC is dlopen'd by gpu/spirv.cpp and so is never linked, only included.
