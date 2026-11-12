@@ -58,3 +58,15 @@ The hex is the 16 byte token (128 bits). The host gets Start after Open. The ser
 A firewall that blocks outbound UDP still stops the match. Both players still need the same width, height, and ultrawide. When those differ, the panel says the video settings do not match.
 
 Start does not begin the match in the games that have been sitting in the lobby. The host's Start sends Restart. Every seat relaunches with `--lockstep` and joins the same code again, asking for the seat it had. When that many seats are back, the relay sends Start. Each relaunched game holds its first present until that notice, so the wait itself does not move the simulation. The two save folders still have to match. `--instance 2` uses `hdd2`.
+
+## Host online
+
+On macOS and Linux, Host online sits beside Host. It starts `relay_server` from the same directory as the game, on port 0, with a cap of one session. It then asks the router to forward that UDP port. UPnP IGD is first: SSDP, then `GetExternalIPAddress` and `AddPortMapping`. NAT-PMP to the default gateway is second (version 0 on UDP port 5351). PCP (RFC 6887) is third, and only when that NAT-PMP request gets no reply. PCP is version 2 on the same port. There is no extra library.
+
+The address the router reports has to be a public IPv4 address. These are refused: `10/8`, `172.16/12`, `192.168/16`, `100.64/10`, loopback, `0/8`, link-local `169.254/16`, and multicast. The panel says internet play is not available, and the relay process is stopped. If the router does not open the port, the panel says the router did not open the port, and no relay is left running.
+
+The host opens the match on `127.0.0.1`. That is the address saved for the Start relaunch, so the host does not depend on hairpin NAT. The copied link is `ff1:<public-ip>:<mapped-port>:<32 hex>`. There is no shared list for this path. The other player pastes that whole link. A short code still only works for someone already pointed at the same relay.
+
+Host does not start a relay. Same-machine play still uses a relay you started yourself, usually `127.0.0.1:9999`.
+
+The relay process and the mapping outlive Start. `execv` keeps the child and the environment, and the game exits with `_Exit`, which does not run `atexit`. A small `relay_guard` beside the game watches the host pid and removes the mapping when that pid is gone. A PCP mapping is removed with a MAP request whose lifetime is 0. The relaunched game refreshes the lease (one hour, renewed while that process is up). That lease is also the fallback if the delete packet is lost. A hard crash can leave the mapping until the lease ends. Windows has no Host online button. The relay client there is still a stub.

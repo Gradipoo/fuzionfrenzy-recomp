@@ -466,3 +466,17 @@ and holds its first present until that notice. Save folders still have to
 match. `--instance 2` uses `hdd2`.
 
 Reopen if a restart leaves the two first presents on different frames.
+
+## 2026-11-12: The host can start the relay
+
+Host online, on macOS and Linux, spawns `relay_server` beside the game on port 0, asks the router to map that UDP port (UPnP IGD, then NAT-PMP), and copies `ff1:<public-ip>:<port>:<32 hex>`. The host's own Open uses `127.0.0.1` so the Start relaunch does not need hairpin NAT. A private or CGNAT address (`10/8`, `172.16/12`, `192.168/16`, `100.64/10`, loopback) stops the relay and the panel says internet play is not available. If the router does not open the port, the panel says so and no relay is left running. Host against a relay you started yourself, including `127.0.0.1:9999`, does not start one. There is no shared game list on this path. The other player pastes the full link. Windows stays a stub.
+
+The process exits through `std::_Exit`, which skips `atexit`, and `execv` keeps children and the environment. `relay_guard` watches the host pid and removes the mapping when that pid is gone. The environment still carries the pid and the mapping so the relaunched image can refresh the lease.
+
+Reopen when a public relay hostname is chosen, or when a router the host uses cannot map a UDP port and a relay elsewhere should be the fallback.
+
+## 2026-11-12: PCP when UPnP and NAT-PMP are silent
+
+America/Los_Angeles. Host online tries PCP (RFC 6887, version 2 on UDP 5351) only after UPnP IGD fails and NAT-PMP (version 0 on that same port) gets no reply. A PCP MAP uses the external address and mapped port the same way. A loopback, private, link-local, multicast, or CGNAT address (`10/8`, `172.16/12`, `192.168/16`, `100.64/10`) still stops the relay. The guard deletes that mapping with a MAP lifetime of 0. The one hour lease, renewed while the host is up, is the fallback if the delete is lost.
+
+Reopen if a delete with lifetime 0 leaves the port open, or if a router that speaks PCP needs a different external address encoding than an IPv4-mapped address.

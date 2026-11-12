@@ -161,6 +161,18 @@ add_xbe_image(FuzionFrenzy default.xbe game.toml ${GAME_PARTITIONS} game)
 if(APPLE)
     set_target_properties(FuzionFrenzy PROPERTIES OUTPUT_NAME RingHost)
 endif()
+# Host online spawns these from the same directory as the game. Windows has no relay client.
+if(NOT WIN32)
+    add_executable(relay_server tools/relay_server.cpp)
+    add_executable(relay_guard tools/relay_guard.cpp src/net/port_map.cpp)
+    target_include_directories(relay_guard PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
+    target_compile_features(relay_server PRIVATE cxx_std_20)
+    target_compile_features(relay_guard PRIVATE cxx_std_20)
+    if(NOT APPLE)
+        target_link_libraries(relay_guard PRIVATE pthread)
+    endif()
+    add_dependencies(FuzionFrenzy relay_server relay_guard)
+endif()
 # Guest floating point has to match across arm64 and x86-64. No FMA contraction,
 # no fast-math, and no 80-bit x87 evaluation of float or double. clang-cl still
 # contracts under /fp:precise, so it gets the clang flag as well. GCC 16
