@@ -78,11 +78,7 @@ static int RunOne(const fs::path& exe, const Scene& scene, const fs::path& snap,
     char* argv[] = {file.data(), nullptr};
     posix_spawn_file_actions_t actions;
     posix_spawn_file_actions_init(&actions);
-#if defined(__APPLE__)
-    posix_spawn_file_actions_addchdir(&actions, exe.parent_path().c_str());
-#else
     posix_spawn_file_actions_addchdir_np(&actions, exe.parent_path().c_str());
-#endif
     pid_t pid = 0;
     auto t0 = std::chrono::steady_clock::now();
     int rc = posix_spawn(&pid, file.c_str(), &actions, nullptr, argv, envp.data());
