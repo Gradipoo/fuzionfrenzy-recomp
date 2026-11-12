@@ -1,0 +1,77 @@
+diff --git a/runtime/gpu/shaders.cpp b/runtime/gpu/shaders.cpp
+index 274ab60..968e538 100644
+--- a/runtime/gpu/shaders.cpp
++++ b/runtime/gpu/shaders.cpp
+@@ -205,6 +205,7 @@ std::string VsInputs(uint16_t regs, uint64_t decode) {
+             case kDecodeIntW1: body += F("    i.v%d = float4(float3(ri.v%d.xyz), 1);\n", r, r); break;
+             case kDecodePacked: body += F("    i.v%d = UnpackNp3(ri.v%d);\n", r, r); break;
+             case kDecodeFloat2H: body += F("    i.v%d = float4(ri.v%d.xy, 0, ri.v%d.z);\n", r, r, r); break;
++            case kDecodeFloat2: body += F("    i.v%d = float4(ri.v%d.xy, 0, 1);\n", r, r); break;
+             default: body += F("    i.v%d = ri.v%d;\n", r, r); break;
+         }
+     }
+@@ -420,8 +421,8 @@ std::string TexFetch(const PixelKey& k, int i) {
+     switch (mode) {
+         // PS_TEXTUREMODES: 1 project2d, 2 project3d, 3 cubemap, 4 passthru, 5 clipplane, 6 and 7 bumpenvmap, 9 dot_st, 0xA dot_zw, 0xD dot_str_3d, 0xE dot_str_cube, 0xF dpndnt_ar, 0x10 dpndnt_gb, 0x11 dotproduct
+         case 0: return put("float4(0,0,0,1)");
+-        case 1: return t.shadow ? depth("0") : put(sample2(F("%s.xy / %s.w", q, q)));
+-        case 2: return t.shadow ? depth(F("%s.z / %s.w", q, q)) : put(sample3(F("%s.xyz / %s.w", q, q)));
++        case 1: return t.shadow ? depth("0") : put(sample2(F("projuv(%s)", q)));
++        case 2: return t.shadow ? depth(F("%s.z / %s.w", q, q)) : put(sample3(F("projuvw(%s)", q)));
+         case 3: return put(sample3(tc + ".xyz"));
+         case 4: return put(tc);
+         case 5:  // clip plane: a set compare_mode bit kills at >= 0, a clear one below 0
+@@ -472,6 +473,10 @@ const char* kPsTail = R"(float4 spreadtap(Texture2D t, SamplerState s, float2 uv
+ // sprite would otherwise blend the texels past its rect (the neighbouring glyph in a font atlas),
+ // which the console never sees because its edge pixels sample the rect's edge texel centres exactly
+ float2 uvclamp(float2 uv, float4 r) { return r.z > r.x && r.w > r.y ? clamp(uv, r.xy, r.zw) : uv; }
++// a vertex program's q of 0 is not a projection: dividing sends every texel to infinity,
++// and a border sample of that is a flat colour (the white characters on Twisted System)
++float2 projuv(float4 tc) { return tc.w != 0 ? tc.xy / tc.w : tc.xy; }
++float3 projuvw(float4 tc) { return tc.w != 0 ? tc.xyz / tc.w : tc.xyz; }
+ void alphatest(float a) {
+     int f = (int)misc.y;
+     int v = (int)round(a * 255), r = (int)misc.x;
+@@ -858,8 +863,15 @@ std::string PixelHlsl(const PixelKey& k) {
+             const uint32_t* f = k.ff[i];
+             if (f[0] <= 1) break;
+             const TexInfo& t = k.tex[i];
++            // No texture on this stage is sampled as opaque white. BLENDTEXTUREALPHA
++            // lerps with that alpha of 1, so the result is Arg1. The in-round Twisted
++            // System characters set Arg1 to this texture and the alpha op to SELECTARG1,
++            // so a colored stage-0 texel was replaced with flat white. Skip the stage
++            // when Arg1 is that sample. Leave the raw op alone: Cxbx remaps 14 to
++            // BLENDFACTORALPHA on XDK <=3948, and that would miss this skip.
++            if (!t.kind && f[0] == 14 && (f[1] & 0x1F) == 2) continue;
+             std::string norm = (t.rect ? F(" / texsize[%d].xy", i) : "") + F(" + texsize[%d].zw", i);
+-            std::string uv = (k.proj >> i) & 1 ? F("(tc%d.xy / tc%d.w)%s", i, i, norm.c_str()) : F("tc%d.xy%s", i, norm.c_str());
++            std::string uv = (k.proj >> i) & 1 ? F("projuv(tc%d)%s", i, norm.c_str()) : F("tc%d.xy%s", i, norm.c_str());
+             std::string cube;
+             if (t.shadow)
+                 body += F("float4 t%d = shadow(tex%d, smp%d, (tc%d.xy / tc%d.w)%s, tc%d.z / tc%d.w, %d, i.pos.xy, texsize[%d].xy);\n", i, i,
+@@ -873,8 +885,23 @@ std::string PixelHlsl(const PixelKey& k) {
+             body += Hooks().Fetched(t, i);
+             if ((k.alphakill >> i) & 1) body += F("if (t%d.a == 0) discard;\n", i);
+             const char* dst = f[8] == 5 ? "tmp" : "cur";
+-            std::string rgb = FfOp(f[0], FfArg(f[1], i, false), FfArg(f[2], i, false), FfArg(f[3], i, false), i, false);
+-            std::string a = f[4] <= 1 ? std::string("cur.a") : FfOp(f[4], FfArg(f[5], i, true), FfArg(f[6], i, true), FfArg(f[7], i, true), i, true);
++            // MODULATE2X is the shared stage on the white Twisted System characters and level
++            // meshes: arg order is texture * current, and the lit diffuse is 0.74 (vertex color
++            // 0.5 times ambient 0.5 plus a white light). Scaling the product by 2 then clamping
++            // turns every texel above about 0.67 white. The x2 exists to undo that 0.5 bias, so
++            // saturate the scaled color first and then multiply by the texel. A neutral 0.5 is
++            // unchanged. Two textures, or no texture, keep the product-then-scale order.
++            auto bias2x = [&](uint32_t argA, uint32_t argB, bool alpha) {
++                bool ta = (argA & 0xF) == 2, tb = (argB & 0xF) == 2;
++                if (ta == tb) return std::string();
++                const std::string ea = FfArg(argA, i, alpha), eb = FfArg(argB, i, alpha);
++                return ta ? ea + " * saturate(" + eb + " * 2)" : eb + " * saturate(" + ea + " * 2)";
++            };
++            std::string rgb = f[0] == 5 ? bias2x(f[1], f[2], false) : std::string();
++            if (rgb.empty()) rgb = FfOp(f[0], FfArg(f[1], i, false), FfArg(f[2], i, false), FfArg(f[3], i, false), i, false);
++            std::string a = f[4] == 5 ? bias2x(f[5], f[6], true) : std::string();
++            if (f[4] <= 1) a = "cur.a";
++            else if (a.empty()) a = FfOp(f[4], FfArg(f[5], i, true), FfArg(f[6], i, true), FfArg(f[7], i, true), i, true);
+             body += F("{ float3 c3 = saturate(%s); float c1 = saturate(%s); %s = float4(c3, c1); }\n", rgb.c_str(), a.c_str(), dst);
+         }
+         body += "cur.rgb = saturate(cur.rgb + v1.rgb);\n";
