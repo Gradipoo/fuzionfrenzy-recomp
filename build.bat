@@ -80,24 +80,20 @@ set "PATH=%TB%;%PATH%"
 for /f "tokens=*" %%v in ('clang-cl --version ^| findstr /i version') do echo       %%v
 
 echo [2/3] XDK symbols
+rem Forward slashes. CMake parses \U in a quoted string as an escape.
+set "TC=%RINGHOST_TOOLCHAIN:\=/%"
+set "TF=%~dp0cmake\windows-player.cmake"
+set "TF=%TF:\=/%"
 set PREFIX_ARG=
-if exist "%RINGHOST_TOOLCHAIN%\prefix\." set PREFIX_ARG=-DCMAKE_PREFIX_PATH="%RINGHOST_TOOLCHAIN%\prefix"
+if exist "%RINGHOST_TOOLCHAIN%\prefix\." set PREFIX_ARG=-DCMAKE_PREFIX_PATH="%TC%/prefix"
 "%TB%\cmake.exe" -S . -B out\build\release -G Ninja -DCMAKE_BUILD_TYPE=Release ^
-  -DCMAKE_C_COMPILER="%TB%\clang-cl.exe" ^
-  -DCMAKE_CXX_COMPILER="%TB%\clang-cl.exe" ^
-  -DCMAKE_LINKER="%TB%\lld-link.exe" ^
-  -DCMAKE_AR="%TB%\llvm-lib.exe" ^
-  -DCMAKE_RC_COMPILER="%TB%\llvm-rc.exe" ^
-  -DCMAKE_MT="%TB%\llvm-mt.exe" ^
-  -DCMAKE_C_FLAGS="/winsysroot \"%RINGHOST_WINSDK%\" -march=x86-64-v2" ^
-  -DCMAKE_CXX_FLAGS="/winsysroot \"%RINGHOST_WINSDK%\" -march=x86-64-v2" ^
-  -DCMAKE_EXE_LINKER_FLAGS="/winsysroot:\"%RINGHOST_WINSDK%\"" ^
+  -DCMAKE_TOOLCHAIN_FILE="%TF%" ^
   -DFETCHCONTENT_FULLY_DISCONNECTED=ON ^
-  -DFETCHCONTENT_SOURCE_DIR_SDL3="%RINGHOST_TOOLCHAIN%\third_party\SDL" ^
-  -DFETCHCONTENT_SOURCE_DIR_IMGUI="%RINGHOST_TOOLCHAIN%\third_party\imgui" ^
-  -DFETCHCONTENT_SOURCE_DIR_ZYDIS="%RINGHOST_TOOLCHAIN%\third_party\zydis" ^
-  -DFETCHCONTENT_SOURCE_DIR_TOMLPLUSPLUS="%RINGHOST_TOOLCHAIN%\third_party\tomlplusplus" ^
-  %PREFIX_ARG% >nul || goto :fail
+  -DFETCHCONTENT_SOURCE_DIR_SDL3="%TC%/third_party/SDL" ^
+  -DFETCHCONTENT_SOURCE_DIR_IMGUI="%TC%/third_party/imgui" ^
+  -DFETCHCONTENT_SOURCE_DIR_ZYDIS="%TC%/third_party/zydis" ^
+  -DFETCHCONTENT_SOURCE_DIR_TOMLPLUSPLUS="%TC%/third_party/tomlplusplus" ^
+  %PREFIX_ARG% || goto :fail
 
 :afterconfig
 findstr /b /l /c:"[symbols]" config\game.toml >nul 2>nul && echo       config\game.toml already written && goto :game
