@@ -78,7 +78,12 @@ git -C "$ROOT/sdk" archive --format=tar HEAD | tar -C "$STAGE/port/sdk" -xf -
 chmod +x "$STAGE/port/build.sh" "$STAGE/port/tools/apply-macos-sdk.sh" 2>/dev/null || true
 # The pin archive has no .git. Apply lockstep here, while this machine has
 # git and cmake. The script's REPO is the staged port, not this checkout.
+# The stage sits inside this work tree. Without its own repo, git apply
+# uses the parent checkout, skips the snapshot patch, and the relay UI
+# patch then fails. The temporary repo is not shipped.
+git -C "$STAGE/port/sdk" init -q
 cmake -P "$STAGE/port/tools/apply-lockstep.cmake"
+rm -rf "$STAGE/port/sdk/.git"
 
 if find "$STAGE/port" \( \
         -name '*.xbe' -o -name '*.iso' -o -name '*.xiso' -o \
