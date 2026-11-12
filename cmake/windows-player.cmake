@@ -9,6 +9,9 @@ file(TO_CMAKE_PATH "$ENV{RINGHOST_WINSDK}" _sdk)
 if(NOT IS_DIRECTORY "${_sdk}/VC/Tools/MSVC" OR NOT IS_DIRECTORY "${_sdk}/Windows Kits/10/Lib")
     message(FATAL_ERROR "RINGHOST_WINSDK is not an xwin splat (${_sdk})")
 endif()
+# xwin ships the release CRT only. CMake's compiler test defaults to Debug and
+# then looks for msvcrtd.lib, which is not in the splat.
+set(CMAKE_TRY_COMPILE_CONFIGURATION Release)
 
 set(CMAKE_C_COMPILER "${_tc}/bin/clang-cl.exe")
 set(CMAKE_CXX_COMPILER "${_tc}/bin/clang-cl.exe")
